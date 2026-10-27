@@ -1812,46 +1812,42 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
 
   // 2) Watcher de GraphQL só como sinal — nunca valida sucesso antes do dwell
   const gql = setupGraphqlPublishWatcher(page);
-  const mobilePublish = require('./mobilePublishProxy');
-  const existingGate = mobilePublish.currentCreation(page);
-  const mobileGate = existingGate || await mobilePublish.openForPublish(page, nome);
-  if (mobileGate.required && mobileGate.ok !== true) {
-    gql.cleanup && gql.cleanup();
-    return {
-      ok: false,
-      reason: 'proxy_mobile_unavailable',
-      proxyRequired: true,
-      proxySent: false,
-      attempts: mobileGate.attempts || 0
-    };
-  }
-
-  // 2. TROQUE O BLOCO CRÍTICO DE publishAndWatch PARA USO DO LAÇO EXATO:
+  const rail = page.browser && page.browser().__ctRobeRail;
   stepLog.appendJSONL(nome, 'robe', { step: 'exact_btn_flow_start' });
   let flowRes;
+  let proved = null;
   try {
-    if (mobileGate.required && mobileGate.arm) {
-      await mobileGate.arm();
-      if (!existingGate) stepLog.appendJSONL(nome, 'robe', { step: 'proxy_buttons_armed' });
+    if (rail) {
+      proved = await rail.armAndProve(page);
+      if (!proved || proved.ok !== true) {
+        gql.cleanup && gql.cleanup();
+        return {
+          ok: false,
+          reason: 'proxy_mobile_unavailable',
+          proxyRequired: true,
+          proxySent: false,
+          attempts: proved && proved.attempts || 0
+        };
+      }
     }
-    flowRes = await clickFlowExactRetry(page, nome, {
-      maxSteps: 24,
-      publishMaxRetries: 3,
-      onBeforePublish: mobileGate.required ? async () => {
-        if (mobileGate.markPublishClick) mobileGate.markPublishClick();
-      } : null
-    });
+    flowRes = await clickFlowExactRetry(page, nome, { maxSteps: 24, publishMaxRetries: 3 });
   } finally {
-    if (existingGate) {
-      try { await mobilePublish.endCreation(page); } catch {}
-    } else {
-      try { if (mobileGate.close) await mobileGate.close(); } catch {}
+    if (rail && rail.backToDirect) {
+      try { await rail.backToDirect(); } catch {}
     }
   }
-  stepLog.appendJSONL(nome, 'robe', { step: 'exact_btn_flow_end', sequence: flowRes.sequence, publishClicked: flowRes.publishClicked, proxySent: mobileGate.sent() });
-  if (mobileGate.required && flowRes.publishClicked && mobileGate.sent() !== true) {
+  const proxySent = !!(rail && proved && proved.ok === true && flowRes && flowRes.publishClicked);
+  stepLog.appendJSONL(nome, 'robe', {
+    step: 'exact_btn_flow_end',
+    sequence: flowRes.sequence,
+    publishClicked: flowRes.publishClicked,
+    proxySent,
+    asn: proved && proved.asn || null,
+    ip: proved && proved.ip || null
+  });
+  if (rail && flowRes.publishClicked && proxySent !== true) {
     gql.cleanup && gql.cleanup();
-    return { ok: false, reason: 'proxy_publish_blocked', proxyRequired: true, proxySent: false, attempts: mobileGate.attempts || 0 };
+    return { ok: false, reason: 'proxy_publish_blocked', proxyRequired: true, proxySent: false, attempts: proved && proved.attempts || 0 };
   }
 
   if (!flowRes.sequence.length) {
@@ -2297,6 +2293,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   let preserveCreatePageForHuman = false;
   let marketplaceDisabledAbort = false;
   let page = null;
+  let robeRailHandle = null;
   let published = false;
   let postFlowStarted = false;
   let sawBeforeUnloadDialog = false;
@@ -2373,6 +2370,16 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     }
 
     // Nova aba + patchPage (sem minimizar/off-screen)
+    if (require('./mobilePublishProxy').readSettings().enabled === true) {
+      try {
+        robeRailHandle = await require('./robeRail').openRobeRail({ nome, cookies: manifest.cookies });
+        browser = robeRailHandle.browser;
+      } catch (e) {
+        const err = new Error('proxy_mobile_unavailable');
+        err.PROXY_PUBLISH = true;
+        throw err;
+      }
+    }
     const coords = resolvePatchCoordsForProfile(nome, manifest || {});
     postFlowStarted = true;
     page = await openCreateItemPageRobust(browser, nome, coords, attId);
@@ -2616,13 +2623,6 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       neighborhoodName: postingLocationScope ? postingLocationScope.neighborhoodName : null
     });
     await waitBeforeComposeAction(composePlan, 'before_location', { nome, attId });
-    const creationGate = await mobilePublish.beginCreation(page, nome);
-    if (creationGate.required && creationGate.ok !== true) {
-      const err = new Error('proxy_mobile_unavailable');
-      err.PROXY_PUBLISH = true;
-      throw err;
-    }
-    if (creationGate.required) stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'proxy_location_armed' });
     localUsada = await preencherLocalizacao(page, cidadePerfil, postingLocationScope);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'location_ok', value: localUsada });
     await sleep(jitter(120, 220));
@@ -2946,6 +2946,10 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     return { ok: false, error: errMsg, chromeSick: (e && e.CHROME_SICK === true) || isChromeProtocolSickError(errMsg), log: stepLogArr };
 
   } finally {
+    if (robeRailHandle) {
+      try { await robeRailHandle.destroy(); } catch {}
+      robeRailHandle = null;
+    }
     // ABORTO ABSOLUTO: Não executa nada pós-fluxo ao detectar limit_posting
     if (limitPostingHit) {
       try { if (page) await safeClosePage(page, { nome, reason: 'limit_posting_vehicle' }); } catch {}

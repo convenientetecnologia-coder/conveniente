@@ -755,11 +755,24 @@ async function endCreation(page) {
   try { await opened.close(); } catch {}
 }
 
+function upstreamFor(sessid) {
+  const cfg = readSettings();
+  return {
+    host: HOST,
+    port: PORT,
+    user: authUser(cfg.user, sessid),
+    pass: cfg.password
+  };
+}
+
 module.exports = {
   classifyPublishRequest,
   isPublishMarked,
   acceptExit,
   operationName,
+  readSettings,
+  acquireExit,
+  upstreamFor,
   isPhotoUploadUrl,
   bodyHasImage,
   photoCarriesFile,
