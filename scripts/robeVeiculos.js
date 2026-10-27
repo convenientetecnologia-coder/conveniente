@@ -2582,13 +2582,6 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     try { photoStatus = photoRes && typeof photoRes.status === 'function' ? photoRes.status() : null; } catch {}
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'photo_wifi_done', status: photoStatus, timedOut: !photoRes });
     await sleep(jitter(250, 450));
-    const creationGate = await mobilePublish.beginCreation(page, nome);
-    if (creationGate.required && creationGate.ok !== true) {
-      const err = new Error('proxy_mobile_unavailable');
-      err.PROXY_PUBLISH = true;
-      throw err;
-    }
-    if (creationGate.required) stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'proxy_form_armed' });
 
     // CAMPOS DE VEÍCULO
     // Tipo de veículo: "Outro"
@@ -2623,6 +2616,13 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       neighborhoodName: postingLocationScope ? postingLocationScope.neighborhoodName : null
     });
     await waitBeforeComposeAction(composePlan, 'before_location', { nome, attId });
+    const creationGate = await mobilePublish.beginCreation(page, nome);
+    if (creationGate.required && creationGate.ok !== true) {
+      const err = new Error('proxy_mobile_unavailable');
+      err.PROXY_PUBLISH = true;
+      throw err;
+    }
+    if (creationGate.required) stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'proxy_location_armed' });
     localUsada = await preencherLocalizacao(page, cidadePerfil, postingLocationScope);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'location_ok', value: localUsada });
     await sleep(jitter(120, 220));
