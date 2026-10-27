@@ -6647,18 +6647,27 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     } catch {}
     return true;
   }
+  function targetUrl(t) {
+    try { return String((t && typeof t.url === "function" ? t.url() : "") || ""); } catch { return ""; }
+  }
+  function pageTargets() {
+    const targets = (typeof browser.targets === "function" ? browser.targets() : []) || [];
+    return targets.filter((t) => {
+      try {
+        if (!t || typeof t.type !== "function") return false;
+        if (t.type() === "page") return true;
+        return /facebook\.com|messenger\.com/i.test(targetUrl(t));
+      } catch { return false; }
+    });
+  }
   async function listVirtusPages() {
     const fromTargets = async () => {
-      const targets = (typeof browser.targets === "function" ? browser.targets() : []) || [];
-      const pageTargets = targets.filter((t) => {
-        try { return t && typeof t.type === "function" && t.type() === "page"; } catch { return false; }
-      });
       const out = [];
-      for (const t of pageTargets) {
+      for (const t of pageTargets()) {
         try {
           const p = await Promise.race([
             t.page(),
-            new Promise((r) => setTimeout(() => r(null), 1500))
+            new Promise((r) => setTimeout(() => r(null), 800))
           ]);
           if (virtusPageLive(p)) out.push(p);
         } catch {}
@@ -6666,14 +6675,14 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       return out;
     };
     let last = [];
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < 6; i++) {
       last = await fromTargets();
       if (!last.length) {
         const listed = await browser.pages().catch(() => []);
         last = (listed || []).filter(virtusPageLive);
       }
       if (last.length) return last;
-      await new Promise((r) => setTimeout(r, 400));
+      await new Promise((r) => setTimeout(r, 300));
     }
     return last;
   }
@@ -6708,10 +6717,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     }
   }
   if (!page) {
-    if (typeof newPageDaConta !== "function") throw new Error("virtusDelta_boot_no_gate");
-    if (!bootNome) throw new Error("virtusDelta_boot_no_nome");
-    page = await newPageDaConta(browser, bootNome, { source: "virtusDelta_boot" });
-    try { page.__ctVirtusBootCreated = true; } catch (_) {}
+    page = (await listVirtusPages())[0] || null;
+  }
+  if (!page) {
+    try { logInfo(`[virtusDelta][boot] no_new_tab nome=${bootNome || ""} pages=${pages.length}`); } catch (_) {}
+    return { ok: false, engine: "delta", stop: async () => {} };
   } else {
     if (!bootNome) throw new Error("virtusDelta_boot_no_nome");
     if (typeof blindarPaginaDaConta !== "function") throw new Error("virtusDelta_boot_no_gate");
