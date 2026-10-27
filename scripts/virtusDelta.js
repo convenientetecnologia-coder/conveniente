@@ -6648,21 +6648,40 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     return true;
   }
   async function listVirtusPages() {
+    const fromTargets = async () => {
+      const targets = (typeof browser.targets === "function" ? browser.targets() : []) || [];
+      const pageTargets = targets.filter((t) => {
+        try { return t && typeof t.type === "function" && t.type() === "page"; } catch { return false; }
+      });
+      const out = [];
+      for (const t of pageTargets) {
+        try {
+          const p = await Promise.race([
+            t.page(),
+            new Promise((r) => setTimeout(() => r(null), 1500))
+          ]);
+          if (virtusPageLive(p)) out.push(p);
+        } catch {}
+      }
+      return out;
+    };
     let last = [];
-    for (let i = 0; i < 10; i++) {
-      const listed = await browser.pages().catch(() => []);
-      last = (listed || []).filter(virtusPageLive);
+    for (let i = 0; i < 8; i++) {
+      last = await fromTargets();
+      if (!last.length) {
+        const listed = await browser.pages().catch(() => []);
+        last = (listed || []).filter(virtusPageLive);
+      }
       if (last.length) return last;
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 400));
     }
     return last;
   }
   async function keepOldestMessagesPage(prefer) {
     const open = (await browser.pages().catch(() => [])).filter(virtusPageLive);
     const messages = open.filter((p) => /facebook\.com\/messages/i.test(virtusPageUrl(p)));
-    const keep = (prefer && messages.includes(prefer) && messages[0] === prefer)
-      ? prefer
-      : (messages[0] || (prefer && open.includes(prefer) ? prefer : null) || open[0] || null);
+    const real = messages.find((p) => p.__ctVirtusBootCreated !== true) || null;
+    const keep = real || messages[0] || (prefer && open.includes(prefer) ? prefer : null) || open[0] || null;
     for (const extra of open) {
       if (!extra || extra === keep) continue;
       const url = virtusPageUrl(extra);
@@ -6677,9 +6696,22 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   if (!page && pages.length) page = pages[0] || null;
   const bootNome = String(nome || ACCOUNT_LOGIN || "").trim();
   if (!page) {
+    const again = await listVirtusPages();
+    page = again.find((p) => /facebook\.com\/messages/i.test(virtusPageUrl(p))) || again[0] || null;
+  }
+  if (!page) {
+    const hasTarget = ((typeof browser.targets === "function" ? browser.targets() : []) || []).some((t) => {
+      try { return t && typeof t.type === "function" && t.type() === "page"; } catch { return false; }
+    });
+    if (hasTarget) {
+      page = (await listVirtusPages())[0] || null;
+    }
+  }
+  if (!page) {
     if (typeof newPageDaConta !== "function") throw new Error("virtusDelta_boot_no_gate");
     if (!bootNome) throw new Error("virtusDelta_boot_no_nome");
     page = await newPageDaConta(browser, bootNome, { source: "virtusDelta_boot" });
+    try { page.__ctVirtusBootCreated = true; } catch (_) {}
   } else {
     if (!bootNome) throw new Error("virtusDelta_boot_no_nome");
     if (typeof blindarPaginaDaConta !== "function") throw new Error("virtusDelta_boot_no_gate");
