@@ -4363,20 +4363,18 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
   let flowRes;
   let proved = null;
   try {
-    if (rail) {
-      proved = await rail.armAndProve(page);
-      if (!proved || proved.ok !== true) {
-        gql.cleanup && gql.cleanup();
-        return {
-          ok: false,
-          reason: 'proxy_mobile_unavailable',
-          proxyRequired: true,
-          proxySent: false,
-          attempts: proved && proved.attempts || 0
-        };
-      }
-    }
-    flowRes = await clickFlowExactRetry(page, nome, { maxSteps: 24, publishMaxRetries: 3 });
+    flowRes = await clickFlowExactRetry(page, nome, {
+      maxSteps: 24,
+      publishMaxRetries: 3,
+      onBeforePublish: rail ? async () => {
+        proved = await rail.armAndProve(page);
+        if (!proved || proved.ok !== true) {
+          const err = new Error('proxy_mobile_unavailable');
+          err.PROXY_PUBLISH = true;
+          throw err;
+        }
+      } : null
+    });
   } finally {
     if (rail && rail.backToDirect) {
       try { await rail.backToDirect(); } catch {}
