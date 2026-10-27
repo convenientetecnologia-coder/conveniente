@@ -11,7 +11,6 @@ const HOST = 'pr.oxylabs.io';
 const PORT = 7777;
 const ASN = '22085';
 const MAX_ATTEMPTS = 5;
-const gates = new WeakMap();
 
 function readSettings() {
   let robe = {};
@@ -42,14 +41,16 @@ function headerText(headers) {
   }).join('\n');
 }
 
-function classifyPublishRequest({ method, url, postData, headers }) {
+function isFacebookHost(url) {
+  return /facebook\.com|fbcdn\.net|fb\.com|facebook\.net/i.test(String(url || ''));
+}
+
+function classifyPublishRequest({ method, url, postData, headers, publishCaptured }) {
   const verb = String(method || '').toUpperCase();
   const target = String(url || '');
-  const body = String(postData || '');
-  if (!/\/api\/graphql|ajax\/bulk/i.test(target)) return 'ignore';
-  if (verb !== 'POST') return 'wifi';
-  const op = operationName(body) || operationName(headerText(headers));
-  if (/Query/i.test(op) && !/Mutation/i.test(op)) return 'wifi';
+  if (!isFacebookHost(target)) return 'ignore';
+  if (publishCaptured) return 'wifi';
+  if (verb === 'GET' || verb === 'HEAD' || verb === 'OPTIONS') return 'wifi';
   return 'proxy';
 }
 
@@ -83,7 +84,7 @@ function curl(args) {
 }
 
 function authUser(baseUser, sessid) {
-  return `customer-${baseUser}-ASN-${ASN}-sessid-${sessid}`;
+  return `customer-${baseUser}-ASN-${ASN}-sessid-${sessid}-sesstime-15`;
 }
 
 function newSessid() {
@@ -193,13 +194,29 @@ async function replayThroughProxy({ url, method, headers, body, baseUser, passwo
 async function arm(page, baseUser, password, sessid, nome, meter) {
   const client = await page.target().createCDPSession();
   const note = meter && typeof meter === 'object' ? meter : {};
-  const state = { proxied: 0, publishCaptured: false, bytesUp: 0, bytesDown: 0, held: [], inflight: 0, closed: false, client };
-  await client.send('Fetch.enable', {
-    patterns: [
-      { urlPattern: '*://*/api/graphql*', requestStage: 'Request' },
-      { urlPattern: '*://*/ajax/bulk*', requestStage: 'Request' }
-    ]
-  });
+  const state = { proxied: 0, proxiedAtClick: null, publishCaptured: false, bytesUp: 0, bytesDown: 0, held: [], inflight: 0, closed: false, client };
+  state.markClick = () => { state.proxiedAtClick = state.proxied; };
+  const patterns = [];
+  for (const urlPattern of [
+    '*://*.facebook.com/*',
+    '*://facebook.com/*',
+    '*://*.fbcdn.net/*',
+    '*://*.facebook.net/*',
+    '*://*.fb.com/*'
+  ]) {
+    for (const resourceType of ['XHR', 'Fetch', 'Other', 'Media', 'Ping']) {
+      patterns.push({ urlPattern, resourceType, requestStage: 'Request' });
+    }
+  }
+  await client.send('Fetch.enable', { patterns });
+  const stickyIp = String(note.ip || '');
+  state.timer = setInterval(() => {
+    if (state.closed || state.publishCaptured) return;
+    probeExit(baseUser, password, sessid).then((hit) => {
+      if (state.closed || !stickyIp || !hit || !hit.ip) return;
+      if (hit.ip !== stickyIp) state.broken = true;
+    }).catch(() => {});
+  }, 25000);
   client.on('Fetch.requestPaused', async (ev) => {
     if (!ev) return;
     if (state.closed) {
@@ -209,18 +226,43 @@ async function arm(page, baseUser, password, sessid, nome, meter) {
     state.inflight += 1;
     try { await onPaused(ev); } finally { state.inflight -= 1; }
   });
+  async function readPausedBody(ev) {
+    const req = ev.request || {};
+    const entries = Array.isArray(req.postDataEntries) ? req.postDataEntries : [];
+    if (entries.length) {
+      const chunks = [];
+      for (const entry of entries) {
+        if (entry && entry.bytes) chunks.push(Buffer.from(String(entry.bytes), 'base64'));
+      }
+      if (chunks.length) return Buffer.concat(chunks);
+    }
+    try {
+      const extra = await client.send('Fetch.getRequestPostData', { requestId: ev.requestId });
+      if (extra && extra.postData) {
+        return extra.base64Encoded
+          ? Buffer.from(String(extra.postData), 'base64')
+          : Buffer.from(String(extra.postData), 'latin1');
+      }
+    } catch {}
+    if (req.postData) return Buffer.from(String(req.postData), 'latin1');
+    return Buffer.alloc(0);
+  }
   async function onPaused(ev) {
     const req = ev.request || {};
-    let postData = req.postData || '';
-    if (!postData && ev.requestId) {
-      try {
-        const extra = await client.send('Fetch.getRequestPostData', { requestId: ev.requestId });
-        postData = extra && extra.postData ? extra.postData : '';
-      } catch {}
+    const bodyBuf = await readPausedBody(ev);
+    const postData = bodyBuf.toString('latin1');
+    if (state.broken) {
+      try { await client.send('Fetch.failRequest', { requestId: ev.requestId, errorReason: 'BlockedByClient' }); } catch {}
+      return;
     }
-    let lane = classifyPublishRequest({ method: req.method, url: req.url, postData, headers: req.headers });
-    const marked = isPublishMarked({ postData, headers: req.headers });
-    if (lane === 'proxy' && !marked && state.publishCaptured) lane = 'wifi';
+    let lane = classifyPublishRequest({
+      method: req.method,
+      url: req.url,
+      postData,
+      headers: req.headers,
+      publishCaptured: state.publishCaptured === true
+    });
+    const marked = /graphql|ajax\/bulk/i.test(String(req.url || '')) && isPublishMarked({ postData, headers: req.headers });
     try {
       stepLog.appendJSONL(nome || 'system', 'robe', {
         step: 'proxy_publish_lane',
@@ -230,12 +272,15 @@ async function arm(page, baseUser, password, sessid, nome, meter) {
     } catch {}
     try {
       if (lane === 'proxy') {
-        state.proxied += 1;
+        if (req.hasPostData && !bodyBuf.length) {
+          await client.send('Fetch.failRequest', { requestId: ev.requestId, errorReason: 'ConnectionFailed' });
+          return;
+        }
         const replay = await replayThroughProxy({
           url: req.url,
           method: req.method,
           headers: req.headers,
-          body: postData,
+          body: bodyBuf,
           baseUser,
           password,
           sessid
@@ -250,7 +295,11 @@ async function arm(page, baseUser, password, sessid, nome, meter) {
           responseHeaders: replay.responseHeaders,
           body: replay.body.toString('base64')
         });
-        if (marked) state.publishCaptured = true;
+        if (marked) {
+          state.publishCaptured = true;
+          try { await client.send('Fetch.disable'); } catch {}
+        }
+        state.proxied += 1;
         state.bytesUp += Number(replay.up) || 0;
         state.bytesDown += Number(replay.down) || 0;
         return;
@@ -263,6 +312,7 @@ async function arm(page, baseUser, password, sessid, nome, meter) {
   state.close = async () => {
     if (state.closed) return;
     state.closed = true;
+    try { clearInterval(state.timer); } catch {}
     const waitStart = Date.now();
     while (state.inflight > 0 && (Date.now() - waitStart) < 20000) {
       await new Promise((r) => setTimeout(r, 40));
@@ -333,9 +383,37 @@ async function openForPublish(page, nome) {
     async arm() {
       if (!gate) gate = await arm(page, cfg.user, cfg.password, exit.sessid, nome, exit);
     },
-    sent() { return !!(gate && gate.proxied > 0); },
+    markPublishClick() { if (gate && gate.markClick) gate.markClick(); },
+    sent() {
+      if (!gate) return false;
+      if (gate.publishCaptured === true) return true;
+      if (gate.proxiedAtClick == null) return gate.proxied > 0;
+      return gate.proxied > gate.proxiedAtClick;
+    },
     async close() { if (gate) await gate.close(); }
   };
+}
+
+const creationByPage = new WeakMap();
+
+async function beginCreation(page, nome) {
+  const existing = creationByPage.get(page);
+  if (existing) return existing;
+  const opened = await openForPublish(page, nome);
+  if (opened.required && opened.ok) await opened.arm();
+  creationByPage.set(page, opened);
+  return opened;
+}
+
+function currentCreation(page) {
+  return creationByPage.get(page) || null;
+}
+
+async function endCreation(page) {
+  const opened = creationByPage.get(page);
+  if (!opened) return;
+  creationByPage.delete(page);
+  try { await opened.close(); } catch {}
 }
 
 module.exports = {
@@ -345,5 +423,8 @@ module.exports = {
   operationName,
   MAX_ATTEMPTS,
   ASN,
-  openForPublish
+  openForPublish,
+  beginCreation,
+  currentCreation,
+  endCreation
 };

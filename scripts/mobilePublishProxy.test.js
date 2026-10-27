@@ -11,7 +11,12 @@ test('AS22085 no Brasil entra, outra rede nao entra', () => {
   assert.equal(acceptExit({ asn: '', country: 'BR' }), false);
 });
 
-test('mutacao de anuncio vai no proxy e consulta fica no wifi', () => {
+test('da foto ate o publicar o facebook vai no proxy, e depois volta pro wifi', () => {
+  assert.equal(classifyPublishRequest({
+    method: 'POST',
+    url: 'https://upload.facebook.com/ajax/react_composer/attachments/photo/upload',
+    postData: 'foto'
+  }), 'proxy');
   assert.equal(classifyPublishRequest({
     method: 'POST',
     url: 'https://www.facebook.com/api/graphql/',
@@ -20,30 +25,15 @@ test('mutacao de anuncio vai no proxy e consulta fica no wifi', () => {
   assert.equal(classifyPublishRequest({
     method: 'POST',
     url: 'https://www.facebook.com/api/graphql/',
-    postData: 'fb_api_req_friendly_name=useMarketplaceComposerMedianPackageDetailQuery&doc_id=1'
+    postData: 'fb_api_req_friendly_name=MarketplaceYouSellingQuery&doc_id=1',
+    publishCaptured: true
   }), 'wifi');
   assert.equal(classifyPublishRequest({
     method: 'GET',
     url: 'https://www.facebook.com/marketplace/you/selling',
     postData: ''
-  }), 'ignore');
-});
-
-test('pedido de publicar sem nome conhecido vai no proxy, leitura do you selling fica no wifi', () => {
-  assert.equal(classifyPublishRequest({
-    method: 'POST',
-    url: 'https://www.facebook.com/api/graphql/',
-    postData: 'doc_id=999&variables=%7B%22foo%22%3A1%7D'
-  }), 'proxy');
-  assert.equal(classifyPublishRequest({
-    method: 'POST',
-    url: 'https://www.facebook.com/api/graphql/',
-    postData: 'fb_api_req_friendly_name=MarketplaceYouSellingQuery&doc_id=1'
   }), 'wifi');
   assert.equal(isPublishMarked({
     postData: 'fb_api_req_friendly_name=CometMarketplaceListingCreateMutation'
   }), true);
-  assert.equal(isPublishMarked({
-    postData: 'doc_id=999&variables=%7B%22foo%22%3A1%7D'
-  }), false);
 });

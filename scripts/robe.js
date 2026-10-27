@@ -4358,7 +4358,8 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
 
   // 2) Watcher de GraphQL só como sinal — nunca valida sucesso antes do dwell
   const gql = setupGraphqlPublishWatcher(page);
-  const mobileGate = await require('./mobilePublishProxy').openForPublish(page, nome);
+  const mobilePublish = require('./mobilePublishProxy');
+  const mobileGate = mobilePublish.currentCreation(page) || await mobilePublish.openForPublish(page, nome);
   if (mobileGate.required && mobileGate.ok !== true) {
     gql.cleanup && gql.cleanup();
     return {
@@ -4377,10 +4378,13 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
     flowRes = await clickFlowExactRetry(page, nome, {
       maxSteps: 24,
       publishMaxRetries: 3,
-      onBeforePublish: mobileGate.required ? () => mobileGate.arm() : null
+      onBeforePublish: mobileGate.required ? async () => {
+        if (mobileGate.arm) await mobileGate.arm();
+        if (mobileGate.markPublishClick) mobileGate.markPublishClick();
+      } : null
     });
   } finally {
-    if (mobileGate.required) await mobileGate.close();
+    if (mobileGate.required) await mobilePublish.endCreation(page);
   }
   stepLog.appendJSONL(nome, 'robe', { step: 'exact_btn_flow_end', sequence: flowRes.sequence, publishClicked: flowRes.publishClicked, proxySent: mobileGate.sent() });
   if (mobileGate.required && flowRes.publishClicked && mobileGate.sent() !== true) {
@@ -4993,6 +4997,12 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       throw new Error('Campo para upload de foto não localizado (frames varridos).');
     }
     await waitBeforeComposeAction(composePlan, 'before_upload', { nome, attId });
+    const creationGate = await require('./mobilePublishProxy').beginCreation(page, nome);
+    if (creationGate.required && creationGate.ok !== true) {
+      const err = new Error('proxy_mobile_unavailable');
+      err.PROXY_PUBLISH = true;
+      throw err;
+    }
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'upload_start', file: fotoNome });
     await inputFoto.uploadFile(fotoPath);
     fotoUploaded = true;
@@ -5312,6 +5322,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       throw e;
     }
 
+    try { await require('./mobilePublishProxy').endCreation(page); } catch {}
     const errMsg = (e && e.message) ? e.message : String(e);
     if (e && e.PROXY_PUBLISH === true) {
       try {
