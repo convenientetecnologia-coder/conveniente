@@ -641,6 +641,10 @@ async function clickExactCenter(page, handle) {
   }
 }
 
+async function clickOnce(page, handle) {
+  await page.evaluate((el) => { el.click(); }, handle);
+}
+
 async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetries = 3, waitAfterAdvanceMs = 400, onBeforePublish = null } = {}) {
   const sequence = [];
   let publishClicked = false;
@@ -653,34 +657,37 @@ async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetrie
       if (typeof onBeforePublish === 'function') {
         await onBeforePublish();
       }
-      await clickExactCenter(page, btnPub);
+      await sleep(600);
+      await clickOnce(page, btnPub);
       sequence.push('publicar');
       publishClicked = true;
-      const minHold = Date.now() + 2500;
-      const holdUntil = Date.now() + 6000;
-      while (Date.now() < holdUntil) {
-        const sent = await page.evaluate(() => {
+      const clickedAt = Date.now();
+      let acceptedAt = 0;
+      while (Date.now() - clickedAt < 12000) {
+        const state = await page.evaluate(() => {
           const norm = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
           const body = norm(document.body && document.body.innerText || '');
-          if (body.includes('ocorreu um erro')) return true;
-          if (/marketplace\/(you\/selling|you\/dashboard)/.test(location.pathname)) return true;
+          if (body.includes('ocorreu um erro')) return 'answered';
+          if (/marketplace\/(you\/selling|you\/dashboard)/.test(location.pathname)) return 'answered';
           const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-          const pub = buttons.find((el) => norm(el.getAttribute('aria-label') || el.innerText || '') === 'publicar');
-          if (!pub) return true;
-          if (pub.getAttribute('aria-disabled') === 'true' || pub.getAttribute('tabindex') === '-1') return true;
-          return false;
-        }).catch(() => false);
-        if (sent && Date.now() >= minHold) break;
-        await sleep(200);
+          const pub = buttons.find((el) => norm(el.getAttribute('aria-label') || el.innerText || '') === 'publicar' && el.getAttribute('aria-disabled') !== 'true');
+          if (!pub) return 'accepted';
+          return 'waiting';
+        }).catch(() => 'waiting');
+        if (state === 'answered' && Date.now() - clickedAt >= 2500) break;
+        if (state === 'accepted') {
+          if (!acceptedAt) acceptedAt = Date.now();
+          if (Date.now() - acceptedAt >= 4000) break;
+        }
+        await sleep(300);
       }
       break;
     }
-    // AVANÇAR
-    const btnAv = await findEnabledButton(page, 'Avançar', 700);
+    const btnAv = await findEnabledButton(page, 'Avançar', 2500);
     if (btnAv) {
-      await clickExactCenter(page, btnAv);
+      await clickOnce(page, btnAv);
       sequence.push('avancar');
-      await sleep(waitAfterAdvanceMs);
+      await sleep(Math.max(1500, Number(waitAfterAdvanceMs) || 0));
       continue;
     }
     await sleep(150);
