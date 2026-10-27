@@ -2327,6 +2327,85 @@ function findChromeStable() {
 // For PRUNER attach
 //
 
+function accountChromeIsHeadless() {
+  const headlessRequested = process.env.OVERRIDE_HEADLESS === '1' || process.env.HEADLESS === '1';
+  const headlessAllowed = String(process.env.CONVENIENTE_ALLOW_HEADLESS || '').trim() === '1';
+  return !!(headlessRequested && headlessAllowed);
+}
+
+function buildAccountChromeLaunchArgs(proxyServer) {
+  const launchLang = String(browserLanguageVoice().navigatorLanguage || 'pt-BR');
+  const launchArgs = [
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--password-store=basic',
+    '--disable-extensions',
+    `--lang=${launchLang}`,
+    '--disable-background-timer-throttling',
+    '--disable-backgrounding-occluded-windows',
+    '--disable-renderer-backgrounding',
+    '--process-per-site',
+    '--disable-features=TranslateUI,ProfilePicker,OptimizationHints,HardwareMediaKeyHandling,MediaRouter,AutomationControlled,CalculateNativeWinOcclusion',
+    '--disk-cache-size=104857600',
+    '--media-cache-size=0',
+    '--start-maximized'
+  ];
+  if (process.env.MEDIA_AUTO_UI === '1') {
+    launchArgs.push('--use-fake-ui-for-media-stream');
+  }
+  const proxy = String(proxyServer || '').trim();
+  if (proxy) {
+    launchArgs.push(`--proxy-server=${proxy}`);
+    launchArgs.push('--force-webrtc-ip-handling-policy=disable_non_proxied_udp');
+  }
+  const extraArgsEnv = (process.env.CHROME_EXTRA_ARGS || '').trim();
+  if (extraArgsEnv) {
+    const tokens = extraArgsEnv.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
+    const cleaned = tokens.map((t) => t.replace(/^"(.*)"$/, '$1')).filter(Boolean);
+    if (cleaned.length) {
+      if (process.env.BROWSER_DEBUG === '1') {
+        logger.debug('[BROWSER][DEBUG] CHROME_EXTRA_ARGS: ' + JSON.stringify(cleaned));
+      }
+      launchArgs.push(...cleaned);
+    }
+  }
+  return launchArgs;
+}
+
+function accountChromeLaunchConfig({ userDataDir, proxyServer }) {
+  return {
+    headless: accountChromeIsHeadless() ? true : false,
+    executablePath: require('./chromeMotores.js').resolveLaunchExeOrFatal(),
+    userDataDir,
+    args: buildAccountChromeLaunchArgs(proxyServer),
+    defaultViewport: null,
+    dumpio: !!process.env.BROWSER_DEBUG,
+    protocolTimeout: 120000
+  };
+}
+
+async function primeAccountStealth(nome) {
+  const who = String(nome || '').trim();
+  if (!who) return;
+  const man = await manifestStore.read(who).catch(() => null);
+  if (man) await syncStealthFromManifest(who, man);
+}
+
+function prepareAccountChromeProfile(userDataDir) {
+  ensureChromeProfilePreferences(userDataDir, resolveServerCountryLocale());
+}
+
+async function maximizeAccountWindow(page) {
+  if (!page) return;
+  await chromeHeapFaxina.withEphemeralCdpSession(page, async (client) => {
+    const { windowId } = await client.send('Browser.getWindowForTarget');
+    await client.send('Browser.setWindowBounds', {
+      windowId,
+      bounds: { windowState: 'maximized' }
+    });
+  });
+}
+
 /**
  * Ativar perfil: abre browser dedicado.
  */
@@ -2378,47 +2457,13 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     const chromeLogFile = path.join(userDataDir, 'chrome_launch.log');
     try { if (fs.existsSync(chromeLogFile)) fs.unlinkSync(chromeLogFile); } catch {}
 
-    // FLAGS “OURO” ONLY!
-    const launchLang = String(browserLanguageVoice().navigatorLanguage || 'pt-BR');
-    const launchArgs = [
-      '--no-first-run', // Não exibe onboarding
-      '--no-default-browser-check', // Não pergunta padrão
-      '--password-store=basic', // Evita prompts/chaves desktop
-      '--disable-extensions', // Zero extensão custom
-      `--lang=${launchLang}`,
-      '--disable-background-timer-throttling', // Não pausa timers de fundo
-      '--disable-backgrounding-occluded-windows', // Prev. throttling CPU tabs background
-      '--disable-renderer-backgrounding', // Garantir render foreground
-      '--process-per-site', // Cada site processo
-      '--disable-features=TranslateUI,ProfilePicker,OptimizationHints,HardwareMediaKeyHandling,MediaRouter,AutomationControlled,CalculateNativeWinOcclusion', // DEFS: disable detection, hints, popups, media router, win occlusion
-      '--disk-cache-size=104857600', // 100MB de cap em disco
-      '--media-cache-size=0', // Zero cache de mídia
-      '--start-maximized'
-    ];
-
-    // Permite ativar auto-aceite da permissão de camera/mic real por flag do Chrome, via env
-    if (process.env.MEDIA_AUTO_UI === '1') {
-      launchArgs.push('--use-fake-ui-for-media-stream');
-    }
-
-    if (gatewayResolved && gatewayResolved.enabled && gatewayResolved.proxyServer) {
-      launchArgs.push(`--proxy-server=${gatewayResolved.proxyServer}`);
-      // Proxy = só IP. GPS da conta não vem daqui.
-      launchArgs.push('--force-webrtc-ip-handling-policy=disable_non_proxied_udp');
+    // FLAGS “OURO” ONLY! A lista mora em buildAccountChromeLaunchArgs (Virtus e Robe).
+    const proxyServer = (gatewayResolved && gatewayResolved.enabled && gatewayResolved.proxyServer)
+      ? String(gatewayResolved.proxyServer)
+      : '';
+    const launchArgs = buildAccountChromeLaunchArgs(proxyServer);
+    if (proxyServer) {
       try { require('./connectLane.js').markArmed(true, 'proxy_launch'); } catch {}
-    }
-
-    // ENV para adicionar argumentos de debug
-    const extraArgsEnv = (process.env.CHROME_EXTRA_ARGS || '').trim();
-    if (extraArgsEnv) {
-      const tokens = extraArgsEnv.match(/(?:[^\s"]+|"[^"]*")+/g) || [];
-      const cleaned = tokens.map(t => t.replace(/^"(.*)"$/, '$1')).filter(Boolean);
-      if (cleaned.length) {
-        if (process.env.BROWSER_DEBUG === '1') {
-          logger.debug('[BROWSER][DEBUG] CHROME_EXTRA_ARGS: ' + JSON.stringify(cleaned));
-        }
-        launchArgs.push(...cleaned);
-      }
     }
 
     // HEADFUL por política operacional canônica.
@@ -8496,6 +8541,11 @@ module.exports = {
   applyCountryLocaleToOpenBrowser,
   resolveServerCountryLocale,
   injectCookies,
+  accountPuppeteer: puppeteer,
+  accountChromeLaunchConfig,
+  primeAccountStealth,
+  prepareAccountChromeProfile,
+  maximizeAccountWindow,
   ensureMinimizedWindowForPage,
   pruneExtraWindows, // expose for worker (força prune)
   pruneHumanToOneTab, // militar: modo humano => 1 aba
