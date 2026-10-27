@@ -2443,6 +2443,42 @@ async function clickOnce(page, handle) {
   await page.evaluate((el) => { el.click(); }, handle);
 }
 
+async function openAccountWorkPage(browser, nome) {
+  const listed = await browser.pages().catch(() => []);
+  const live = (listed || []).filter((p) => {
+    try { return !(p && typeof p.isClosed === 'function' && p.isClosed()); } catch { return false; }
+  });
+  const isMessages = (p) => {
+    try { return /facebook\.com\/messages/i.test(String(p.url() || '')); } catch { return false; }
+  };
+  const main = live.find(isMessages) || live[0] || null;
+  let work = live.find((p) => p && p !== main) || null;
+  if (!work) {
+    work = await newPageDaConta(browser, nome, { source: 'robe_selling_wifi' });
+  }
+  try { work.__ctRobeWorkTab = true; } catch {}
+  return { main, work };
+}
+
+async function closeAccountWorkPage(browser, work) {
+  const listed = browser ? await browser.pages().catch(() => []) : [];
+  const doomed = [];
+  const push = (p) => { if (p && !doomed.includes(p)) doomed.push(p); };
+  push(work);
+  for (const p of listed || []) {
+    try {
+      if (!p || (typeof p.isClosed === 'function' && p.isClosed())) continue;
+      if (p.__ctRobeWorkTab === true) { push(p); continue; }
+      const url = String(p.url() || '');
+      if (/facebook\.com\/messages/i.test(url)) continue;
+      if (/marketplace\/you\/(selling|dashboard)/i.test(url)) push(p);
+    } catch {}
+  }
+  for (const p of doomed) {
+    try { await p.close({ runBeforeUnload: false }); } catch {}
+  }
+}
+
 async function waitPublishLeftProxy(rail) {
   const base = typeof rail.bytesToProxy === 'function' ? rail.bytesToProxy() : 0;
   const started = Date.now();
@@ -5203,8 +5239,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
         robeRailHandle = null;
         page = null;
         if (!accountBrowser) throw new Error('publish_not_confirmed');
-        const sell = await newPageDaConta(accountBrowser, nome, { source: 'robe_selling_wifi' });
-        page = sell;
+        const opened = await openAccountWorkPage(accountBrowser, nome);
+        page = opened.work;
         let found = false;
         for (let n = 0; n < 3 && !found; n++) {
           try {
@@ -5220,7 +5256,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
           bytes: pubRes.bytes || 0
         });
         if (!found) {
-          try { await safeClosePage(page); } catch {}
+          try { await closeAccountWorkPage(accountBrowser, page); } catch {}
           page = null;
           throw new Error('publish_not_confirmed');
         }
@@ -5365,7 +5401,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     }
 
     if (!preserveCreatePageForHuman) {
-      try { await safeClosePage(page); } catch {}
+      try { await closeAccountWorkPage(accountBrowser, page); } catch {}
       page = null;
     }
 
@@ -5577,7 +5613,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
 
       if (page) {
         try {
-          await safeClosePage(page, { nome, reason: 'robe_end' });
+          if (accountBrowser) await closeAccountWorkPage(accountBrowser, page);
+          else await safeClosePage(page, { nome, reason: 'robe_end' });
           logger.info(`[ROBE] Aba fechada no finalmente`, { nome });
         } catch {}
       }

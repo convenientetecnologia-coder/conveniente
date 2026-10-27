@@ -6653,10 +6653,10 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     try { return String((p && p.url && p.url()) || ""); } catch { return ""; }
   }
   const pages = await listVirtusPages();
-  let page = pages.find((p) => /facebook\.com\/messages/i.test(virtusPageUrl(p)))
-    || pages[restrictTab]
-    || pages[0]
-    || null;
+  let page = pages.find((p) => /facebook\.com\/messages/i.test(virtusPageUrl(p))) || null;
+  if (!page && pages.length) {
+    page = pages[restrictTab] || pages[0] || null;
+  }
   const bootNome = String(nome || ACCOUNT_LOGIN || "").trim();
   if (!page) {
     if (typeof newPageDaConta !== "function") throw new Error("virtusDelta_boot_no_gate");
@@ -6697,6 +6697,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const openPages = await browser.pages().catch(() => []);
     for (const extra of openPages || []) {
       if (!extra || extra === page) continue;
+      let url = "";
+      try { url = virtusPageUrl(extra); } catch { url = ""; }
+      const work = extra.__ctRobeWorkTab === true || /marketplace\/you\/(selling|dashboard)/i.test(url) || !url || url === "about:blank";
+      if (!work) continue;
+      if (/facebook\.com\/messages/i.test(url)) continue;
       try { await extra.close({ runBeforeUnload: false }); } catch (_) {}
     }
   } catch (_) {}
@@ -6710,6 +6715,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const openAfterBoot = await browser.pages().catch(() => []);
     for (const extra of openAfterBoot || []) {
       if (!extra || extra === page) continue;
+      let url = "";
+      try { url = virtusPageUrl(extra); } catch { url = ""; }
+      if (/facebook\.com\/messages/i.test(url)) continue;
+      const work = extra.__ctRobeWorkTab === true || /marketplace\/you\/(selling|dashboard)/i.test(url) || !url || url === "about:blank";
+      if (!work) continue;
       try { await extra.close({ runBeforeUnload: false }); } catch (_) {}
     }
   } catch (_) {}
