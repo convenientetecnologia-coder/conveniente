@@ -6637,8 +6637,26 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     }
   }
 
-  const pages = await browser.pages().catch(() => []);
-  let page = pages[restrictTab] || pages[0] || null;
+  async function listVirtusPages() {
+    let last = [];
+    for (let i = 0; i < 3; i++) {
+      const listed = await browser.pages().catch(() => []);
+      last = (listed || []).filter((p) => {
+        try { return !(p && typeof p.isClosed === "function" && p.isClosed()); } catch { return false; }
+      });
+      if (last.length) return last;
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return last;
+  }
+  function virtusPageUrl(p) {
+    try { return String((p && p.url && p.url()) || ""); } catch { return ""; }
+  }
+  const pages = await listVirtusPages();
+  let page = pages.find((p) => /facebook\.com\/messages/i.test(virtusPageUrl(p)))
+    || pages[restrictTab]
+    || pages[0]
+    || null;
   const bootNome = String(nome || ACCOUNT_LOGIN || "").trim();
   if (!page) {
     if (typeof newPageDaConta !== "function") throw new Error("virtusDelta_boot_no_gate");
@@ -6673,6 +6691,13 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         bootInterlockBeforeNavigate: (cfg && typeof cfg.bootInterlockBeforeNavigate === "function") ? cfg.bootInterlockBeforeNavigate : null,
         bootInterlockIsEarReady: (cfg && typeof cfg.bootInterlockIsEarReady === "function") ? cfg.bootInterlockIsEarReady : null,
       });
+    }
+  } catch (_) {}
+  try {
+    const openPages = await browser.pages().catch(() => []);
+    for (const extra of openPages || []) {
+      if (!extra || extra === page) continue;
+      try { await extra.close({ runBeforeUnload: false }); } catch (_) {}
     }
   } catch (_) {}
   let bootStableOk = false;

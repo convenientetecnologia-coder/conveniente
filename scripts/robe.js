@@ -2107,7 +2107,7 @@ async function pickPostingSlotForRunV2() {
     cities: cfgCities.map((c) => cityNormKey(c)),
     // IMPORTANTÍSSIMO: precisa espelhar exatamente o que foi salvo em meta.configSig,
     // senão cada consumo detecta "configMismatch", zera a fila e força regeneração.
-    v2Tuning: (robeCfg && robeCfg.v2Tuning && typeof robeCfg.v2Tuning === 'object') ? robeCfg.v2Tuning : null
+    v2Tuning: (robeCfg && robeCfg.v2Tuning && typeof robeCfg.v2Tuning === 'object') ? robeCfg.v2Tuning : {}
   });
   let chosen = { city: '', size: null, scope: null, neighborhoodId: null, neighborhoodName: null, locationPool: null };
   let queueAfter = 0;
@@ -2388,7 +2388,9 @@ async function findEnabledButton(page, label, timeout = 700) {
           const enabled = await btn.evaluate(el => {
             const st = window.getComputedStyle(el);
             if (!st) return false;
-            if (st.display === 'none' || st.visibility === 'hidden' || !el.offsetParent) return false;
+            if (st.display === 'none' || st.visibility === 'hidden' || Number(st.opacity) === 0) return false;
+            const r = el.getBoundingClientRect();
+            if (!r || r.width < 2 || r.height < 2) return false;
             if (el.getAttribute('aria-disabled') === 'true') return false;
             if (el.disabled === true) return false;
             if (el.getAttribute('tabindex') === '-1') return false;
@@ -4395,14 +4397,14 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
   });
   if (rail && flowRes.publishClicked && proxySent !== true) {
     gql.cleanup && gql.cleanup();
-    return { ok: false, reason: 'proxy_publish_blocked', proxyRequired: true, proxySent: false, attempts: proved && proved.attempts || 0 };
+    return { ok: false, reason: 'proxy_publish_blocked', proxyRequired: true, proxySent: false, publishClicked: false, attempts: proved && proved.attempts || 0 };
   }
 
   if (!flowRes.sequence.length) {
     await forensicScreenshot(page, nome, 'btn_flow_no_sequence');
     stepLog.appendJSONL(nome, 'robe', { step: 'publish_click_failed', reason: 'no_buttons_clicked' });
     gql.cleanup && gql.cleanup();
-    return { ok: false, reason: 'publish_click_failed' };
+    return { ok: false, reason: 'publish_click_failed', publishClicked: false };
   }
 
   // Logging array para rounds de dwell (forense)
@@ -4464,7 +4466,7 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
   if (overlayHit && overlayHit.blocked) {
     stepLog.appendJSONL('system', 'robe', { step: 'publish_fail_overlay_during_dwell', overlayWhere: overlayHit.where || '', ms: (Date.now() - t0) });
     gql.cleanup();
-    return { ok: false, reason: 'limit_overlay', overlay: { found: true, where: overlayHit.where || 'everywhere', h2: overlayHit.joinedTexts || '' } };
+    return { ok: false, reason: 'limit_overlay', publishClicked: !!(flowRes && flowRes.publishClicked), overlay: { found: true, where: overlayHit.where || 'everywhere', h2: overlayHit.joinedTexts || '' } };
   }
 
   // 3. Aguarde até acabar o dwell (se overlay não encontrado)
@@ -4497,7 +4499,7 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
       ms: (Date.now() - t0)
     });
     gql.cleanup();
-    return { ok: true, reason: routeOk ? 'published_route' : 'published_evidence_after_dwell' };
+    return { ok: true, publishClicked: true, reason: routeOk ? 'published_route' : 'published_evidence_after_dwell' };
   }
 
   // 8) Nem rota, nem evidência pós-dwell — último check de overlay (curto) e falha/indefinido
@@ -4505,7 +4507,7 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
   if (lateOverlay && lateOverlay.blocked) {
     stepLog.appendJSONL('system', 'robe', { step: 'publish_fail_late_overlay_after_dwell', overlayWhere: lateOverlay.where || '' });
     gql.cleanup();
-    return { ok: false, reason: 'limit_overlay', overlay: { found: true, where: lateOverlay.where || 'late', h2: lateOverlay.joinedTexts || '' } };
+    return { ok: false, reason: 'limit_overlay', publishClicked: !!(flowRes && flowRes.publishClicked), overlay: { found: true, where: lateOverlay.where || 'late', h2: lateOverlay.joinedTexts || '' } };
   }
 
   // Logging forense em “indeterminate”
@@ -4534,7 +4536,7 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
   } catch {}
 
   gql.cleanup();
-  return { ok: false, reason: 'indeterminate' };
+  return { ok: false, reason: 'indeterminate', publishClicked: !!(flowRes && flowRes.publishClicked) };
 }
 
 /**
@@ -5168,12 +5170,17 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       }
 
       // Publicado: mantém a aba aberta para pós-publish (upsell + ID doc 1x/dia).
+      if (!(pubRes && pubRes.publishClicked === true)) {
+        stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_not_clicked', reason: pubRes && pubRes.reason || 'none' });
+        await sleep(800);
+        continue;
+      }
       if (pubRes && pubRes.ok) {
         try { await flowAlertFlags.clearProxyPublishError(nome); } catch {}
         published = true;
         break;
       }
-      // Inconclusivo: aborde evidências de publicado, fallback SELLING só depois da janela!
+      // O you/selling só entra depois de um clique real em Publicar.
       const ev1 = await waitPublishedEvidence(page, titulo, { maxMs: 8000 });
       if (ev1) { published = true; break; }
       const ev2 = await verifyOnSellerByTitle(page, titulo, { timeout: 15000 });
