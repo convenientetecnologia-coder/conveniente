@@ -2401,20 +2401,13 @@ async function findEnabledButton(page, label, timeout = 700) {
 async function dismissListingError(page) {
   const closed = await page.evaluate(() => {
     const norm = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
-    const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]'));
-    for (const dialog of dialogs) {
-      const text = norm(dialog.innerText || '');
-      if (!text.includes('ocorreu um erro')) continue;
-      const btn = Array.from(dialog.querySelectorAll('button, [role="button"]')).find((el) => {
-        const label = norm(el.getAttribute('aria-label') || el.innerText || '');
-        return label === 'fechar';
-      });
-      if (btn) {
-        btn.click();
-        return true;
-      }
-    }
-    return false;
+    const body = norm(document.body && document.body.innerText || '');
+    if (!body.includes('ocorreu um erro')) return false;
+    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+    const btn = buttons.find((el) => norm(el.getAttribute('aria-label') || el.innerText || '') === 'fechar');
+    if (!btn) return false;
+    btn.click();
+    return true;
   }).catch(() => false);
   if (closed) await sleep(500);
   return !!closed;
@@ -2455,37 +2448,30 @@ async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetrie
     // PUBLICAR — tenta até publishMaxRetries
     const btnPub = await findEnabledButton(page, 'Publicar', 700);
     if (btnPub) {
-      publishTries++;
-      if (publishTries === 1 && typeof onBeforePublish === 'function') {
+      if (typeof onBeforePublish === 'function') {
         await onBeforePublish();
       }
       await clickExactCenter(page, btnPub);
       sequence.push('publicar');
-      await sleep(700);
-      if (await dismissListingError(page)) {
-        await sleep(400);
-        if (publishTries >= publishMaxRetries) break;
-        continue;
+      publishClicked = true;
+      const minHold = Date.now() + 2500;
+      const holdUntil = Date.now() + 6000;
+      while (Date.now() < holdUntil) {
+        const sent = await page.evaluate(() => {
+          const norm = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
+          const body = norm(document.body && document.body.innerText || '');
+          if (body.includes('ocorreu um erro')) return true;
+          if (/marketplace\/(you\/selling|you\/dashboard)/.test(location.pathname)) return true;
+          const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+          const pub = buttons.find((el) => norm(el.getAttribute('aria-label') || el.innerText || '') === 'publicar');
+          if (!pub) return true;
+          if (pub.getAttribute('aria-disabled') === 'true' || pub.getAttribute('tabindex') === '-1') return true;
+          return false;
+        }).catch(() => false);
+        if (sent && Date.now() >= minHold) break;
+        await sleep(200);
       }
-      const stateChange = await page.waitForFunction((label) => {
-        const norm = s => String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
-        const buttons = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]'));
-        for (const el of buttons) {
-          const t = (el.innerText || el.textContent || '').trim();
-          if (norm(t) === norm(label)) {
-            const disabled = el.getAttribute('aria-disabled')==='true' || el.disabled || el.getAttribute('tabindex')==='-1';
-            const spinner = !!el.querySelector('svg[role="progressbar"], [role="progressbar"], [aria-busy="true"], svg[aria-label*="carregando"]');
-            if (disabled || spinner) return true;
-          }
-        }
-        const exists = buttons.some(el => norm((el.innerText||el.textContent||'').trim()) === norm(label));
-        return !exists;
-      }, { timeout: 12000 }, 'Publicar').catch(()=>false);
-
-      if (stateChange) { publishClicked = true; break; }
-      if (publishTries >= publishMaxRetries) break;
-      await sleep(320);
-      continue;
+      break;
     }
     // AVANÇAR
     const btnAv = await findEnabledButton(page, 'Avançar', 700);
@@ -4406,6 +4392,12 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
       try { await rail.backToDirect(); } catch {}
     }
   }
+  try {
+    for (let n = 0; n < 5; n++) {
+      const hit = await dismissListingError(page);
+      if (!hit) break;
+    }
+  } catch {}
   const proxySent = !!(rail && proved && proved.ok === true && flowRes && flowRes.publishClicked);
   stepLog.appendJSONL(nome, 'robe', {
     step: 'exact_btn_flow_end',
@@ -5200,7 +5192,6 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
         published = true;
         break;
       }
-      // O you/selling só entra depois de um clique real em Publicar.
       const ev1 = await waitPublishedEvidence(page, titulo, { maxMs: 8000 });
       if (ev1) { published = true; break; }
       const ev2 = await verifyOnSellerByTitle(page, titulo, { timeout: 15000 });
@@ -5209,7 +5200,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       if (late2Probe && late2Probe.found) {
         await applyLimitPostingAndAbort({ page, nome, attId, where: 'late_fallback_fast_probe', overlaySnapshot: late2Probe });
       }
-      await sleep(1200);
+      break;
     }
     if (!published) {
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_fail_final' });
