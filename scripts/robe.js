@@ -2443,6 +2443,29 @@ async function clickOnce(page, handle) {
   await page.evaluate((el) => { el.click(); }, handle);
 }
 
+async function waitPublishLeftProxy(rail) {
+  const base = typeof rail.bytesToProxy === 'function' ? rail.bytesToProxy() : 0;
+  const started = Date.now();
+  let last = base;
+  let quietSince = 0;
+  while (Date.now() - started < 8000) {
+    const now = typeof rail.bytesToProxy === 'function' ? rail.bytesToProxy() : base;
+    const sent = now - base;
+    if (sent >= 2048) {
+      if (now === last) {
+        if (!quietSince) quietSince = Date.now();
+        if (Date.now() - quietSince >= 500) return { ok: true, bytes: sent };
+      } else {
+        quietSince = 0;
+        last = now;
+      }
+    }
+    await sleep(100);
+  }
+  const end = typeof rail.bytesToProxy === 'function' ? rail.bytesToProxy() : base;
+  return { ok: false, bytes: end - base };
+}
+
 async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetries = 3, waitAfterAdvanceMs = 400, onBeforePublish = null } = {}) {
   const sequence = [];
   let publishClicked = false;
@@ -2459,26 +2482,6 @@ async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetrie
       await clickOnce(page, btnPub);
       sequence.push('publicar');
       publishClicked = true;
-      const clickedAt = Date.now();
-      let acceptedAt = 0;
-      while (Date.now() - clickedAt < 12000) {
-        const state = await page.evaluate(() => {
-          const norm = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
-          const body = norm(document.body && document.body.innerText || '');
-          if (body.includes('ocorreu um erro')) return 'answered';
-          if (/marketplace\/(you\/selling|you\/dashboard)/.test(location.pathname)) return 'answered';
-          const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-          const pub = buttons.find((el) => norm(el.getAttribute('aria-label') || el.innerText || '') === 'publicar' && el.getAttribute('aria-disabled') !== 'true');
-          if (!pub) return 'accepted';
-          return 'waiting';
-        }).catch(() => 'waiting');
-        if (state === 'answered' && Date.now() - clickedAt >= 2500) break;
-        if (state === 'accepted') {
-          if (!acceptedAt) acceptedAt = Date.now();
-          if (Date.now() - acceptedAt >= 4000) break;
-        }
-        await sleep(300);
-      }
       break;
     }
     // AVANÇAR — espera o botão com calma. Servidor sob carga desenha tarde.
@@ -4395,17 +4398,42 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
         }
       } : null
     });
-  } finally {
+  } catch (e) {
     if (rail && rail.backToDirect) {
       try { await rail.backToDirect(); } catch {}
     }
+    throw e;
   }
-  try {
-    for (let n = 0; n < 5; n++) {
-      const hit = await dismissListingError(page);
-      if (!hit) break;
+  if (rail && flowRes && flowRes.publishClicked === true && proved && proved.ok === true) {
+    const left = await waitPublishLeftProxy(rail);
+    stepLog.appendJSONL(nome, 'robe', {
+      step: 'publish_left_proxy',
+      ok: !!left.ok,
+      bytes: left.bytes || 0,
+      asn: proved.asn || null,
+      ip: proved.ip || null
+    });
+    if (left.ok || (left.bytes || 0) >= 2048) {
+      try { await rail.destroy({ killFirst: true }); } catch {}
+      gql.cleanup && gql.cleanup();
+      return {
+        ok: true,
+        reason: 'sent_to_proxy',
+        publishClicked: true,
+        proxySent: true,
+        robeClosed: true,
+        bytes: left.bytes || 0,
+        asn: proved.asn || null,
+        ip: proved.ip || null
+      };
     }
-  } catch {}
+    try { if (rail.backToDirect) await rail.backToDirect(); } catch {}
+    gql.cleanup && gql.cleanup();
+    return { ok: false, reason: 'publish_not_left_proxy', publishClicked: true, proxySent: true, bytes: left.bytes || 0 };
+  }
+  if (rail && rail.backToDirect) {
+    try { await rail.backToDirect(); } catch {}
+  }
   const proxySent = !!(rail && proved && proved.ok === true && flowRes && flowRes.publishClicked);
   stepLog.appendJSONL(nome, 'robe', {
     step: 'exact_btn_flow_end',
@@ -4572,6 +4600,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
   let limitPostingHit = false;
   let page = null;
   let robeRailHandle = null;
+  let accountBrowser = null;
   let published = false;
   let sawBeforeUnloadDialog = false;
   let abortedByCooldown = false;
@@ -4657,11 +4686,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
 
     if (require('./mobilePublishProxy').readSettings().enabled === true) {
       try {
-        const virtusBrowser = browser;
+        accountBrowser = browser;
         robeRailHandle = await require('./robeRail').openRobeRail({
           nome,
           cookies: manifest.cookies,
-          liveBrowser: virtusBrowser
+          liveBrowser: accountBrowser
         });
         browser = robeRailHandle.browser;
       } catch (e) {
@@ -5170,6 +5199,34 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     for (let i = 0; i < 2 && !published; i++) {
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_try_race', try: i+1 });
       pubRes = await publishAndWatch(page, titulo, nome, { watchOverlayMs: 12000 });
+      if (pubRes && pubRes.robeClosed === true) {
+        robeRailHandle = null;
+        page = null;
+        if (!accountBrowser) throw new Error('publish_not_confirmed');
+        const sell = await newPageDaConta(accountBrowser, nome, { source: 'robe_selling_wifi' });
+        page = sell;
+        let found = false;
+        for (let n = 0; n < 3 && !found; n++) {
+          try {
+            found = await verifyOnSellerByTitle(page, titulo, { timeout: 20000 });
+          } catch {}
+          if (!found) await sleep(2000);
+        }
+        try { await dismissListingError(page); } catch {}
+        stepLog.appendJSONL(nome, 'robe', {
+          attempt: attId,
+          step: 'virtus_selling_check',
+          found: !!found,
+          bytes: pubRes.bytes || 0
+        });
+        if (!found) {
+          try { await safeClosePage(page); } catch {}
+          page = null;
+          throw new Error('publish_not_confirmed');
+        }
+        published = true;
+        break;
+      }
       if (pubRes && pubRes.proxyRequired === true && pubRes.proxySent !== true) {
         const err = new Error(String(pubRes.reason || 'proxy_publish_blocked'));
         err.PROXY_PUBLISH = true;

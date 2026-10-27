@@ -44,6 +44,7 @@ function readExit(payload) {
 function createSwitch() {
   const sockets = new Set();
   let upstream = null;
+  let bytesToProxy = 0;
   const server = http.createServer();
   server.timeout = 0;
   server.requestTimeout = 0;
@@ -106,6 +107,9 @@ function createSwitch() {
       if (rest.length) dest.unshift(rest);
       if (head && head.length) dest.write(head);
       dest.pipe(client);
+      client.on('data', (chunk) => {
+        if (chunk && chunk.length) bytesToProxy += chunk.length;
+      });
       client.pipe(dest);
     });
     dest.on('connect', () => {
@@ -133,6 +137,7 @@ function createSwitch() {
     listen,
     flip(next) { upstream = next || null; cut(); },
     backToDirect() { upstream = null; cut(); },
+    bytesToProxy() { return bytesToProxy; },
     close() {
       cut();
       return new Promise((resolve) => server.close(() => resolve()));
@@ -464,15 +469,21 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
         } catch {}
         return { ok: true, asn: seen.asn, country: seen.country, ip: seen.ip, attempts: exit.attempts || 0 };
       },
+      bytesToProxy() { return rail.bytesToProxy(); },
       async backToDirect() {
         rail.backToDirect();
         try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_direct' }); } catch {}
       },
-      async destroy() {
+      async destroy(opts) {
         const proc = browser && browser.process ? browser.process() : null;
         const pid = proc && proc.pid;
-        try { if (browser) await browser.close(); } catch {}
-        await killTree(pid);
+        const killFirst = !!(opts && opts.killFirst);
+        if (killFirst && pid) {
+          await killTree(pid);
+        } else {
+          try { if (browser) await browser.close(); } catch {}
+          await killTree(pid);
+        }
         try { await rail.close(); } catch {}
         try { releaseProfileLocks(userDataDir); } catch {}
         try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_dead', pid: pid || null, kept: true }); } catch {}
