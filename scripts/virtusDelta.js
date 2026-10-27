@@ -6690,13 +6690,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const open = (await browser.pages().catch(() => [])).filter(virtusPageLive);
     const messages = open.filter((p) => /facebook\.com\/messages/i.test(virtusPageUrl(p)));
     const real = messages.find((p) => p.__ctVirtusBootCreated !== true) || null;
-    const keep = real || messages[0] || (prefer && open.includes(prefer) ? prefer : null) || open[0] || null;
+    const keep = real || (prefer && open.includes(prefer) ? prefer : null) || messages[0] || open[0] || null;
     for (const extra of open) {
       if (!extra || extra === keep) continue;
-      const url = virtusPageUrl(extra);
-      if (/facebook\.com\/messages/i.test(url) || !url || url === "about:blank") {
-        try { await extra.close({ runBeforeUnload: false }); } catch (_) {}
-      }
+      if (extra.__ctVirtusBootCreated !== true) continue;
+      try { await extra.close({ runBeforeUnload: false }); } catch (_) {}
     }
     return keep || prefer;
   }
@@ -6741,8 +6739,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
   // Boot minimal: garantir que estamos em /messages (permitido no boot; proibição é no reply flow).
   try {
-    const u0 = String(page.url ? page.url() : "");
-    if (!/facebook\.com\/messages/i.test(u0)) {
+    const u0 = virtusPageUrl(page);
+    if (u0 && !/facebook\.com\/messages/i.test(u0)) {
       await __gotoWithBootInterlock(page, startUrl, {
         timeoutMs: 45000,
         profileName: ACCOUNT_LOGIN || nome,
@@ -6751,6 +6749,15 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         bootInterlockBeforeNavigate: (cfg && typeof cfg.bootInterlockBeforeNavigate === "function") ? cfg.bootInterlockBeforeNavigate : null,
         bootInterlockIsEarReady: (cfg && typeof cfg.bootInterlockIsEarReady === "function") ? cfg.bootInterlockIsEarReady : null,
       });
+    } else {
+      try {
+        if (page && page.__deltaBootInterlock) {
+          page.__deltaBootInterlock.active = false;
+          page.__deltaBootInterlock.released = true;
+          delete page.__deltaBootInterlock;
+        }
+      } catch (_) {}
+      try { await page.setRequestInterception(false); } catch (_) {}
     }
   } catch (_) {}
   try { page = await keepOldestMessagesPage(page); } catch (_) {}
