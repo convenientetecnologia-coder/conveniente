@@ -58,7 +58,7 @@ function isPublishMarked(args) {
   const body = String(args && args.postData || '');
   const op = operationName(body) || operationName(headerText(args && args.headers));
   const blob = `${op}\n${body}\n${headerText(args && args.headers)}`;
-  return /Mutation/i.test(op) || /listing.{0,80}create|create.{0,80}listing|ListingCreate|CreateListing|for_sale_item|vehicle_listing|composer.{0,30}publish/i.test(blob);
+  return /ListingCreate|CreateListing|for_sale_item|vehicle_listing|listing.{0,40}create|create.{0,40}listing|composer.{0,30}publish/i.test(blob);
 }
 
 function acceptExit(payload) {
@@ -246,6 +246,18 @@ async function readComposerPhotoProblem(page) {
     text = await page.evaluate(() => String((document.body && document.body.innerText) || '').slice(0, 6000));
   } catch {}
   return composerPhotoProblem(text);
+}
+
+function waitWifiPhotoUpload(page, timeoutMs) {
+  const timeout = Math.max(8000, Number(timeoutMs) || 60000);
+  return page.waitForResponse((res) => {
+    let method = 'GET';
+    try { method = String(res.request().method() || 'GET'); } catch {}
+    if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return false;
+    let url = '';
+    try { url = String(res.url() || ''); } catch {}
+    return isPhotoUploadUrl(url);
+  }, { timeout }).catch(() => null);
 }
 
 async function waitComposerPhoto(page, creation, timeoutMs) {
@@ -616,7 +628,7 @@ async function arm(page, baseUser, password, sessid, nome, meter) {
           responseHeaders: replay.responseHeaders,
           body: replay.body.toString('base64')
         });
-        if (marked) {
+        if (marked && state.proxiedAtClick != null) {
           state.publishCaptured = true;
           try { await client.send('Fetch.disable'); } catch {}
         }
@@ -757,6 +769,7 @@ module.exports = {
   judgePhotoResponse,
   readComposerPhotoProblem,
   waitComposerPhoto,
+  waitWifiPhotoUpload,
   MAX_ATTEMPTS,
   ASN,
   openForPublish,

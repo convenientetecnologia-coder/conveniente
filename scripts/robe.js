@@ -4359,7 +4359,8 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
   // 2) Watcher de GraphQL só como sinal — nunca valida sucesso antes do dwell
   const gql = setupGraphqlPublishWatcher(page);
   const mobilePublish = require('./mobilePublishProxy');
-  const mobileGate = await mobilePublish.openForPublish(page, nome);
+  const existingGate = mobilePublish.currentCreation(page);
+  const mobileGate = existingGate || await mobilePublish.openForPublish(page, nome);
   if (mobileGate.required && mobileGate.ok !== true) {
     gql.cleanup && gql.cleanup();
     return {
@@ -4377,7 +4378,7 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
   try {
     if (mobileGate.required && mobileGate.arm) {
       await mobileGate.arm();
-      stepLog.appendJSONL(nome, 'robe', { step: 'proxy_buttons_armed' });
+      if (!existingGate) stepLog.appendJSONL(nome, 'robe', { step: 'proxy_buttons_armed' });
     }
     flowRes = await clickFlowExactRetry(page, nome, {
       maxSteps: 24,
@@ -4387,7 +4388,11 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
       } : null
     });
   } finally {
-    try { if (mobileGate.close) await mobileGate.close(); } catch {}
+    if (existingGate) {
+      try { await mobilePublish.endCreation(page); } catch {}
+    } else {
+      try { if (mobileGate.close) await mobileGate.close(); } catch {}
+    }
   }
   stepLog.appendJSONL(nome, 'robe', { step: 'exact_btn_flow_end', sequence: flowRes.sequence, publishClicked: flowRes.publishClicked, proxySent: mobileGate.sent() });
   if (mobileGate.required && flowRes.publishClicked && mobileGate.sent() !== true) {
@@ -5000,10 +5005,23 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       throw new Error('Campo para upload de foto não localizado (frames varridos).');
     }
     await waitBeforeComposeAction(composePlan, 'before_upload', { nome, attId });
+    const mobilePublish = require('./mobilePublishProxy');
+    const photoUpload = mobilePublish.waitWifiPhotoUpload(page);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'upload_start', file: fotoNome });
     await inputFoto.uploadFile(fotoPath);
     fotoUploaded = true;
+    const photoRes = await photoUpload;
+    let photoStatus = null;
+    try { photoStatus = photoRes && typeof photoRes.status === 'function' ? photoRes.status() : null; } catch {}
+    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'photo_wifi_done', status: photoStatus, timedOut: !photoRes });
     await sleep(jitter(250, 450));
+    const creationGate = await mobilePublish.beginCreation(page, nome);
+    if (creationGate.required && creationGate.ok !== true) {
+      const err = new Error('proxy_mobile_unavailable');
+      err.PROXY_PUBLISH = true;
+      throw err;
+    }
+    if (creationGate.required) stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'proxy_form_armed' });
 
     // TÍTULO
     const titulo = pickRandomItemTitulo();

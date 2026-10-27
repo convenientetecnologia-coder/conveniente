@@ -44,6 +44,9 @@ test('no botao publicar o anuncio vai no proxy, e a pagina de vendas volta pro w
   assert.equal(isPublishMarked({
     postData: 'fb_api_req_friendly_name=CometMarketplaceListingCreateMutation'
   }), true);
+  assert.equal(isPublishMarked({
+    postData: 'fb_api_req_friendly_name=useMarketplaceComposerAttributesQuery'
+  }), false);
 });
 
 test('foto recusada pelo Facebook segura o anuncio', () => {
