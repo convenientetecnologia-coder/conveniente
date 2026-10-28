@@ -573,31 +573,99 @@ async function detectLimitReached(page) {
 }
 
 // Botão habilitado por texto
-async function findEnabledButton(page, label, timeout = 700) {
+function robeButtonCanon(raw) {
+  const n = String(raw || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  if (n === 'publicar' || n === 'publish' || n === 'post' || n === 'postar') return 'publicar';
+  if (n === 'avancar' || n === 'next' || n === 'continuar' || n === 'continue' || n === 'proximo') return 'avancar';
+  return '';
+}
+
+async function findFooterAction(page, timeout = 700) {
   const start = Date.now();
   while (Date.now() - start < timeout) {
-    const handle = await page.evaluateHandle((wanted) => {
-      const norm = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim().toLowerCase();
-      const want = norm(wanted);
+    const handle = await page.evaluateHandle(() => {
+      const norm = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const canonOf = (raw) => {
+        const n = norm(raw);
+        if (n === 'publicar' || n === 'publish' || n === 'post' || n === 'postar') return 'publicar';
+        if (n === 'avancar' || n === 'next' || n === 'continuar' || n === 'continue' || n === 'proximo') return 'avancar';
+        return '';
+      };
+      const labelOf = (el) => {
+        const aria = el.getAttribute('aria-label') || '';
+        if (canonOf(aria)) return aria;
+        return String(el.innerText || el.textContent || '').split('\n')[0];
+      };
+      const hiddenByAncestor = (el) => {
+        let node = el;
+        while (node && node !== document.body) {
+          if (node.getAttribute && (node.getAttribute('aria-hidden') === 'true' || node.hasAttribute('hidden'))) return true;
+          node = node.parentElement;
+        }
+        return false;
+      };
+      const hits = [];
       const nodes = Array.from(document.querySelectorAll('button, [role="button"]'));
       for (const el of nodes) {
-        const byLabel = norm(el.getAttribute('aria-label') || '');
-        const byText = norm(el.innerText || el.textContent || '');
-        if (byLabel !== want && byText !== want) continue;
-        if (el.getAttribute('aria-disabled') === 'true') continue;
-        if (el.disabled === true) continue;
+        if (!canonOf(labelOf(el))) continue;
+        if (el.getAttribute('aria-disabled') === 'true' || el.disabled === true) continue;
+        if (hiddenByAncestor(el)) continue;
         const st = window.getComputedStyle(el);
-        if (st && (st.display === 'none' || st.visibility === 'hidden')) continue;
-        return el;
+        if (!st || st.display === 'none' || st.visibility === 'hidden' || st.pointerEvents === 'none') continue;
+        const r = el.getBoundingClientRect();
+        if (!r || r.width < 8 || r.height < 8) continue;
+        const onScreen = r.bottom > 0 && r.right > 0 && r.top < window.innerHeight && r.left < window.innerWidth;
+        if (!onScreen) continue;
+        hits.push({ el, top: r.top });
       }
-      return null;
-    }, label).catch(() => null);
+      if (!hits.length) return null;
+      hits.sort((a, b) => b.top - a.top);
+      return hits[0].el;
+    }).catch(() => null);
     const el = handle && typeof handle.asElement === 'function' ? handle.asElement() : null;
-    if (el) return el;
+    if (el) {
+      const kind = robeButtonCanon(await page.evaluate((node) => {
+        const aria = node.getAttribute('aria-label') || '';
+        if (aria) return aria;
+        return String(node.innerText || node.textContent || '').split('\n')[0];
+      }, el).catch(() => ''));
+      if (kind) return { handle: el, kind };
+    }
     try { if (handle && typeof handle.dispose === 'function') await handle.dispose(); } catch {}
     await sleep(120);
   }
   return null;
+}
+
+async function findEnabledButton(page, label, timeout = 700) {
+  const want = robeButtonCanon(label);
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const found = await findFooterAction(page, 120);
+    if (found && (!want || found.kind === want)) return found.handle;
+    try { if (found && found.handle && found.handle.dispose) await found.handle.dispose(); } catch {}
+    if (Date.now() - start >= timeout) break;
+    await sleep(80);
+  }
+  return null;
+}
+
+async function dismissOpenListbox(page) {
+  for (let i = 0; i < 2; i++) {
+    const open = await page.evaluate(() => !!document.querySelector('[role="listbox"]')).catch(() => false);
+    if (!open) return;
+    try {
+      await page.evaluate(() => {
+        const active = document.activeElement;
+        if (active && typeof active.blur === 'function') active.blur();
+      });
+    } catch {}
+    await sleep(120);
+    const still = await page.evaluate(() => !!document.querySelector('[role="listbox"]')).catch(() => false);
+    if (!still) return;
+    try { await page.keyboard.press('Escape'); } catch {}
+    await sleep(180);
+  }
 }
 
 async function dismissListingError(page) {
@@ -651,14 +719,14 @@ async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetrie
   let publishTries = 0;
   for (let step = 1; step <= maxSteps; step++) {
     try { await dismissListingError(page); } catch {}
-    // PUBLICAR — tenta até publishMaxRetries
-    const btnPub = await findEnabledButton(page, 'Publicar', 700);
-    if (btnPub) {
+    try { await dismissOpenListbox(page); } catch {}
+    const action = await findFooterAction(page, step === 1 ? 2500 : 1200);
+    if (action && action.kind === 'publicar') {
       if (typeof onBeforePublish === 'function') {
         await onBeforePublish();
       }
       await sleep(600);
-      await clickOnce(page, btnPub);
+      await clickOnce(page, action.handle);
       sequence.push('publicar');
       publishClicked = true;
       const clickedAt = Date.now();
@@ -683,14 +751,13 @@ async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetrie
       }
       break;
     }
-    const btnAv = await findEnabledButton(page, 'Avançar', 2500);
-    if (btnAv) {
-      await clickOnce(page, btnAv);
+    if (action && action.kind === 'avancar') {
+      await clickOnce(page, action.handle);
       sequence.push('avancar');
       await sleep(Math.max(1500, Number(waitAfterAdvanceMs) || 0));
       continue;
     }
-    await sleep(150);
+    await sleep(200);
   }
   return { sequence, publishClicked };
 }

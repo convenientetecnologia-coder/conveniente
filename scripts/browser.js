@@ -2103,6 +2103,10 @@ function ensureChromeProfilePreferences(userDataDir, locale) {
     ls.exited_cleanly = true;
     ls.intl = ls.intl || {};
     ls.intl.app_locale = appLocale;
+    if (/convenieterobe/i.test(String(userDataDir || '').replace(/\\/g, '/'))) {
+      ls.profile = ls.profile || {};
+      ls.profile.last_used = 'Default';
+    }
     writeJsonAtomic(localStatePath, ls);
   } catch (e) {
     try { if (process.env.BROWSER_DEBUG === '1') { logger.warn('[BROWSER][prefs] falha ao normalizar preferências: ' + ((e && e.message) || e)); } } catch {}
