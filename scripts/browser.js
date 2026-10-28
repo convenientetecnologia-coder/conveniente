@@ -2106,6 +2106,14 @@ function ensureChromeProfilePreferences(userDataDir, locale) {
     if (/convenieterobe/i.test(String(userDataDir || '').replace(/\\/g, '/'))) {
       ls.profile = ls.profile || {};
       ls.profile.last_used = 'Default';
+      if (ls.profile.info_cache && ls.profile.info_cache.Robe) delete ls.profile.info_cache.Robe;
+      if (Array.isArray(ls.profile.profiles_order)) {
+        ls.profile.profiles_order = ls.profile.profiles_order.filter((name) => name !== 'Robe');
+      }
+      if (Array.isArray(ls.profile.last_active_profiles)) {
+        ls.profile.last_active_profiles = ls.profile.last_active_profiles.filter((name) => name !== 'Robe');
+      }
+      try { fs.rmSync(path.join(userDataDir, 'Robe'), { recursive: true, force: true }); } catch {}
     }
     writeJsonAtomic(localStatePath, ls);
   } catch (e) {
@@ -2456,11 +2464,13 @@ function buildAccountChromeLaunchArgs(proxyServer) {
 }
 
 function accountChromeLaunchConfig({ userDataDir, proxyServer }) {
+  const args = buildAccountChromeLaunchArgs(proxyServer);
+  args.push('--profile-directory=Default');
   return {
     headless: accountChromeIsHeadless() ? true : false,
     executablePath: require('./chromeMotores.js').resolveLaunchExeOrFatal(),
     userDataDir,
-    args: buildAccountChromeLaunchArgs(proxyServer),
+    args,
     defaultViewport: null,
     dumpio: !!process.env.BROWSER_DEBUG,
     protocolTimeout: 120000
