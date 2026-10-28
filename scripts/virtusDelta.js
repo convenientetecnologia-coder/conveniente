@@ -6637,89 +6637,31 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     }
   }
 
-  function virtusPageUrl(p) {
-    try { return String((p && p.url && p.url()) || ""); } catch { return ""; }
-  }
-  function virtusPageLive(p) {
-    if (!p) return false;
-    try {
-      if (typeof p.isClosed === "function" && p.isClosed()) return false;
-    } catch {}
-    return true;
-  }
-  function targetUrl(t) {
-    try { return String((t && typeof t.url === "function" ? t.url() : "") || ""); } catch { return ""; }
-  }
-  function pageTargets() {
-    const targets = (typeof browser.targets === "function" ? browser.targets() : []) || [];
-    return targets.filter((t) => {
-      try {
-        if (!t || typeof t.type !== "function") return false;
-        if (t.type() === "page") return true;
-        return /facebook\.com|messenger\.com/i.test(targetUrl(t));
-      } catch { return false; }
-    });
-  }
   async function listVirtusPages() {
-    const fromTargets = async () => {
-      const out = [];
-      for (const t of pageTargets()) {
-        try {
-          const p = await Promise.race([
-            t.page(),
-            new Promise((r) => setTimeout(() => r(null), 800))
-          ]);
-          if (virtusPageLive(p)) out.push(p);
-        } catch {}
-      }
-      return out;
-    };
     let last = [];
-    for (let i = 0; i < 6; i++) {
-      last = await fromTargets();
-      if (!last.length) {
-        const listed = await browser.pages().catch(() => []);
-        last = (listed || []).filter(virtusPageLive);
-      }
+    for (let i = 0; i < 3; i++) {
+      const listed = await browser.pages().catch(() => []);
+      last = (listed || []).filter((p) => {
+        try { return !(p && typeof p.isClosed === "function" && p.isClosed()); } catch { return false; }
+      });
       if (last.length) return last;
-      await new Promise((r) => setTimeout(r, 300));
+      await new Promise((r) => setTimeout(r, 250));
     }
     return last;
   }
-  async function keepOldestMessagesPage(prefer) {
-    const open = (await browser.pages().catch(() => [])).filter(virtusPageLive);
-    const messages = open.filter((p) => /facebook\.com\/messages/i.test(virtusPageUrl(p)));
-    const real = messages.find((p) => p.__ctVirtusBootCreated !== true) || null;
-    const keep = real || (prefer && open.includes(prefer) ? prefer : null) || messages[0] || open[0] || null;
-    for (const extra of open) {
-      if (!extra || extra === keep) continue;
-      if (extra.__ctVirtusBootCreated !== true) continue;
-      try { await extra.close({ runBeforeUnload: false }); } catch (_) {}
-    }
-    return keep || prefer;
+  function virtusPageUrl(p) {
+    try { return String((p && p.url && p.url()) || ""); } catch { return ""; }
   }
   const pages = await listVirtusPages();
   let page = pages.find((p) => /facebook\.com\/messages/i.test(virtusPageUrl(p))) || null;
-  if (!page && pages.length) page = pages[0] || null;
+  if (!page && pages.length) {
+    page = pages[restrictTab] || pages[0] || null;
+  }
   const bootNome = String(nome || ACCOUNT_LOGIN || "").trim();
   if (!page) {
-    const again = await listVirtusPages();
-    page = again.find((p) => /facebook\.com\/messages/i.test(virtusPageUrl(p))) || again[0] || null;
-  }
-  if (!page) {
-    const hasTarget = ((typeof browser.targets === "function" ? browser.targets() : []) || []).some((t) => {
-      try { return t && typeof t.type === "function" && t.type() === "page"; } catch { return false; }
-    });
-    if (hasTarget) {
-      page = (await listVirtusPages())[0] || null;
-    }
-  }
-  if (!page) {
-    page = (await listVirtusPages())[0] || null;
-  }
-  if (!page) {
-    try { logInfo(`[virtusDelta][boot] no_new_tab nome=${bootNome || ""} pages=${pages.length}`); } catch (_) {}
-    return { ok: false, engine: "delta", stop: async () => {} };
+    if (typeof newPageDaConta !== "function") throw new Error("virtusDelta_boot_no_gate");
+    if (!bootNome) throw new Error("virtusDelta_boot_no_nome");
+    page = await newPageDaConta(browser, bootNome, { source: "virtusDelta_boot" });
   } else {
     if (!bootNome) throw new Error("virtusDelta_boot_no_nome");
     if (typeof blindarPaginaDaConta !== "function") throw new Error("virtusDelta_boot_no_gate");
@@ -6739,8 +6681,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
   // Boot minimal: garantir que estamos em /messages (permitido no boot; proibição é no reply flow).
   try {
-    const u0 = virtusPageUrl(page);
-    if (u0 && !/facebook\.com\/messages/i.test(u0)) {
+    const u0 = String(page.url ? page.url() : "");
+    if (!/facebook\.com\/messages/i.test(u0)) {
       await __gotoWithBootInterlock(page, startUrl, {
         timeoutMs: 45000,
         profileName: ACCOUNT_LOGIN || nome,
@@ -6749,27 +6691,38 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         bootInterlockBeforeNavigate: (cfg && typeof cfg.bootInterlockBeforeNavigate === "function") ? cfg.bootInterlockBeforeNavigate : null,
         bootInterlockIsEarReady: (cfg && typeof cfg.bootInterlockIsEarReady === "function") ? cfg.bootInterlockIsEarReady : null,
       });
-    } else {
-      try {
-        if (page && page.__deltaBootInterlock) {
-          page.__deltaBootInterlock.active = false;
-          page.__deltaBootInterlock.released = true;
-          delete page.__deltaBootInterlock;
-        }
-      } catch (_) {}
-      try { await page.setRequestInterception(false); } catch (_) {}
     }
   } catch (_) {}
-  try { page = await keepOldestMessagesPage(page); } catch (_) {}
-  try { attachDeltaNavigationFirewall(page, { profileName: ACCOUNT_LOGIN || nome }); } catch (_) {}
+  try {
+    const openPages = await browser.pages().catch(() => []);
+    for (const extra of openPages || []) {
+      if (!extra || extra === page) continue;
+      let url = "";
+      try { url = virtusPageUrl(extra); } catch { url = ""; }
+      const work = extra.__ctRobeWorkTab === true || /marketplace\/you\/(selling|dashboard)/i.test(url) || !url || url === "about:blank";
+      if (!work) continue;
+      if (/facebook\.com\/messages/i.test(url)) continue;
+      try { await extra.close({ runBeforeUnload: false }); } catch (_) {}
+    }
+  } catch (_) {}
   let bootStableOk = false;
   try {
     bootStableOk = (await waitForMessagesBootStable(page, "messages_ready_worker")) === true;
   } catch (_) {
     bootStableOk = false;
   }
-  try { page = await keepOldestMessagesPage(page); } catch (_) {}
-  try { attachDeltaNavigationFirewall(page, { profileName: ACCOUNT_LOGIN || nome }); } catch (_) {}
+  try {
+    const openAfterBoot = await browser.pages().catch(() => []);
+    for (const extra of openAfterBoot || []) {
+      if (!extra || extra === page) continue;
+      let url = "";
+      try { url = virtusPageUrl(extra); } catch { url = ""; }
+      if (/facebook\.com\/messages/i.test(url)) continue;
+      const work = extra.__ctRobeWorkTab === true || /marketplace\/you\/(selling|dashboard)/i.test(url) || !url || url === "about:blank";
+      if (!work) continue;
+      try { await extra.close({ runBeforeUnload: false }); } catch (_) {}
+    }
+  } catch (_) {}
   let earReadyOk = false;
   try {
     if (cfg && typeof cfg.bootInterlockIsEarReady === "function") {

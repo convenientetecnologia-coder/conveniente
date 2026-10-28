@@ -20,7 +20,8 @@ const {
   maximizeAccountWindow,
   ensureRobeProfile,
   wipeRobeSiteData,
-  releaseProfileLocks
+  releaseProfileLocks,
+  ROBE_CHROME_PROFILE
 } = require('./browser.js');
 const stepLog = require('./stepLog.js');
 
@@ -385,10 +386,11 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
     userDataDir = ensureRobeProfile(nome);
     releaseProfileLocks(userDataDir);
     wipeRobeSiteData(userDataDir);
-    prepareAccountChromeProfile(userDataDir);
+    prepareAccountChromeProfile(userDataDir, ROBE_CHROME_PROFILE);
     browser = await accountPuppeteer.launch(accountChromeLaunchConfig({
       userDataDir,
-      proxyServer: `127.0.0.1:${port}`
+      proxyServer: `127.0.0.1:${port}`,
+      profileDirectory: ROBE_CHROME_PROFILE
     }));
     browser.__ctRobeStorage = storage;
     const pages = await browser.pages();

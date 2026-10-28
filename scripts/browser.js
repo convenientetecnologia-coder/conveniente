@@ -1938,6 +1938,11 @@ function chromeUserDataRoot() {
   return path.join(os.homedir(), '.config', 'google-chrome');
 }
 
+// O Windows junta no mesmo ícone as janelas cujo id é "pasta.perfil".
+// Virtus e Robe terminavam os dois em "<conta>.Default". O perfil do Robe
+// se chama Robe, então o id fica "<conta>.Robe" e o ícone separa.
+const ROBE_CHROME_PROFILE = 'Robe';
+
 function robeProfileDir(nome) {
   const who = String(nome || '').trim();
   if (!who || !/^[a-z0-9_-]+$/i.test(who)) throw new Error('robe_profile_nome_invalido');
@@ -1947,12 +1952,12 @@ function robeProfileDir(nome) {
 function ensureRobeProfile(nome) {
   const dir = robeProfileDir(nome);
   fs.mkdirSync(dir, { recursive: true });
-  prepareAccountChromeProfile(dir);
+  prepareAccountChromeProfile(dir, ROBE_CHROME_PROFILE);
   return dir;
 }
 
 function wipeRobeSiteData(userDataDir) {
-  const def = path.join(String(userDataDir || ''), 'Default');
+  const def = path.join(String(userDataDir || ''), ROBE_CHROME_PROFILE);
   if (!def || !fs.existsSync(def)) return;
   const dirs = [
     'Local Storage',
@@ -2068,7 +2073,7 @@ function writeJsonAtomic(file, obj) {
  * - Em "Local State": exited_cleanly=true
  * - Janela: só maximized. Sem tamanho/posição do preset (dance da moldura).
  */
-function ensureChromeProfilePreferences(userDataDir, locale) {
+function ensureChromeProfilePreferences(userDataDir, locale, profileName) {
   try {
     if (!userDataDir) return;
     const voice = browserLanguageVoice();
@@ -2079,8 +2084,8 @@ function ensureChromeProfilePreferences(userDataDir, locale) {
     const appLocale = String(voice.navigatorLanguage || 'pt-BR');
     void locale;
 
-    // Default/Preferences
-    const defaultDir = path.join(userDataDir, 'Default');
+    const profile = String(profileName || 'Default').trim() || 'Default';
+    const defaultDir = path.join(userDataDir, profile);
     try { fs.mkdirSync(defaultDir, { recursive: true }); } catch {}
     const prefsPath = path.join(defaultDir, 'Preferences');
     const prefs = readJsonSafe(prefsPath, {}) || {};
@@ -2103,6 +2108,10 @@ function ensureChromeProfilePreferences(userDataDir, locale) {
     ls.exited_cleanly = true;
     ls.intl = ls.intl || {};
     ls.intl.app_locale = appLocale;
+    if (profile !== 'Default') {
+      ls.profile = ls.profile || {};
+      ls.profile.last_used = profile;
+    }
     writeJsonAtomic(localStatePath, ls);
   } catch (e) {
     try { if (process.env.BROWSER_DEBUG === '1') { logger.warn('[BROWSER][prefs] falha ao normalizar preferências: ' + ((e && e.message) || e)); } } catch {}
@@ -2451,12 +2460,15 @@ function buildAccountChromeLaunchArgs(proxyServer) {
   return launchArgs;
 }
 
-function accountChromeLaunchConfig({ userDataDir, proxyServer }) {
+function accountChromeLaunchConfig({ userDataDir, proxyServer, profileDirectory }) {
+  const args = buildAccountChromeLaunchArgs(proxyServer);
+  const profile = String(profileDirectory || '').trim();
+  if (profile && profile !== 'Default') args.push('--profile-directory=' + profile);
   return {
     headless: accountChromeIsHeadless() ? true : false,
     executablePath: require('./chromeMotores.js').resolveLaunchExeOrFatal(),
     userDataDir,
-    args: buildAccountChromeLaunchArgs(proxyServer),
+    args,
     defaultViewport: null,
     dumpio: !!process.env.BROWSER_DEBUG,
     protocolTimeout: 120000
@@ -2470,8 +2482,8 @@ async function primeAccountStealth(nome) {
   if (man) await syncStealthFromManifest(who, man);
 }
 
-function prepareAccountChromeProfile(userDataDir) {
-  ensureChromeProfilePreferences(userDataDir, resolveServerCountryLocale());
+function prepareAccountChromeProfile(userDataDir, profileName) {
+  ensureChromeProfilePreferences(userDataDir, resolveServerCountryLocale(), profileName);
 }
 
 async function maximizeAccountWindow(page) {
@@ -8626,6 +8638,7 @@ module.exports = {
   primeAccountStealth,
   prepareAccountChromeProfile,
   maximizeAccountWindow,
+  ROBE_CHROME_PROFILE,
   robeProfileDir,
   ensureRobeProfile,
   wipeRobeSiteData,
