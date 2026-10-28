@@ -8,7 +8,6 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 const mobile = require('./mobilePublishProxy.js');
-const chromeHeap = require('./chromeHeapFaxina.js');
 const {
   injectCookies,
   newPageDaConta,
@@ -20,8 +19,7 @@ const {
   maximizeAccountWindow,
   ensureRobeProfile,
   wipeRobeSiteData,
-  releaseProfileLocks,
-  ROBE_CHROME_PROFILE
+  releaseProfileLocks
 } = require('./browser.js');
 const stepLog = require('./stepLog.js');
 
@@ -199,32 +197,26 @@ function isAccountCookieDomain(domain) {
     || d === 'messenger.com' || d.endsWith('.messenger.com');
 }
 
+const LIVE_COOKIE_URLS = [
+  'https://www.facebook.com',
+  'https://www.facebook.com/messages',
+  'https://web.facebook.com',
+  'https://m.facebook.com',
+  'https://www.messenger.com'
+];
+
 async function collectLiveCookies(liveBrowser) {
   const found = [];
   try {
     if (!liveBrowser || typeof liveBrowser.pages !== 'function') return found;
     const pages = await liveBrowser.pages();
     for (const pg of pages || []) {
-      const got = await chromeHeap.withEphemeralCdpSession(pg, async (client) => {
-        const res = await client.send('Network.getAllCookies');
-        return Array.isArray(res && res.cookies) ? res.cookies : [];
-      });
+      let got = [];
+      try { got = await pg.cookies(...LIVE_COOKIE_URLS); } catch { got = []; }
       const rows = Array.isArray(got) ? got.filter((c) => c && isAccountCookieDomain(c.domain)) : [];
       if (rows.length > found.length) {
         found.length = 0;
         found.push(...rows);
-      }
-    }
-  } catch {}
-  if (found.length) return found;
-  try {
-    const pages = await liveBrowser.pages();
-    for (const pg of pages || []) {
-      let got = [];
-      try { got = await pg.cookies('https://www.facebook.com'); } catch {}
-      if (Array.isArray(got) && got.length > found.length) {
-        found.length = 0;
-        found.push(...got);
       }
     }
   } catch {}
@@ -261,25 +253,26 @@ async function setAccountCookies(page, cookies) {
   return applied;
 }
 
-async function readDomStorage(page, origin, isLocalStorage) {
+async function readPageStorage(page) {
   try {
-    const entries = await chromeHeap.withEphemeralCdpSession(page, async (client) => {
-      await client.send('DOMStorage.enable');
-      try {
-        const res = await client.send('DOMStorage.getDOMStorageItems', {
-          storageId: { securityOrigin: origin, isLocalStorage: !!isLocalStorage }
-        });
-        return res && Array.isArray(res.entries) ? res.entries : [];
-      } catch {
-        const res = await client.send('DOMStorage.getDOMStorageItems', {
-          storageId: { storageKey: origin, isLocalStorage: !!isLocalStorage }
-        });
-        return res && Array.isArray(res.entries) ? res.entries : [];
-      }
+    return await page.evaluate(() => {
+      const dump = (store) => {
+        const out = [];
+        try {
+          for (let i = 0; i < store.length; i++) {
+            const key = store.key(i);
+            out.push([key, store.getItem(key)]);
+          }
+        } catch {}
+        return out;
+      };
+      let origin = '';
+      try { origin = location.origin; } catch { return null; }
+      if (!origin) return null;
+      return { origin, local: dump(localStorage), session: dump(sessionStorage) };
     });
-    return Array.isArray(entries) ? entries : [];
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -288,13 +281,16 @@ async function captureAccountStorage(liveBrowser) {
   try {
     if (!liveBrowser || typeof liveBrowser.pages !== 'function') return bag;
     const pages = await liveBrowser.pages();
-    const page = (pages || []).find((p) => p) || null;
-    if (!page) return bag;
-    for (const origin of STORAGE_ORIGINS) {
-      const local = await readDomStorage(page, origin, true);
-      const session = await readDomStorage(page, origin, false);
-      if ((local && local.length) || (session && session.length)) {
-        bag[origin] = { local: local || [], session: session || [] };
+    for (const page of pages || []) {
+      const row = await readPageStorage(page);
+      if (!row || !row.origin) continue;
+      if (!STORAGE_ORIGINS.includes(row.origin)) continue;
+      const local = Array.isArray(row.local) ? row.local : [];
+      const session = Array.isArray(row.session) ? row.session : [];
+      if (!local.length && !session.length) continue;
+      const prev = bag[row.origin] || { local: [], session: [] };
+      if ((local.length + session.length) >= (prev.local.length + prev.session.length)) {
+        bag[row.origin] = { local, session };
       }
     }
   } catch {}
@@ -386,11 +382,10 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
     userDataDir = ensureRobeProfile(nome);
     releaseProfileLocks(userDataDir);
     wipeRobeSiteData(userDataDir);
-    prepareAccountChromeProfile(userDataDir, ROBE_CHROME_PROFILE);
+    prepareAccountChromeProfile(userDataDir);
     browser = await accountPuppeteer.launch(accountChromeLaunchConfig({
       userDataDir,
-      proxyServer: `127.0.0.1:${port}`,
-      profileDirectory: ROBE_CHROME_PROFILE
+      proxyServer: `127.0.0.1:${port}`
     }));
     browser.__ctRobeStorage = storage;
     const pages = await browser.pages();
