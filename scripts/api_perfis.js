@@ -867,7 +867,7 @@ module.exports = (app, workerClient, fileStore) => {
         return res.json({ ok: false, error: 'criar_perfil_somente_estoque' });
       }
 
-      const { cidade: cidadeIn, cookies, login, password, stockAccountId } = req.body || {};
+      const { cidade: cidadeIn, cookies, login, password, stockAccountId, uaPresetId, antiDetect, twoFa, recoveryEmail } = req.body || {};
       if (!cookies) {
         logger.warn('Tentativa de criação de perfil sem cookies', { cidadeHint: cidadeIn || null });
         return res.json({ ok: false, error: 'Cookies obrigatórios.' });
@@ -903,8 +903,17 @@ module.exports = (app, workerClient, fileStore) => {
       let nome = require('./utils').slugify(cidade) + '-' + Date.now();
       while (fileStore.existsDir(path.join(fileStore.perfisDir, nome))) nome += Math.floor(Math.random() * 100);
 
-      // UA com fallback
-      const preset = fileStore.pickUaPreset() || {};
+      // UA: usa o preset da conta quando ele existe no catálogo. Só sorteia se vier vazio ou morto.
+      let preset = null;
+      let identityGenerated = false;
+      try { preset = fileStore.getUaPresetById(uaPresetId); } catch {}
+      if (!preset) {
+        preset = fileStore.pickUaPreset() || {};
+        identityGenerated = true;
+      }
+      let keptAnti = null;
+      try { keptAnti = require('./browser.js').storedAntiDetectOrNull(antiDetect); } catch {}
+      if (!keptAnti) identityGenerated = true;
 
       const cookiesArr = require('./utils').normalizeCookies(cookies);
       if (
@@ -955,6 +964,9 @@ module.exports = (app, workerClient, fileStore) => {
         },
         cookies: cookiesArr,
         stockAccountId: stockAccountIdNum || null,
+        antiDetect: keptAnti || null,
+        twoFa: twoFa ? String(twoFa).trim() : null,
+        recoveryEmail: recoveryEmail ? String(recoveryEmail).trim() : null,
         robeCooldownUntil: 0,
         configuredAt: null,
         userDataDir, // <- AGORA dentro do User Data do Chrome
@@ -1092,7 +1104,7 @@ module.exports = (app, workerClient, fileStore) => {
       });
       res.json({
         ok: true,
-        perfil: perfilObj,
+        perfil: Object.assign({}, perfilObj, { identityGenerated }),
         cidade,
         cityAssignedByServer: true,
         country: cityResolved.country || null,

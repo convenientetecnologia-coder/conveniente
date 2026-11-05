@@ -2702,7 +2702,17 @@ async function execStockProvision(cmd) {
             timeoutMs: Math.max(15_000, Math.min(90_000, budgetLeftMs() + 10_000)),
             // Ultra enterprise: persiste login/senha no manifest já na criação, para permitir fluxo
             // automático "cookies -> login+senha" sem depender de clique em "retomar trabalho".
-            body: { cidade: city, cookies, login, password, stockAccountId }
+            body: {
+              cidade: city,
+              cookies,
+              login,
+              password,
+              stockAccountId,
+              uaPresetId: a && (a.uaPresetId || a.ua_preset_id) ? String(a.uaPresetId || a.ua_preset_id).trim() : null,
+              antiDetect: a && a.antiDetect && typeof a.antiDetect === 'object' ? a.antiDetect : null,
+              twoFa: a && (a.twoFa || a.two_fa) ? String(a.twoFa || a.two_fa) : null,
+              recoveryEmail: a && (a.recoveryEmail || a.recovery_email) ? String(a.recoveryEmail || a.recovery_email) : null
+            }
           });
           if (!r || r.ok === false) {
             const err = String((r && r.error) || 'create_profile_failed');
@@ -2909,6 +2919,20 @@ async function execStockProvision(cmd) {
         out.ok = true;
         out.finishedAt = Date.now();
         out.durationMs = out.finishedAt - startedAt;
+        try {
+          const manRes = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/manifest`);
+          const m = manRes && manRes.manifest;
+          if (m) {
+            out.identity = {
+              generated: !!(created && created.perfil && created.perfil.identityGenerated),
+              uaPresetId: m.uaPresetId || null,
+              fp: m.fp || null,
+              antiDetect: m.antiDetect || null,
+              twoFa: m.twoFa || null,
+              recoveryEmail: m.recoveryEmail || null
+            };
+          }
+        } catch {}
         results.push(out);
       } catch (e) {
         out.ok = false;
@@ -3996,6 +4020,11 @@ async function execStockExportProfiles(cmd) {
             try {
               const uaPresetId = manifest && manifest.manifest && manifest.manifest.uaPresetId ? String(manifest.manifest.uaPresetId).trim() : '';
               if (uaPresetId) result.uaPresetId = uaPresetId;
+              const sid = Number(manifest.manifest.stockAccountId || 0) || 0;
+              if (sid) result.stockAccountId = sid;
+              if (manifest.manifest.antiDetect) result.antiDetect = manifest.manifest.antiDetect;
+              if (manifest.manifest.twoFa) result.twoFa = manifest.manifest.twoFa;
+              if (manifest.manifest.recoveryEmail) result.recoveryEmail = manifest.manifest.recoveryEmail;
               const fp = (manifest && manifest.manifest && manifest.manifest.fp && typeof manifest.manifest.fp === 'object') ? manifest.manifest.fp : null;
               const uaString = manifest && manifest.manifest && manifest.manifest.uaString ? String(manifest.manifest.uaString) : '';
               // fp_summary_json é usado no CT para drilldown humano (sem poluir a tabela principal)

@@ -521,6 +521,42 @@ async function ensureFingerprintProfileState({ nome, manifest, proxyCountry }) {
     seed = hashToUInt32(`${nome}|${m0.uaPresetId || ''}|${cUser || ''}|${m0.createdAt || ''}`);
   }
   if (!seed) seed = hashToUInt32(nome || 'profile');
+  const storedCohort = FINGERPRINT_COHORTS.find((c) => c.id === String(anti.cohortId || '').trim()) || null;
+  if (storedCohort && seed) {
+    const localeKept = resolveLocaleByCountry();
+    const canvasStored = Number(anti.canvasNoise);
+    const audioStored = Number(anti.audioNoise);
+    const lang = String(anti.navigatorLanguage || '').trim();
+    const langs = Array.isArray(anti.navigatorLanguages) && anti.navigatorLanguages.length
+      ? anti.navigatorLanguages.map((x) => String(x || '').trim()).filter(Boolean)
+      : (lang ? [lang] : localeKept.navigatorLanguages);
+    const stateKept = {
+      seed,
+      country: localeKept.country,
+      timezone: String(anti.timezone || '').trim() || localeKept.timezone,
+      navigatorLanguage: lang || localeKept.navigatorLanguage,
+      navigatorLanguages: langs,
+      acceptLanguage: String(anti.acceptLanguage || '').trim() || localeKept.acceptLanguage,
+      cohortId: storedCohort.id,
+      webglVendor: storedCohort.webglVendor,
+      webglRenderer: storedCohort.webglRenderer,
+      plugins: storedCohort.plugins,
+      fonts: storedCohort.fonts,
+      deviceMemory: Number(storedCohort.deviceMemory || anti.deviceMemory || 8) || 8,
+      maxTouchPoints: Number(storedCohort.maxTouchPoints || 0) || 0,
+      canvasNoise: (Number.isFinite(canvasStored) && canvasStored > 0) ? canvasStored : ((seed % 9) + 1),
+      audioNoise: (Number.isFinite(audioStored) && audioStored > 0) ? audioStored : (((seed % 13) + 1) / 100000),
+      updatedAt: Date.now()
+    };
+    try {
+      await manifestStore.update(nome, (cur) => {
+        const next = Object.assign({}, cur || {});
+        next.antiDetect = Object.assign({}, next.antiDetect || {}, stateKept);
+        return next;
+      });
+    } catch {}
+    return stateKept;
+  }
   const locale = resolveLocaleByCountry();
   let forcedCohortId = '';
   try {
@@ -556,6 +592,30 @@ async function ensureFingerprintProfileState({ nome, manifest, proxyCountry }) {
     });
   } catch {}
   return state;
+}
+
+function storedAntiDetectOrNull(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const cohort = FINGERPRINT_COHORTS.find((c) => c.id === String(raw.cohortId || '').trim());
+  const seed = Number(raw.seed || 0) || 0;
+  if (!cohort || !seed) return null;
+  const canvasStored = Number(raw.canvasNoise);
+  const audioStored = Number(raw.audioNoise);
+  const lang = String(raw.navigatorLanguage || '').trim();
+  return {
+    seed,
+    cohortId: cohort.id,
+    webglVendor: cohort.webglVendor,
+    webglRenderer: cohort.webglRenderer,
+    plugins: cohort.plugins,
+    fonts: cohort.fonts,
+    deviceMemory: Number(cohort.deviceMemory || 8) || 8,
+    maxTouchPoints: Number(cohort.maxTouchPoints || 0) || 0,
+    canvasNoise: (Number.isFinite(canvasStored) && canvasStored > 0) ? canvasStored : ((seed % 9) + 1),
+    audioNoise: (Number.isFinite(audioStored) && audioStored > 0) ? audioStored : (((seed % 13) + 1) / 100000),
+    timezone: String(raw.timezone || '').trim() || null,
+    navigatorLanguage: lang || null
+  };
 }
 
 function resolveAccountWindowBounds(manifest) {
@@ -8634,6 +8694,7 @@ module.exports = {
   applyCountryLocaleToPage,
   applyCountryLocaleToOpenBrowser,
   resolveServerCountryLocale,
+  storedAntiDetectOrNull,
   injectCookies,
   accountPuppeteer: puppeteer,
   accountChromeLaunchConfig,

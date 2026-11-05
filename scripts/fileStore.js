@@ -471,6 +471,25 @@ function pickUaPreset() {
   } catch { return null; }
 }
 
+function getUaPresetById(id) {
+  const want = String(id || '').trim();
+  if (!want) return null;
+  try {
+    const presets = readJsonSafe(presetsPath, []);
+    if (!Array.isArray(presets)) return null;
+    const hit = presets.find((p) => p && String(p.id || '').trim() === want);
+    if (!hit) return null;
+    const policy = loadUaPolicy(presets);
+    const row = policy && policy.tiersByPresetId ? policy.tiersByPresetId[want] : null;
+    if (row && row.enabledForNewProfiles === false) return null;
+    const ver = readInstalledChromeVersion();
+    const aligned = alignUaToInstalledChrome(hit.uaString, hit.uaCh, ver);
+    return Object.assign({}, hit, { uaString: aligned.uaString, uaCh: aligned.uaCh });
+  } catch {
+    return null;
+  }
+}
+
 // === lock helpers (owner-safe) ===
 const _sleepBuf = new SharedArrayBuffer(4);
 const _sleepI32 = new Int32Array(_sleepBuf);
@@ -1359,7 +1378,7 @@ module.exports = {
   dadosDir, perfisPath, perfisDir, presetsPath, presetsPolicyPath, desiredPath, statusPath,
   readJsonSafe, writeJsonAtomic, ensureDesired, ensurePerfisJson,
   patchDesired, // agora async/lock
-  loadPerfisJson, savePerfisJson, pickUaPreset, getStatusSnapshot, isPerfilAtivo,
+  loadPerfisJson, savePerfisJson, pickUaPreset, getUaPresetById, getStatusSnapshot, isPerfilAtivo,
   findChromeStablePath, readInstalledChromeVersion, alignUaToInstalledChrome, extractChromeMajorFromUa,
   rimrafSync, copyDirSync, moveDirAtomicSync, updatePerfilLabel, renamePerfilSlug,
   resetDesiredAllOffOnBoot, neutralizeOpenAllAfterBoot, clearBootStartClosedOnOpen, readEncerrarGen, getSysMetricsSnapshot, existsFile, existsDir,
