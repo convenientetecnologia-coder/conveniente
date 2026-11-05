@@ -529,7 +529,7 @@ async function ensureFingerprintProfileState({ nome, manifest, proxyCountry }) {
     const lang = String(anti.navigatorLanguage || '').trim();
     const langs = Array.isArray(anti.navigatorLanguages) && anti.navigatorLanguages.length
       ? anti.navigatorLanguages.map((x) => String(x || '').trim()).filter(Boolean)
-      : (lang ? [lang] : localeKept.navigatorLanguages);
+      : ((!lang || lang === localeKept.navigatorLanguage) ? localeKept.navigatorLanguages : [lang]);
     const stateKept = {
       seed,
       country: localeKept.country,
@@ -614,7 +614,10 @@ function storedAntiDetectOrNull(raw) {
     canvasNoise: (Number.isFinite(canvasStored) && canvasStored > 0) ? canvasStored : ((seed % 9) + 1),
     audioNoise: (Number.isFinite(audioStored) && audioStored > 0) ? audioStored : (((seed % 13) + 1) / 100000),
     timezone: String(raw.timezone || '').trim() || null,
-    navigatorLanguage: lang || null
+    navigatorLanguage: lang || null,
+    navigatorLanguages: Array.isArray(raw.navigatorLanguages)
+      ? raw.navigatorLanguages.map((x) => String(x || '').trim()).filter(Boolean)
+      : null
   };
 }
 
