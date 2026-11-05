@@ -4086,6 +4086,8 @@ async function execStockPushAccountUpdate(cmd) {
     label: payload.label ?? null,
     login: payload.login ?? null,
     password: payload.password ?? null,
+    twoFa: payload.twoFa ?? payload.two_fa ?? null,
+    recoveryEmail: payload.recoveryEmail ?? payload.recovery_email ?? null,
     cookies: Array.isArray(payload.cookies) ? payload.cookies : null,
     // default enterprise: store only (não reinjeta automaticamente)
     applyCookies: (payload.applyCookies === true || payload.applyCookies === 1 || String(payload.applyCookies || '').trim() === '1') ? 1 : 0

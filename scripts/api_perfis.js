@@ -1385,6 +1385,10 @@ module.exports = (app, workerClient, fileStore) => {
       const label = (req.body && req.body.label != null) ? String(req.body.label || '').trim() : null;
       const login = (req.body && req.body.login != null) ? String(req.body.login || '').trim() : null;
       const password = (req.body && req.body.password != null) ? String(req.body.password || '') : null;
+      const hasTwoFa = !!(req.body && (Object.prototype.hasOwnProperty.call(req.body, 'twoFa') || Object.prototype.hasOwnProperty.call(req.body, 'two_fa')));
+      const hasRecoveryEmail = !!(req.body && (Object.prototype.hasOwnProperty.call(req.body, 'recoveryEmail') || Object.prototype.hasOwnProperty.call(req.body, 'recovery_email')));
+      const twoFaIn = hasTwoFa ? String((req.body.twoFa != null ? req.body.twoFa : req.body.two_fa) || '').trim() : null;
+      const recoveryEmailIn = hasRecoveryEmail ? String((req.body.recoveryEmail != null ? req.body.recoveryEmail : req.body.recovery_email) || '').trim() : null;
       const cookiesInput = (req.body && req.body.cookies != null) ? req.body.cookies : null;
       // Por padrão, NUNCA reinjetar cookies ao receber atualização do CT.
       // Reinjeção só acontece quando explicitamente solicitado (ação manual/operacional).
@@ -1413,6 +1417,8 @@ module.exports = (app, workerClient, fileStore) => {
           if (label) m.label = label;
           if (login != null) m.login = login;
           if (password != null) m.password = password;
+          if (twoFaIn) m.twoFa = twoFaIn;
+          if (recoveryEmailIn) m.recoveryEmail = recoveryEmailIn;
           return m;
         });
       } else {
@@ -1421,6 +1427,8 @@ module.exports = (app, workerClient, fileStore) => {
           if (label) m.label = label;
           if (login != null) m.login = login;
           if (password != null) m.password = password;
+          if (twoFaIn) m.twoFa = twoFaIn;
+          if (recoveryEmailIn) m.recoveryEmail = recoveryEmailIn;
           return m;
         });
       }
