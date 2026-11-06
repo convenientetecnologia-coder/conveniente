@@ -438,6 +438,40 @@ function resolveLocaleByCountry() {
   return resolveServerCountryLocale();
 }
 
+function cohortIdsForScreen({ hardwareConcurrency, width, uaMajor } = {}) {
+  const hc = Number(hardwareConcurrency || 8) || 8;
+  const w = Number(width || 1366) || 1366;
+  const major = Number(uaMajor || 0) || 0;
+  let bucket;
+  if (hc <= 4 || w <= 1366) bucket = ['intel_hd_520', 'intel_uhd_620'];
+  else if (hc <= 8 && w <= 1600) bucket = ['intel_uhd_620', 'intel_uhd_630', 'amd_vega_8'];
+  else if (hc <= 12 && w <= 1920) bucket = ['intel_iris_xe', 'nvidia_gtx_1060', 'nvidia_gtx_1650', 'amd_rx_560'];
+  else if (hc <= 16) bucket = ['nvidia_gtx_1650', 'nvidia_rtx_2060', 'amd_rx_560', 'amd_rx_580'];
+  else bucket = ['nvidia_rtx_2060', 'amd_rx_580'];
+  if (major >= 136) {
+    const newer = bucket.filter((id) => ['intel_iris_xe', 'nvidia_gtx_1650', 'nvidia_rtx_2060', 'amd_rx_560', 'amd_rx_580'].includes(id));
+    if (newer.length) bucket = newer;
+  }
+  return bucket;
+}
+
+function resolveProvisionIdentity({ uaPresetId, antiDetect, lookupPreset } = {}) {
+  let preset = null;
+  if (typeof lookupPreset === 'function') {
+    try { preset = lookupPreset(uaPresetId); } catch { preset = null; }
+  }
+  const presetWasDead = !preset;
+  let keptAnti = null;
+  if (!presetWasDead) {
+    try { keptAnti = storedAntiDetectOrNull(antiDetect); } catch { keptAnti = null; }
+  }
+  return {
+    presetWasDead,
+    keptAnti: keptAnti || null,
+    identityGenerated: presetWasDead || !keptAnti
+  };
+}
+
 function resolveCohortByProfile({ manifest, seed, forcedCohortId = '' }) {
   const m = (manifest && typeof manifest === 'object') ? manifest : {};
   const profileName = String(m.nome || '').trim();
@@ -445,20 +479,8 @@ function resolveCohortByProfile({ manifest, seed, forcedCohortId = '' }) {
   const hc = Number(m.fp && m.fp.hardwareConcurrency || 8) || 8;
   const width = Number(vp.width || 1366) || 1366;
   const uaMajor = Number((String(m.uaString || '').match(/Chrome\/(\d+)\./) || [])[1] || 0) || 0;
-  // Coorte técnica plausível: hardware + viewport direcionam GPU provável.
-  const bucket = (() => {
-    if (hc <= 4 || width <= 1366) return ['intel_hd_520', 'intel_uhd_620'];
-    if (hc <= 8 && width <= 1600) return ['intel_uhd_620', 'intel_uhd_630', 'amd_vega_8'];
-    if (hc <= 12 && width <= 1920) return ['intel_iris_xe', 'nvidia_gtx_1060', 'nvidia_gtx_1650', 'amd_rx_560'];
-    if (hc <= 16) return ['nvidia_gtx_1650', 'nvidia_rtx_2060', 'amd_rx_560', 'amd_rx_580'];
-    return ['nvidia_rtx_2060', 'amd_rx_580'];
-  })();
-  let pool = FINGERPRINT_COHORTS.filter((c) => bucket.includes(c.id));
-  // Leve amarra com geração do navegador: majors mais novos tendem a hardware mais novo.
-  if (uaMajor >= 136) {
-    const newer = pool.filter((c) => ['intel_iris_xe', 'nvidia_gtx_1650', 'nvidia_rtx_2060', 'amd_rx_560', 'amd_rx_580'].includes(c.id));
-    if (newer.length) pool = newer;
-  }
+  const bucket = cohortIdsForScreen({ hardwareConcurrency: hc, width, uaMajor });
+  const pool = FINGERPRINT_COHORTS.filter((c) => bucket.includes(c.id));
   const candidates = pool.length ? pool : FINGERPRINT_COHORTS;
   const forced = String(forcedCohortId || '').trim();
   if (forced) {
@@ -8698,6 +8720,8 @@ module.exports = {
   applyCountryLocaleToOpenBrowser,
   resolveServerCountryLocale,
   storedAntiDetectOrNull,
+  resolveProvisionIdentity,
+  cohortIdsForScreen,
   injectCookies,
   accountPuppeteer: puppeteer,
   accountChromeLaunchConfig,

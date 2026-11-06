@@ -903,17 +903,18 @@ module.exports = (app, workerClient, fileStore) => {
       let nome = require('./utils').slugify(cidade) + '-' + Date.now();
       while (fileStore.existsDir(path.join(fileStore.perfisDir, nome))) nome += Math.floor(Math.random() * 100);
 
-      // UA: usa o preset da conta quando ele existe no catálogo. Só sorteia se vier vazio ou morto.
+      // Preset morto não herda a coorte antiga: ela era de outra tela.
+      // Coorte fora da lista também não entra. O Chrome cria uma coorte da tela nova.
       let preset = null;
-      let identityGenerated = false;
       try { preset = fileStore.getUaPresetById(uaPresetId); } catch {}
-      if (!preset) {
-        preset = fileStore.pickUaPreset() || {};
-        identityGenerated = true;
-      }
-      let keptAnti = null;
-      try { keptAnti = require('./browser.js').storedAntiDetectOrNull(antiDetect); } catch {}
-      if (!keptAnti) identityGenerated = true;
+      const ident = require('./browser.js').resolveProvisionIdentity({
+        uaPresetId,
+        antiDetect,
+        lookupPreset: () => preset
+      });
+      const identityGenerated = !!ident.identityGenerated;
+      const keptAnti = ident.keptAnti;
+      if (!preset) preset = fileStore.pickUaPreset() || {};
 
       const cookiesArr = require('./utils').normalizeCookies(cookies);
       if (
