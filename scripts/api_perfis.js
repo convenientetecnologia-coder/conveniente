@@ -1390,6 +1390,28 @@ module.exports = (app, workerClient, fileStore) => {
       const twoFaIn = hasTwoFa ? String((req.body.twoFa != null ? req.body.twoFa : req.body.two_fa) || '').trim() : null;
       const recoveryEmailIn = hasRecoveryEmail ? String((req.body.recoveryEmail != null ? req.body.recoveryEmail : req.body.recovery_email) || '').trim() : null;
       const cookiesInput = (req.body && req.body.cookies != null) ? req.body.cookies : null;
+      const uaPresetIdIn = (req.body && req.body.uaPresetId != null)
+        ? String(req.body.uaPresetId || '').trim()
+        : '';
+      let presetApplied = null;
+      if (uaPresetIdIn) {
+        try { presetApplied = fileStore.getUaPresetById(uaPresetIdIn); } catch {}
+        if (!presetApplied || !presetApplied.id) {
+          return res.json({ ok: false, error: 'ua_preset_unknown' });
+        }
+      }
+      const applyPreset = (m) => {
+        if (!presetApplied) return m;
+        m.uaPresetId = String(presetApplied.id);
+        if (presetApplied.uaString) m.uaString = presetApplied.uaString;
+        m.uaCh = presetApplied.uaCh || {};
+        m.fp = {
+          viewport: presetApplied.viewport || { width: 1366, height: 768 },
+          dpr: presetApplied.dpr || 1,
+          hardwareConcurrency: presetApplied.hardwareConcurrency || 4
+        };
+        return m;
+      };
       // Por padrão, NUNCA reinjetar cookies ao receber atualização do CT.
       // Reinjeção só acontece quando explicitamente solicitado (ação manual/operacional).
       const applyCookies = !!(req.body && (req.body.applyCookies === true || req.body.applyCookies === 1 || String(req.body.applyCookies || '').trim() === '1'));
@@ -1419,7 +1441,7 @@ module.exports = (app, workerClient, fileStore) => {
           if (password != null) m.password = password;
           if (twoFaIn) m.twoFa = twoFaIn;
           if (recoveryEmailIn) m.recoveryEmail = recoveryEmailIn;
-          return m;
+          return applyPreset(m);
         });
       } else {
         await manifestStore.update(nome, (m) => {
@@ -1429,8 +1451,30 @@ module.exports = (app, workerClient, fileStore) => {
           if (password != null) m.password = password;
           if (twoFaIn) m.twoFa = twoFaIn;
           if (recoveryEmailIn) m.recoveryEmail = recoveryEmailIn;
-          return m;
+          return applyPreset(m);
         });
+      }
+
+      if (presetApplied) {
+        const fpNext = {
+          viewport: presetApplied.viewport || { width: 1366, height: 768 },
+          dpr: presetApplied.dpr || 1,
+          hardwareConcurrency: presetApplied.hardwareConcurrency || 4
+        };
+        fileStore.withPerfisFileLockUpdate((arr) => {
+          const list = Array.isArray(arr) ? arr : [];
+          const i = list.findIndex((p) => p && p.nome === nome);
+          if (i < 0) return list;
+          list[i].uaPresetId = String(presetApplied.id);
+          if (presetApplied.uaString) list[i].uaString = presetApplied.uaString;
+          list[i].uaCh = presetApplied.uaCh || {};
+          list[i].fp = fpNext;
+          return list;
+        }, { caller: 'stock-update', reason: 'preset_restore' });
+        try {
+          const latest = (fileStore.loadPerfisJson() || []).find((p) => p && p.nome === nome);
+          if (latest) fileStore.writePerfilRecord(latest, { caller: 'stock-update-preset' });
+        } catch {}
       }
 
       // Se cookies mudaram, SOMENTE reinjeta via configure (worker) quando explicitamente solicitado.
@@ -1445,7 +1489,12 @@ module.exports = (app, workerClient, fileStore) => {
         }
       }
 
-      return res.json({ ok: true, cookiesUpdated: !!cookiesUpdated, applied: !!(cookiesUpdated && applyCookies) });
+      return res.json({
+        ok: true,
+        cookiesUpdated: !!cookiesUpdated,
+        applied: !!(cookiesUpdated && applyCookies),
+        uaPresetId: presetApplied ? String(presetApplied.id) : null
+      });
     } catch (e) {
       return res.json({ ok: false, error: (e && e.message) || String(e) });
     }
