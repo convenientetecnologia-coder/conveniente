@@ -5720,5 +5720,6 @@ module.exports = {
   buildRobeV4CityPlan,
   computeRobeV2Counts,
   formatRobeQueueItemLabel,
-  robeV2RegenClaimIsStale
+  robeV2RegenClaimIsStale,
+  scheduleRobeV2Regeneration
 };

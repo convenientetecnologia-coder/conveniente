@@ -3571,6 +3571,127 @@ async function execSelfUpdate(cmd) {
 }
 
 // ===== NOVO: Configurar CT_BASE_URL + LOG_INGEST_SECRET via comando (persistente) =====
+function __locationCityKey(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s*\([a-z]{2}\)\s*$/i, '')
+    .toLocaleLowerCase('pt-BR')
+    .trim();
+}
+
+async function execGetServerLocationCatalog() {
+  const serverConfig = require('./serverConfig.js');
+  const countryGeo = require('./countryGeo.js');
+  const cfg = (() => {
+    try { return serverConfig.readServerConfigEffective({}); } catch { return null; }
+  })();
+  if (!cfg || cfg.unreadable === true) return { ok: false, error: 'server_config_unreadable' };
+  const countryId = String((cfg.country && cfg.country.id) || 'br').trim().toLowerCase() === 'us' ? 'us' : 'br';
+  const cities = countryGeo.listCities({ countryId });
+  if (!Array.isArray(cities) || !cities.length) return { ok: false, error: 'catalog_empty', countryId };
+  return { ok: true, countryId, cities };
+}
+
+async function execSetServerLocations(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const expectedHash = String(payload.expectedConfigHash || '').trim();
+  if (!expectedHash) return { ok: false, error: 'missing_expected_hash' };
+  if (!Array.isArray(payload.cities)) return { ok: false, error: 'missing_cities' };
+
+  const serverConfig = require('./serverConfig.js');
+  const countryGeo = require('./countryGeo.js');
+  const ctPush = require('./serverConfigCtPush.js');
+  const current = (() => {
+    try { return serverConfig.readServerConfigEffective({}); } catch { return null; }
+  })();
+  if (!current || current.unreadable === true) return { ok: false, error: 'server_config_unreadable' };
+
+  const mirror = ctPush.buildConfigMirror();
+  const hash = ctPush.hashConfigMirror(mirror);
+  const currentCities = (current.robe && Array.isArray(current.robe.cidadesExtrasGlobais))
+    ? current.robe.cidadesExtrasGlobais.map((c) => String(c || '').trim()).filter(Boolean)
+    : [];
+  if (!hash || hash !== expectedHash) {
+    return {
+      ok: false,
+      error: 'config_changed',
+      cities: currentCities,
+      configHash: hash || null,
+      updatedAt: Number(current.updatedAt || 0) || null
+    };
+  }
+
+  const countryId = String((current.country && current.country.id) || 'br').trim().toLowerCase() === 'us' ? 'us' : 'br';
+  const currentByKey = new Map(currentCities.map((name) => [__locationCityKey(name), name]));
+  const canonical = [];
+  const seen = new Set();
+  const unknown = [];
+  for (const raw of payload.cities) {
+    const text = String(raw || '').trim();
+    if (!text) continue;
+    const key = __locationCityKey(text);
+    if (!key || seen.has(key)) continue;
+    const known = countryGeo.findCanonicalCity(text, { countryId });
+    if (known) {
+      seen.add(key);
+      canonical.push(known);
+      continue;
+    }
+    const kept = currentByKey.get(key);
+    if (kept) {
+      seen.add(key);
+      canonical.push(kept);
+      continue;
+    }
+    unknown.push(text);
+  }
+  if (unknown.length) {
+    return { ok: false, error: 'unknown_cities', unknown };
+  }
+  if (canonical.length > 200) return { ok: false, error: 'too_many_cities' };
+
+  const wr = serverConfig.writeServerConfigAtomic({
+    payload: { robe: { cidadesExtrasGlobais: canonical } },
+    updatedBy: 'ct_menu_servidores'
+  });
+  if (!wr || wr.ok !== true) {
+    return { ok: false, error: (wr && wr.error) ? String(wr.error) : 'write_failed' };
+  }
+  const savedCities = (wr.saved && wr.saved.robe && Array.isArray(wr.saved.robe.cidadesExtrasGlobais))
+    ? wr.saved.robe.cidadesExtrasGlobais.slice()
+    : canonical.slice();
+
+  let pushed = false;
+  try {
+    if (ctPush && typeof ctPush.requestPush === 'function') ctPush.requestPush('ct_locations_save');
+    if (typeof global.__serverEventBridgeTick === 'function') {
+      const tick = await Promise.race([
+        global.__serverEventBridgeTick('config_save'),
+        new Promise((resolve) => setTimeout(() => resolve({ ok: false, error: 'push_timeout' }), 2500))
+      ]);
+      pushed = !!(tick && tick.ok === true);
+    }
+  } catch {}
+
+  try {
+    const robe = require('./robe.js');
+    if (robe && typeof robe.scheduleRobeV2Regeneration === 'function') {
+      robe.scheduleRobeV2Regeneration({ reason: 'ct_locations_save', wait: false }).catch(() => {});
+    }
+  } catch {}
+
+  const mirrorAfter = ctPush.buildConfigMirror();
+  const hashAfter = ctPush.hashConfigMirror(mirrorAfter);
+  return {
+    ok: true,
+    cities: savedCities,
+    configHash: hashAfter || null,
+    updatedAt: Number(wr.saved && wr.saved.updatedAt || 0) || null,
+    pushed
+  };
+}
+
 async function execSetCtConfig(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
   const ctBaseUrl = (payload.ctBaseUrl !== undefined) ? String(payload.ctBaseUrl || '').trim() : undefined;
@@ -4240,6 +4361,26 @@ async function applyCommands(cmds = []) {
       else if (c.type === 'logs_manifest')    { await execLogsManifest(c); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
       else if (c.type === 'health_bundle')    { await execHealthBundle(c); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
       else if (c.type === 'set_ct_config')    { details = await execSetCtConfig(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'get_server_location_catalog') {
+        details = await execGetServerLocationCatalog(c);
+        results.push({
+          id: cmdId || null,
+          type: cmdType,
+          ok: !!(details && details.ok === true),
+          error: (details && details.ok === true) ? null : String((details && details.error) || 'catalog_failed'),
+          details: details || null
+        });
+      }
+      else if (c.type === 'set_server_locations') {
+        details = await execSetServerLocations(c);
+        results.push({
+          id: cmdId || null,
+          type: cmdType,
+          ok: !!(details && details.ok === true),
+          error: (details && details.ok === true) ? null : String((details && details.error) || 'set_server_locations_failed'),
+          details: details || null
+        });
+      }
       else if (c.type === 'set_groq_config')  { details = await execSetGroqConfig(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
       else if (c.type === 'reseed_host_id')   { details = await execReseedHostId(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
       else if (c.type === 'gateway_set_proxies' || c.type === 'gateway_reconcile') { details = await execGatewaySetProxies(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
