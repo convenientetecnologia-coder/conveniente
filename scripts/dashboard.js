@@ -3580,6 +3580,78 @@ function __locationCityKey(value) {
     .trim();
 }
 
+function __robePlanCityKey(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLocaleLowerCase('pt-BR')
+    .trim();
+}
+
+function __readPostingPlanProof(savedCities, startedAt) {
+  const fp = path.join(__dirname, '..', 'dados', 'robe_v2_queue.json');
+  let st = null;
+  try { st = JSON.parse(fsSync.readFileSync(fp, 'utf8')); } catch { st = null; }
+  if (!st || typeof st !== 'object') return { ok: false, error: 'posting_plan_unreadable' };
+  const queue = Array.isArray(st.queue) ? st.queue : [];
+  const lastBlockLen = Math.max(0, Number(st.lastBlockQueueLen || 0) || 0);
+  const planValidUntil = Number(st.planValidUntil || 0) || 0;
+  const generatedAt = Number(st.planGeneratedAt || 0) || 0;
+  const backoffUntil = Number(st.failures && st.failures.backoffUntil || 0) || 0;
+  const lastError = (st.meta && st.meta.lastError) ? String(st.meta.lastError) : '';
+  const want = (Array.isArray(savedCities) ? savedCities : []).map(__robePlanCityKey).filter(Boolean);
+  if (!want.length) {
+    if (queue.length !== 0) return { ok: false, error: 'posting_plan_not_cleared', queueTotal: queue.length };
+    return { ok: true, queueTotal: 0, planValidUntil: 0, planGeneratedAt: generatedAt, planRebuilt: true };
+  }
+  if (st.regenPending === true) return { ok: false, error: 'posting_plan_still_generating', queueTotal: queue.length };
+  if (backoffUntil > Date.now()) return { ok: false, error: lastError ? `posting_plan_backoff:${lastError}` : 'posting_plan_backoff', queueTotal: queue.length };
+  if (generatedAt < (Number(startedAt || 0) - 5000)) return { ok: false, error: 'posting_plan_stale', queueTotal: queue.length };
+  if (!lastBlockLen || queue.length <= 0 || queue.length > lastBlockLen) {
+    return { ok: false, error: 'posting_plan_mixed', queueTotal: queue.length, lastBlockLen };
+  }
+  let sigCities = null;
+  try {
+    const sig = JSON.parse(String(st.meta && st.meta.configSig || ''));
+    sigCities = Array.isArray(sig && sig.cities) ? sig.cities : null;
+  } catch { sigCities = null; }
+  if (!sigCities || sigCities.length !== want.length) return { ok: false, error: 'posting_plan_cities_mismatch', queueTotal: queue.length };
+  const got = new Set(sigCities.map(__robePlanCityKey));
+  for (const key of want) {
+    if (!got.has(key)) return { ok: false, error: 'posting_plan_cities_mismatch', queueTotal: queue.length };
+  }
+  if (planValidUntil <= Date.now()) return { ok: false, error: 'posting_plan_not_valid', queueTotal: queue.length };
+  return {
+    ok: true,
+    queueTotal: queue.length,
+    planValidUntil,
+    planGeneratedAt: generatedAt,
+    planRebuilt: true
+  };
+}
+
+async function __rebuildPostingPlanFromCt(savedCities, startedAt) {
+  let lastErr = 'posting_plan_not_rebuilt';
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const r = await httpJson('/api/robes/v2/recalc', {
+        method: 'POST',
+        body: { reason: 'ct_locations_save', force: true },
+        headers: { 'x-operator': 'ct_menu_servidores' },
+        timeoutMs: 70000
+      });
+      if (!r || r.ok !== true) lastErr = (r && r.error) ? String(r.error) : 'robe_v2_recalc_failed';
+    } catch (e) {
+      lastErr = (e && e.message) ? String(e.message) : String(e);
+    }
+    const proof = __readPostingPlanProof(savedCities, startedAt);
+    if (proof.ok === true) return proof;
+    lastErr = proof.error || lastErr;
+  }
+  const proof = __readPostingPlanProof(savedCities, startedAt);
+  return proof.ok === true ? proof : { ok: false, error: lastErr, queueTotal: Number(proof.queueTotal || 0) || 0 };
+}
+
 async function execGetServerLocationCatalog() {
   const serverConfig = require('./serverConfig.js');
   const countryGeo = require('./countryGeo.js');
@@ -3662,6 +3734,15 @@ async function execSetServerLocations(cmd) {
     ? wr.saved.robe.cidadesExtrasGlobais.slice()
     : canonical.slice();
 
+  const startedAt = Date.now();
+  const workMode = String(wr.saved && wr.saved.robe && wr.saved.robe.workMode || '').trim().toLowerCase();
+  const planApplies = workMode === 'v2_auto' || workMode === 'v3_pmg' || workMode === 'v4_bairros';
+  let plan = { ok: true, planApplies: false, planRebuilt: false, queueTotal: null, planValidUntil: null };
+  if (planApplies) {
+    plan = await __rebuildPostingPlanFromCt(savedCities, startedAt);
+    plan.planApplies = true;
+  }
+
   let pushed = false;
   try {
     if (ctPush && typeof ctPush.requestPush === 'function') ctPush.requestPush('ct_locations_save');
@@ -3674,22 +3755,22 @@ async function execSetServerLocations(cmd) {
     }
   } catch {}
 
-  try {
-    const robe = require('./robe.js');
-    if (robe && typeof robe.scheduleRobeV2Regeneration === 'function') {
-      robe.scheduleRobeV2Regeneration({ reason: 'ct_locations_save', wait: false }).catch(() => {});
-    }
-  } catch {}
-
   const mirrorAfter = ctPush.buildConfigMirror();
   const hashAfter = ctPush.hashConfigMirror(mirrorAfter);
-  return {
-    ok: true,
+  const base = {
     cities: savedCities,
     configHash: hashAfter || null,
     updatedAt: Number(wr.saved && wr.saved.updatedAt || 0) || null,
-    pushed
+    pushed,
+    planApplies,
+    planRebuilt: plan.planRebuilt === true,
+    queueTotal: plan.queueTotal == null ? null : Number(plan.queueTotal || 0) || 0,
+    planValidUntil: Number(plan.planValidUntil || 0) || null
   };
+  if (planApplies && plan.ok !== true) {
+    return { ok: false, error: String(plan.error || 'posting_plan_not_rebuilt'), ...base, planRebuilt: false };
+  }
+  return { ok: true, ...base };
 }
 
 async function execSetCtConfig(cmd) {
