@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { extractMarketplacePhoneConfirmInfoFromText, isUnitedStatesDialOption, classifyIdToday, idFlagsForToday, phoneAlertFlagsForToday, shouldMarkDocError, isMarketplaceActionText, isIdentityConfirmLabel, isIdentityDocumentLabel, isIdentityReviewText, isIdentityRetryText, isIdentityDocIntroText, isAdvanceLabel } = require("./robePostPublishId.js");
+const { extractMarketplacePhoneConfirmInfoFromText, isUnitedStatesDialOption, classifyIdToday, idFlagsForToday, phoneAlertFlagsForToday, shouldMarkDocError, isMarketplaceActionText, isIdentityConfirmLabel, isIdentityDocumentLabel, isIdentityReviewText, isIdentityRetryText, isIdentityDocIntroText, isAdvanceLabel, isCnhChoiceLabel } = require("./robePostPublishId.js");
 
 test("o botao de identidade vale pelo sentido, nao pela frase exata", () => {
   assert.equal(isIdentityConfirmLabel("Confirmar identidade"), true);
@@ -29,6 +29,10 @@ test("o botao de identidade vale pelo sentido, nao pela frase exata", () => {
   assert.equal(isAdvanceLabel("Avançar"), true);
   assert.equal(isAdvanceLabel("Next"), true);
   assert.equal(isAdvanceLabel("Confirmar identidade"), false);
+  assert.equal(isCnhChoiceLabel("Carteira de habilitação"), true);
+  assert.equal(isCnhChoiceLabel("Driver's license"), true);
+  assert.equal(isCnhChoiceLabel("Confirme sua identidade com um documento"), false);
+  assert.equal(isCnhChoiceLabel("Carteira de habilitação e passaporte"), false);
 });
 
 test("reconhece o aviso novo de identidade e as frases antigas", () => {
