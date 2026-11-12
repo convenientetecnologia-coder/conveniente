@@ -19105,9 +19105,22 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
     const pg = pick();
     if (!pg) return { ok: false, skipped: 'no_pages' };
 
-    // 1) Ban/Suspensão (desabilitamos sua conta, disabled_checkpoint)
+    // 1) Ban/Suspensão (desabilitamos sua conta, suspendemos seu perfil, disabled_checkpoint)
     try {
-      const bd = await browserHelper.detectAccountSuspended(pg).catch(()=>({ banned:false }));
+      const banPages = [];
+      for (const candidate of (pages || []).slice(0, HUMAN_RECONCILE_CFG.maxPagesScan)) {
+        const u = safeUrl(candidate);
+        if (!/(facebook|messenger)\.com/i.test(u)) continue;
+        banPages.push({ pg: candidate, fb: /facebook\.com/i.test(u) });
+      }
+      banPages.sort((a, b) => Number(b.fb) - Number(a.fb));
+      if (!banPages.length && pg) banPages.push({ pg, fb: false });
+      let bd = null;
+      let banPage = pg;
+      for (const item of banPages) {
+        const found = await browserHelper.detectAccountSuspended(item.pg).catch(()=>({ banned:false }));
+        if (found && found.banned) { bd = found; banPage = item.pg; break; }
+      }
       if (bd && bd.banned) {
         try {
           provisionAudit.append({
@@ -19115,7 +19128,7 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
             event: 'human_reconcile_banned',
             nome: String(nome||''),
             source: String(source||''),
-            url: String(safeUrl(pg)||'').slice(0,220),
+            url: String(safeUrl(banPage)||'').slice(0,220),
             reason: String(bd.reason||'banned').slice(0,140)
           });
         } catch {}
@@ -20831,9 +20844,21 @@ async function nurseTick() {
         }
       } catch {}
       try {
-        const bd = await browserHelper.detectAccountSuspended(p0);
-        if (bd && bd.banned) {
-          await setBannedFlag(nome, { reason: bd.reason || '', snippet: bd.snippet || '' });
+        const banCandidates = [];
+        for (const pg of (pages || []).slice(0, 8)) {
+          let u = '';
+          try { u = (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch {}
+          if (!/(facebook|messenger)\.com/i.test(u)) continue;
+          banCandidates.push({ pg, fb: /facebook\.com/i.test(u) });
+        }
+        banCandidates.sort((a, b) => Number(b.fb) - Number(a.fb));
+        if (!banCandidates.length && p0) banCandidates.push({ pg: p0, fb: false });
+        for (const item of banCandidates) {
+          const bd = await browserHelper.detectAccountSuspended(item.pg);
+          if (bd && bd.banned) {
+            await setBannedFlag(nome, { reason: bd.reason || '', snippet: bd.snippet || '' });
+            break;
+          }
         }
       } catch {}
 

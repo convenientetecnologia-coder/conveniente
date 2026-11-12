@@ -8568,12 +8568,18 @@ async function detectAccountSuspended(page) {
         t.includes('desativamos sua conta') ||
         t.includes('conta desabilitada') ||
         t.includes('conta desativada') ||
+        t.includes('suspendemos seu perfil') ||
+        t.includes('seu perfil ser desabilitado permanentemente') ||
         t.includes('your account was suspended') ||
         t.includes('your account is suspended') ||
         t.includes('we disabled your account') ||
         t.includes('your account has been disabled') ||
+        t.includes('we suspended your profile') ||
+        t.includes('your profile is permanently disabled') ||
         t.includes('tu cuenta ha sido suspendida') ||
-        t.includes('tu cuenta esta suspendida')
+        t.includes('tu cuenta esta suspendida') ||
+        t.includes('suspendimos tu perfil') ||
+        t.includes('tu perfil sea deshabilitado permanentemente')
       );
 
       // Evidência adicional contendo prazo/efeito (opcional e robusta)
