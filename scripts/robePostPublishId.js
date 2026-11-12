@@ -751,36 +751,6 @@ async function detectIdWizardScreen(page) {
   }
 }
 
-async function setOverlayClickShield(page, block) {
-  try {
-    await page.evaluate((on) => {
-      window.__ctHumanOverlayIgnoreClicks = !!on;
-      const host = document.getElementById('ct-human-overlay-host');
-      if (!host) return;
-      const value = on ? 'none' : 'auto';
-      host.style.pointerEvents = value;
-      const root = host.shadowRoot;
-      if (!root) return;
-      let style = root.querySelector('#ct-block-clicks');
-      if (on) {
-        if (!style) {
-          style = document.createElement('style');
-          style.id = 'ct-block-clicks';
-          style.textContent = '#wrap, #wrap * { pointer-events: none !important; }';
-          root.appendChild(style);
-        }
-      } else if (style) {
-        style.remove();
-      }
-      const wrap = root.querySelector('#wrap');
-      if (wrap) {
-        wrap.style.pointerEvents = value;
-        wrap.classList.toggle('blocked', !!on);
-      }
-    }, !!block);
-  } catch {}
-}
-
 async function clickConfirmeSuaIdentidade(page) {
   try {
     const point = await page.evaluate(() => {
@@ -830,7 +800,6 @@ async function clickConfirmeSuaIdentidade(page) {
       };
     });
     if (!point) return false;
-    await setOverlayClickShield(page, true);
     await page.mouse.move(point.x, point.y);
     await sleep(300);
     await page.mouse.click(point.x, point.y, { delay: 60 });
@@ -887,7 +856,6 @@ async function clickIdentityDocument(page) {
       return { x: rect.left + (rect.width / 2), y: rect.top + (rect.height / 2), label: bestLabel };
     });
     if (!point) return false;
-    await setOverlayClickShield(page, true);
     await page.mouse.move(point.x, point.y);
     await sleep(300);
     await page.mouse.click(point.x, point.y, { delay: 60 });
@@ -1045,7 +1013,6 @@ async function clickAvancar(page) {
   }
   if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
     try {
-      await setOverlayClickShield(page, true);
       await page.mouse.move(point.x, point.y);
       await sleep(150);
       await page.mouse.click(point.x, point.y, { delay: 80 });
@@ -1137,68 +1104,65 @@ async function readNamedButton(page, labels) {
 async function clickBlueOverlay(page, labels) {
   const state = await readNamedButton(page, labels);
   if (!buttonLooksEnabled(state)) return false;
-  let point = null;
+  const handle = await page.evaluateHandle((wanted) => {
+    const normLocal = (s) => {
+      try {
+        return String(s || '')
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .toLowerCase()
+          .replace(/\s+/g, ' ')
+          .trim();
+      } catch {
+        return String(s || '').toLowerCase().trim();
+      }
+    };
+    const want = new Set(Array.isArray(wanted) ? wanted : []);
+    const hits = [];
+    for (const el of Array.from(document.querySelectorAll('span'))) {
+      const own = normLocal(el.innerText || el.textContent || '');
+      if (!want.has(own) || own.length > 40) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 8 || rect.height < 8 || rect.width > 220 || rect.height > 48) continue;
+      if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+      hits.push({ el, area: rect.width * rect.height });
+    }
+    hits.sort((a, b) => a.area - b.area);
+    const label = hits[0] && hits[0].el;
+    if (!label) return null;
+    let box = label;
+    let walk = label;
+    for (let i = 0; i < 6 && walk.parentElement && walk.parentElement !== document.body; i++) {
+      const parent = walk.parentElement;
+      const rect = parent.getBoundingClientRect();
+      const text = normLocal(parent.innerText || parent.textContent || '');
+      if (text.length > 40 || rect.height > 72 || rect.width > 320) break;
+      box = parent;
+      walk = parent;
+    }
+    const dialog = box.closest && box.closest('[role="dialog"],[aria-modal="true"]');
+    if (dialog) {
+      const boxRect = box.getBoundingClientRect();
+      const dialogRect = dialog.getBoundingClientRect();
+      const nearCloseX = boxRect.left > dialogRect.right - 56;
+      const nearCloseY = boxRect.top < dialogRect.top + 56;
+      if (nearCloseX && nearCloseY) return null;
+    }
+    return box;
+  }, labels);
+  const el = handle && handle.asElement && handle.asElement();
+  if (!el) {
+    try { if (handle) await handle.dispose(); } catch {}
+    return false;
+  }
   try {
-    point = await page.evaluate((wanted) => {
-      const normLocal = (s) => {
-        try {
-          return String(s || '')
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase()
-            .replace(/\s+/g, ' ')
-            .trim();
-        } catch {
-          return String(s || '').toLowerCase().trim();
-        }
-      };
-      const want = new Set(Array.isArray(wanted) ? wanted : []);
-      const hits = [];
-      for (const el of Array.from(document.querySelectorAll('span,div,button,[role="button"]'))) {
-        const aria = normLocal(el.getAttribute('aria-label') || '');
-        const own = normLocal(el.innerText || el.textContent || '');
-        if (!want.has(aria) && !want.has(own)) continue;
-        const rect = el.getBoundingClientRect();
-        if (rect.width < 4 || rect.height < 4) continue;
-        hits.push({ el, area: rect.width * rect.height, rect });
-      }
-      hits.sort((a, b) => a.area - b.area);
-      const label = hits[0] && hits[0].el;
-      if (!label) return null;
-      let box = label;
-      let overlay = null;
-      let walk = label;
-      while (walk && walk !== document.body) {
-        const found = Array.from(walk.children || []).find((child) => child.getAttribute && child.getAttribute('data-visualcompletion') === 'ignore');
-        if (found) {
-          const rect = found.getBoundingClientRect();
-          if (rect.width <= 500 && rect.height <= 220) {
-            box = walk;
-            overlay = found;
-          }
-          break;
-        }
-        walk = walk.parentElement;
-      }
-      const target = overlay || box;
-      const rect = target.getBoundingClientRect();
-      const x = rect.left + (rect.width / 2);
-      const y = rect.top + (rect.height / 2);
-      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-        target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }));
-      }
-      try { target.click(); } catch {}
-      return { x, y };
-    }, labels);
-  } catch {}
-  if (!(point && Number.isFinite(point.x) && Number.isFinite(point.y))) return false;
-  try {
-    await setOverlayClickShield(page, true);
-    await page.mouse.move(point.x, point.y);
-    await sleep(150);
-    await page.mouse.click(point.x, point.y, { delay: 80 });
-  } catch {}
-  return true;
+    await el.click({ delay: 80 });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    try { await handle.dispose(); } catch {}
+  }
 }
 
 async function uploadPromptOpen(page) {
@@ -1750,7 +1714,6 @@ async function clickCnhChoice(page) {
   } catch {}
   if (!point) return out;
   try {
-    await setOverlayClickShield(page, true);
     await page.mouse.click(point.x, point.y, { delay: 80 });
     out.clicked = true;
     out.label = point.label || 'Carteira de habilitação';
@@ -1860,7 +1823,6 @@ async function selectDocTypeCnh(page) {
         try {
           const box = await el.boundingBox();
           if (box) {
-            await setOverlayClickShield(page, true);
             await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { delay: 30 });
             out.method = 'puppeteer_mouse';
           }
@@ -3640,8 +3602,6 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
       await setMarketplaceDocFlag(nome, { reason: 'marketplace_doc_error', text: String(msg).slice(0, 400) });
     }
     return fail;
-  } finally {
-    await setOverlayClickShield(page, false);
   }
 }
 
@@ -3651,7 +3611,6 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
   const workDeadline = Number(deadlineAt) || Date.now() + BUDGET_TOTAL_MS;
 
   try {
-    await setOverlayClickShield(page, true);
     if (!pageHandleState(page).ok) {
       logEvt(nome, source, 'human_page_gone', {});
       return { ok: false, error: 'page_gone' };
@@ -3718,8 +3677,6 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
       await setMarketplaceDocFlag(nome, { reason: 'marketplace_doc_error', text: String(msg).slice(0, 400) });
     }
     return fail;
-  } finally {
-    await setOverlayClickShield(page, false);
   }
 }
 

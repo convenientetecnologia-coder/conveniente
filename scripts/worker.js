@@ -3100,13 +3100,6 @@ async function _installOverlayOnPage(nome, page) {
     try {
       await page.exposeFunction('__ctHumanOverlayRenewListings', async () => {
         const startedAt = Date.now();
-        try {
-          const live = controllers.get(String(nome || '').trim());
-          if (live && live.idVerifyInFlight === true) {
-            provisionAudit.append({ ts: startedAt, event: 'renew_listings_rejected_during_id', nome: String(nome || '') });
-            return { ok: false, skipped: true, reason: 'id_verify_in_flight', renewedCount: 0 };
-          }
-        } catch {}
         try { provisionAudit.append({ ts: startedAt, event: 'human_overlay_action_begin', nome: String(nome || ''), action: 'renew_listings' }); } catch {}
         try {
           const r = await handlers['renew-listings']({ nome, mode: 'manual', closeAfter: false });
@@ -3180,7 +3173,7 @@ async function _installOverlayOnPage(nome, page) {
             host.style.right = 'auto';
             host.style.bottom = 'auto';
             host.style.zIndex = '2147483647';
-            host.style.pointerEvents = window.__ctHumanOverlayIgnoreClicks === true ? 'none' : 'auto';
+            host.style.pointerEvents = 'auto';
             host.style.userSelect = 'none';
             host.style.fontFamily = 'system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif';
             document.documentElement.appendChild(host);
@@ -3189,7 +3182,6 @@ async function _installOverlayOnPage(nome, page) {
             shadow.innerHTML = `
               <style>
                 .wrap{ width: 360px; background:#0b1220; color:#e6e9ef; border:1px solid rgba(255,255,255,.18); border-radius:12px; box-shadow:0 12px 30px rgba(0,0,0,.45); overflow:hidden; pointer-events:auto; }
-                .wrap.blocked, .wrap.blocked *{ pointer-events:none !important; }
                 .hdr{ display:flex; align-items:center; justify-content:space-between; padding:10px 12px; background:rgba(255,255,255,.06); cursor:move; }
                 .ttl{ font-weight:700; font-size:13px; letter-spacing:.2px; }
                 .moveHint{ font-size:11px; opacity:.78; margin-top:2px; }
@@ -3248,14 +3240,6 @@ async function _installOverlayOnPage(nome, page) {
             `;
 
             const $ = (id) => shadow.getElementById(id);
-            if (window.__ctHumanOverlayIgnoreClicks === true) {
-              const wrap = $('wrap');
-              if (wrap) {
-                wrap.style.pointerEvents = 'none';
-                wrap.classList.add('blocked');
-              }
-              host.style.pointerEvents = 'none';
-            }
             const body = $('body');
             const scrollState = (() => {
               try {
@@ -15111,7 +15095,6 @@ const handlers = {
       }
       if (!page) return { ok: false, error: 'no_page', marked: false };
 
-      ctrl.idVerifyInFlight = true;
       try {
         const r = await robePostPublishId.runHumanVerifyId({
           page,
@@ -15136,8 +15119,6 @@ const handlers = {
         const msg = (e && e.message) ? String(e.message) : String(e);
         try { provisionAudit.append({ ts: Date.now(), event: 'human_verify_id_exception', nome: n, error: msg.slice(0, 220) }); } catch {}
         return { ok: false, error: msg, marked: false };
-      } finally {
-        ctrl.idVerifyInFlight = false;
       }
     });
   },
