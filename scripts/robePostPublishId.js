@@ -76,6 +76,22 @@ function isIdentityConfirmLabel(text) {
   return /\b(confirme|confirmar|confirma|confirm|verifique|verificar|verifica|verify)\b/.test(n);
 }
 
+function isIdentityDocumentLabel(text) {
+  const n = norm(text);
+  if (!n || n.length > 120) return false;
+  const hasThing = n.includes('identidade') || n.includes('identity') || n.includes('documento') || n.includes('document');
+  if (!hasThing) return false;
+  return /\b(carregar|carregue|envie|enviar|upload|adicionar|add)\b/.test(n);
+}
+
+function isIdentityReviewText(text) {
+  const n = norm(text);
+  if (!n) return false;
+  const hasId = n.includes('identidade') || n.includes('identity');
+  if (!hasId) return false;
+  return n.includes('em andamento') || n.includes('analis') || n.includes('enviad') || n.includes('submitted');
+}
+
 function isUnitedStatesDialOption(text) {
   const n = norm(text);
   if (!n) return false;
@@ -627,11 +643,17 @@ async function detectIdWizardScreen(page) {
       ) {
         return 'doc_type';
       }
-      if (
-        hasAria(/carregar documento de identidade/) ||
-        body.includes('carregar seu documento de identidade') ||
-        body.includes('carregar documento de identidade')
-      ) {
+      const docVerb = /\b(carregar|carregue|envie|enviar|upload|adicionar|add)\b/;
+      const buttonSaysDocument = Array.from(document.querySelectorAll('[role="button"],button,a,[role="link"]')).some((el) => {
+        const label = normLocal(`${el.getAttribute('aria-label') || ''} ${el.innerText || el.textContent || ''}`).slice(0, 120);
+        if (!label) return false;
+        const hasThing = label.includes('identidade') || label.includes('identity') || label.includes('documento') || label.includes('document');
+        return hasThing && docVerb.test(label);
+      });
+      const bodySaysDocument = docVerb.test(body) &&
+        (body.includes('documento') || body.includes('document') || body.includes('foto')) &&
+        (body.includes('identidade') || body.includes('identity'));
+      if (buttonSaysDocument || bodySaysDocument) {
         return 'carregar_doc';
       }
       if (
@@ -715,6 +737,61 @@ async function clickConfirmeSuaIdentidade(page) {
         y: rect.top + (rect.height / 2),
         label: bestLabel
       };
+    });
+    if (!point) return false;
+    await page.mouse.move(point.x, point.y);
+    await sleep(300);
+    await page.mouse.click(point.x, point.y, { delay: 60 });
+    return point.label || true;
+  } catch {
+    return false;
+  }
+}
+
+async function clickIdentityDocument(page) {
+  try {
+    const point = await page.evaluate(() => {
+      const normLocal = (s) => {
+        try {
+          return String(s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+        } catch {
+          return String(s || '').toLowerCase().trim();
+        }
+      };
+      const isDoc = (text) => {
+        const n = normLocal(text);
+        if (!n || n.length > 120) return false;
+        const hasThing = n.includes('identidade') || n.includes('identity') || n.includes('documento') || n.includes('document');
+        if (!hasThing) return false;
+        return /\b(carregar|carregue|envie|enviar|upload|adicionar|add)\b/.test(n);
+      };
+      const buttons = Array.from(document.querySelectorAll('[role="button"],button,a,[role="link"]'));
+      let best = null;
+      let bestLen = 999;
+      let bestLabel = '';
+      for (const el of buttons) {
+        const aria = normLocal(el.getAttribute('aria-label') || '');
+        const own = normLocal(el.innerText || el.textContent || '');
+        const label = isDoc(aria) ? aria : (isDoc(own) ? own : '');
+        if (!label) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 8 || rect.height < 8) continue;
+        const style = window.getComputedStyle(el);
+        if (!style || style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') continue;
+        if (label.length < bestLen) {
+          best = el;
+          bestLen = label.length;
+          bestLabel = String(el.getAttribute('aria-label') || el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+        }
+      }
+      if (!best) return null;
+      const rect = best.getBoundingClientRect();
+      return { x: rect.left + (rect.width / 2), y: rect.top + (rect.height / 2), label: bestLabel };
     });
     if (!point) return false;
     await page.mouse.move(point.x, point.y);
@@ -1864,14 +1941,15 @@ async function waitListingIdentityPrompt(page, { maxMs = 45000, deadlineAt } = {
           }
         };
         const body = normLocal(document.body && (document.body.innerText || '') || '');
-        const btn = document.querySelector('[aria-label="Confirme sua identidade"], [aria-label*="Confirme sua identidade"], [aria-label="Verificar identidade"]');
+        const verb = /\b(confirme|confirmar|confirma|confirm|verifique|verificar|verifica|verify)\b/;
+        const hasBtn = Array.from(document.querySelectorAll('[role="button"],button')).some((el) => {
+          const label = normLocal(`${el.getAttribute('aria-label') || ''} ${el.innerText || el.textContent || ''}`).slice(0, 80);
+          if (!label || (!label.includes('identidade') && !label.includes('identity'))) return false;
+          return verb.test(label);
+        });
         return {
-          hasBtn: !!btn,
-          hasText:
-            body.includes('confirme sua identidade') ||
-            body.includes('verifique sua identidade para publicar') ||
-            body.includes('verifique sua identidade') ||
-            body.includes('verificar identidade'),
+          hasBtn,
+          hasText: verb.test(body) && (body.includes('identidade') || body.includes('identity')),
           onItem: /\/marketplace\/item\//.test(location.pathname || '')
         };
       });
@@ -1920,13 +1998,14 @@ async function isPendingReviewScreen(page) {
           return String(s || '').toLowerCase().trim();
         }
       };
-      const hit = (t) =>
-        t.includes('confirmacao de identidade em andamento') ||
-        t.includes('confirmação de identidade em andamento') ||
-        t.includes('identity confirmation in progress') ||
-        t.includes('normalmente analisamos suas informacoes') ||
-        t.includes('normalmente analisamos suas informações') ||
-        (t.includes('em andamento') && t.includes('48 horas'));
+      const hit = (t) => {
+        const hasId = t.includes('identidade') || t.includes('identity');
+        const reviewing = t.includes('em andamento') || t.includes('analis') || t.includes('enviad') || t.includes('submitted');
+        return (hasId && reviewing) ||
+          t.includes('normalmente analisamos suas informacoes') ||
+          t.includes('normalmente analisamos suas informações') ||
+          (t.includes('em andamento') && t.includes('48 horas'));
+      };
       const body = normLocal(document.body && (document.body.innerText || document.body.textContent) || '');
       if (hit(body)) return true;
       const dialogs = Array.from(document.querySelectorAll('div[role="dialog"], [aria-modal="true"]'));
@@ -1940,7 +2019,7 @@ async function isPendingReviewScreen(page) {
         const tx = normLocal(el.innerText || '');
         return al === 'pronto' || tx === 'pronto';
       });
-      if (pronto && (body.includes('confirmacao de identidade') || body.includes('em andamento'))) return true;
+      if (pronto && ((body.includes('identidade') || body.includes('identity')) || body.includes('em andamento'))) return true;
       return false;
     }));
   } catch {
@@ -2729,18 +2808,27 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
     return { ok: false, error: 'id_png_missing' };
   }
 
-  // 4) CRÍTICO (faltava): "Carregar documento de identidade"
+  // 4) Carregar / enviar o documento de identidade. O texto do botão pode mudar.
   if (screen === 'carregar_doc' || screen === 'unknown' || screen === 'continuar') {
-    const loadDoc = await waitClickByText(
-      page,
-      [
-        'carregar documento de identidade',
-        'carregar seu documento de identidade',
-        'upload identity document',
-        'upload your id'
-      ],
-      { maxMs: 120000, deadlineAt, withinDialog: false, settleMs: WAIT_STEP_MS + 3000 }
-    );
+    let loadDoc = false;
+    const loadStart = Date.now();
+    while (!loadDoc && (Date.now() - loadStart) < 20000 && deadlineLeft(deadlineAt) > 0) {
+      loadDoc = await clickIdentityDocument(page);
+      if (!loadDoc) await sleep(1500);
+    }
+    if (!loadDoc) {
+      loadDoc = await waitClickByText(
+        page,
+        [
+          'carregar documento de identidade',
+          'carregar seu documento de identidade',
+          'enviar documento de identidade',
+          'upload identity document',
+          'upload your id'
+        ],
+        { maxMs: 20000, deadlineAt, withinDialog: false, settleMs: WAIT_STEP_MS + 3000 }
+      );
+    }
     logEvt(nome, source, 'wizard_carregar_documento', { ok: !!loadDoc, screenBefore: screen });
     if (!loadDoc) {
       // Se já estamos em doc_type/upload, ok; senão falha explícita.
@@ -3058,6 +3146,8 @@ module.exports = {
   todaySP,
   isMarketplaceActionText,
   isIdentityConfirmLabel,
+  isIdentityDocumentLabel,
+  isIdentityReviewText,
   extractMarketplacePhoneConfirmInfoFromText,
   isUnitedStatesDialOption,
   isDoneTodayFromDay,
