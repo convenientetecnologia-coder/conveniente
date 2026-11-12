@@ -853,9 +853,12 @@ async function identityDocIntroStillOpen(page) {
   return pageHasNorm(page, "(n.includes('com um documento') || n.includes('reconhecimento facial')) && (n.includes('identidade') || n.includes('identity'))");
 }
 
-async function listAvancarPoints(page) {
+async function clickAvancar(page) {
+  const beforeRetry = await identityRetryStillOpen(page);
+  const beforeIntro = !beforeRetry && await identityDocIntroStillOpen(page);
+  let point = null;
   try {
-    return await page.evaluate(() => {
+    point = await page.evaluate(() => {
       const normLocal = (s) => {
         try {
           return String(s || '')
@@ -873,82 +876,102 @@ async function listAvancarPoints(page) {
         if (!n || n.length > 40) return false;
         return n === 'avancar' || n === 'next';
       };
-      const retryBoxes = Array.from(document.querySelectorAll('div,section')).filter((el) => {
-        const t = normLocal(el.innerText || el.textContent || '');
-        if (t.length > 1600 || !t.includes('avancar') && !t.includes('next')) return false;
-        const retry = t.includes('nao foi possivel') && t.includes('identidade');
-        const intro = (t.includes('com um documento') || t.includes('reconhecimento facial') || t.includes('facial recognition')) && (t.includes('identidade') || t.includes('identity'));
-        return retry || intro;
-      });
-      const scope = retryBoxes.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)[0] || document;
-      const nodes = Array.from(scope.querySelectorAll('span,div,button,[role="button"]'));
-      const out = [];
-      const seen = new Set();
+      const visible = (el) => {
+        if (!el || !el.getBoundingClientRect) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 4 || rect.height < 4) return false;
+        if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
+        const style = window.getComputedStyle(el);
+        return !!(style && style.display !== 'none' && style.visibility !== 'hidden');
+      };
+      const inDialog = (el) => {
+        let p = el;
+        for (let i = 0; i < 14 && p; i++) {
+          const t = normLocal(p.innerText || p.textContent || '');
+          if (t.length > 2500) {
+            p = p.parentElement;
+            continue;
+          }
+          const intro = (t.includes('com um documento') || t.includes('reconhecimento facial') || t.includes('facial recognition')) && (t.includes('identidade') || t.includes('identity'));
+          const retry = t.includes('nao foi possivel') && t.includes('identidade');
+          if (intro || retry) return true;
+          p = p.parentElement;
+        }
+        return false;
+      };
+      const fire = (el) => {
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        const x = rect.left + (rect.width / 2);
+        const y = rect.top + (rect.height / 2);
+        for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+          el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }));
+        }
+        try { el.click(); } catch {}
+      };
+      const hits = [];
+      const nodes = Array.from(document.querySelectorAll('span,div,button,[role="button"]'));
       for (const el of nodes) {
         const aria = normLocal(el.getAttribute('aria-label') || '');
         const own = normLocal(el.innerText || el.textContent || '');
         if (!isAdvance(aria) && !isAdvance(own)) continue;
-        let box = el;
-        let overlayEl = null;
+        if (!visible(el)) continue;
+        let overlay = null;
         let walk = el;
         while (walk && walk !== document.body) {
           const role = walk.getAttribute ? String(walk.getAttribute('role') || '') : '';
-          const overlay = Array.from(walk.children || []).find((child) => child.getAttribute && child.getAttribute('data-visualcompletion') === 'ignore');
-          if (overlay) overlayEl = overlay;
-          if (role === 'button' || String(walk.tagName || '') === 'BUTTON' || overlay) {
-            box = walk;
-            if (role === 'button' || String(walk.tagName || '') === 'BUTTON') break;
+          const found = Array.from(walk.children || []).find((child) => child.getAttribute && child.getAttribute('data-visualcompletion') === 'ignore');
+          if (found || role === 'button' || String(walk.tagName || '') === 'BUTTON') {
+            const probe = found || walk;
+            const rect = probe.getBoundingClientRect();
+            if (rect.width <= 500 && rect.height <= 220) overlay = found || null;
+            break;
           }
           walk = walk.parentElement;
         }
-        const target = overlayEl || box;
-        if (!target || seen.has(target)) continue;
-        seen.add(target);
-        const rect = target.getBoundingClientRect();
-        if (rect.width < 8 || rect.height < 8 || rect.width > 500 || rect.height > 160) continue;
-        if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) continue;
-        const style = window.getComputedStyle(target);
-        if (!style || style.display === 'none' || style.visibility === 'hidden') continue;
-        out.push({
-          x: rect.left + (rect.width / 2),
-          y: rect.top + (rect.height / 2),
-          label: isAdvance(aria) ? aria : own,
-          inRetry: scope !== document
+        const textRect = el.getBoundingClientRect();
+        hits.push({
+          el,
+          overlay,
+          x: textRect.left + (textRect.width / 2),
+          y: textRect.top + (textRect.height / 2),
+          area: textRect.width * textRect.height,
+          inDialog: inDialog(el)
         });
       }
-      out.sort((a, b) => Number(b.inRetry) - Number(a.inRetry));
-      return out.slice(0, 4);
+      hits.sort((a, b) => Number(b.inDialog) - Number(a.inDialog) || a.area - b.area);
+      const pick = hits[0];
+      if (!pick) return null;
+      fire(pick.overlay || pick.el);
+      if (pick.overlay) fire(pick.el);
+      return { x: pick.x, y: pick.y };
     });
-  } catch {
-    return [];
+  } catch {}
+  await sleep(900);
+  if ((beforeRetry || beforeIntro) && !(await (beforeRetry ? identityRetryStillOpen(page) : identityDocIntroStillOpen(page)))) {
+    return true;
   }
-}
-
-async function clickAvancar(page) {
-  const beforeRetry = await identityRetryStillOpen(page);
-  const beforeIntro = !beforeRetry && await identityDocIntroStillOpen(page);
-  const points = await listAvancarPoints(page);
-  if (!points.length) return false;
-  for (const point of points) {
+  if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
     try {
       await page.mouse.move(point.x, point.y);
-      await sleep(200);
+      await sleep(150);
       await page.mouse.click(point.x, point.y, { delay: 80 });
     } catch {}
-    await sleep(1200);
-    if (beforeRetry) {
-      if (!(await identityRetryStillOpen(page))) return point.label || true;
-      continue;
-    }
-    if (beforeIntro) {
-      if (!(await identityDocIntroStillOpen(page))) return point.label || true;
-      continue;
-    }
-    return point.label || true;
+    await sleep(900);
   }
-  if (beforeRetry && await identityRetryStillOpen(page)) return false;
-  if (beforeIntro && await identityDocIntroStillOpen(page)) return false;
-  return points[0].label || true;
+  if (beforeRetry) return !(await identityRetryStillOpen(page));
+  if (beforeIntro) return !(await identityDocIntroStillOpen(page));
+  return !!point;
+}
+
+async function clickDocIntroAvancar(page, deadlineAt) {
+  let advanced = false;
+  const start = Date.now();
+  while (!advanced && (Date.now() - start) < 20000 && deadlineLeft(deadlineAt) > 0) {
+    advanced = await clickAvancar(page);
+    if (!advanced) await sleep(1000);
+  }
+  return advanced;
 }
 
 async function waitForScreenAfterConfirmIdentity(page, { deadlineAt, minMs = 8000, maxMs = 60000 } = {}) {
@@ -962,7 +985,8 @@ async function waitForScreenAfterConfirmIdentity(page, { deadlineAt, minMs = 800
     'upload_photo',
     'success',
     'pending_review',
-    'identity_retry'
+    'identity_retry',
+    'identity_doc_intro'
   ]);
   let last = '';
   let streak = 0;
@@ -2936,12 +2960,7 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
   }
 
   if (screen === 'identity_doc_intro') {
-    let introAdvance = false;
-    const introStart = Date.now();
-    while (!introAdvance && (Date.now() - introStart) < 20000 && deadlineLeft(deadlineAt) > 0) {
-      introAdvance = await clickAvancar(page);
-      if (!introAdvance) await sleep(1000);
-    }
+    const introAdvance = await clickDocIntroAvancar(page, deadlineAt);
     logEvt(nome, source, 'wizard_doc_intro_avancar', { ok: !!introAdvance });
     if (!introAdvance) return { ok: false, error: 'doc_intro_avancar_not_clicked' };
     screen = await waitForWizardScreen(page, ['carregar_doc', 'doc_type', 'upload_photo', 'continuar', 'success'], {
@@ -3014,10 +3033,20 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
         return { ok: false, error: 'carregar_documento_not_clicked' };
       }
     } else {
-      screen = await waitForWizardScreen(page, ['doc_type', 'upload_photo', 'marketplace_phone_confirm'], {
+      screen = await waitForWizardScreen(page, ['doc_type', 'upload_photo', 'marketplace_phone_confirm', 'identity_doc_intro'], {
         maxMs: 90000,
         deadlineAt
       });
+      if (screen === 'identity_doc_intro' || await identityDocIntroStillOpen(page)) {
+        const introAdvance = await clickDocIntroAvancar(page, deadlineAt);
+        logEvt(nome, source, 'wizard_doc_intro_avancar', { ok: !!introAdvance, where: 'after_carregar' });
+        if (!introAdvance) return { ok: false, error: 'doc_intro_avancar_not_clicked' };
+        screen = await waitForWizardScreen(page, ['carregar_doc', 'doc_type', 'upload_photo', 'continuar', 'success'], {
+          maxMs: 30000,
+          deadlineAt
+        });
+        if (screen === 'identity_doc_intro') return { ok: false, error: 'doc_intro_avancar_not_clicked' };
+      }
       if (screen === 'marketplace_phone_confirm') {
         const handoff = await maybeMarketplacePhoneConfirm('after_carregar_documento');
         if (handoff) return handoff;
@@ -3066,7 +3095,7 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
   const findStart = Date.now();
   while (!input && Date.now() - findStart < 120000 && deadlineLeft(deadlineAt) > 0) {
     if (await identityDocIntroStillOpen(page)) {
-      const advanced = await clickAvancar(page);
+      const advanced = await clickDocIntroAvancar(page, deadlineAt);
       logEvt(nome, source, 'wizard_doc_intro_avancar_late', { ok: !!advanced });
       if (!advanced) return { ok: false, error: 'doc_intro_avancar_not_clicked' };
       await sleep(1500);
