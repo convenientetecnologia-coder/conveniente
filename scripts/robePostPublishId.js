@@ -1731,129 +1731,32 @@ async function clickCnhChoice(page) {
         t === 'driver license' ||
         t === "driver's license" ||
         t === 'drivers license';
-      const visible = (el) => {
-        if (!el || !el.getBoundingClientRect) return false;
-        const rect = el.getBoundingClientRect();
-        return rect.width >= 8 && rect.height >= 8 && rect.bottom > 0 && rect.right > 0 && rect.top < window.innerHeight && rect.left < window.innerWidth;
-      };
       const hits = [];
       for (const el of Array.from(document.querySelectorAll('span,div,label'))) {
         const own = normLocal(el.innerText || el.textContent || '');
-        if (!isCnhLabel(own) || !visible(el)) continue;
+        if (!isCnhLabel(own)) continue;
         const rect = el.getBoundingClientRect();
-        hits.push({ el, area: rect.width * rect.height });
+        if (rect.width < 8 || rect.height < 8 || rect.bottom < 0 || rect.top > window.innerHeight) continue;
+        hits.push({
+          x: rect.left + (rect.width / 2),
+          y: rect.top + (rect.height / 2),
+          area: rect.width * rect.height,
+          label: own
+        });
       }
       hits.sort((a, b) => a.area - b.area);
-      const label = hits[0] && hits[0].el;
-      if (!label) return null;
-      let row = label;
-      let walk = label;
-      for (let i = 0; i < 8 && walk && walk.parentElement && walk.parentElement !== document.body; i++) {
-        const parent = walk.parentElement;
-        const text = normLocal(parent.innerText || parent.textContent || '');
-        if (text.length > 80) break;
-        row = parent;
-        walk = parent;
-      }
-      const icon = row.querySelector && row.querySelector('i[data-visualcompletion="css-img"]');
-      const iconMark = (el) => {
-        if (!el) return '';
-        const style = window.getComputedStyle(el);
-        return `${style.backgroundPosition || ''}|${style.backgroundImage || ''}`;
-      };
-      const beforePos = iconMark(icon);
-      const fire = (el) => {
-        if (!el) return;
-        const rect = el.getBoundingClientRect();
-        const x = rect.left + (rect.width / 2);
-        const y = rect.top + (rect.height / 2);
-        for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-          el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }));
-        }
-        try { el.click(); } catch {}
-      };
-      fire(row);
-      fire(label);
-      if (icon) fire(icon);
-      const labelRect = label.getBoundingClientRect();
-      const iconRect = icon ? icon.getBoundingClientRect() : null;
-      return {
-        x: labelRect.left + (labelRect.width / 2),
-        y: labelRect.top + (labelRect.height / 2),
-        iconX: iconRect ? iconRect.left + (iconRect.width / 2) : null,
-        iconY: iconRect ? iconRect.top + (iconRect.height / 2) : null,
-        beforePos,
-        label: normLocal(label.innerText || label.textContent || '').slice(0, 80)
-      };
+      return hits[0] || null;
     });
   } catch {}
   if (!point) return out;
-  out.clicked = true;
-  out.label = point.label || 'Carteira de habilitação';
   try {
     await setOverlayClickShield(page, true);
-    await page.mouse.move(point.x, point.y);
-    await sleep(150);
-    await page.mouse.click(point.x, point.y, { delay: 60 });
-    if (Number.isFinite(point.iconX) && Number.isFinite(point.iconY)) {
-      await page.mouse.click(point.iconX, point.iconY, { delay: 40 });
-    }
+    await page.mouse.click(point.x, point.y, { delay: 80 });
+    out.clicked = true;
+    out.label = point.label || 'Carteira de habilitação';
   } catch {}
-  await sleep(800);
-  try {
-    const after = await page.evaluate((beforePos) => {
-      const normLocal = (s) => {
-        try {
-          return String(s || '')
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase()
-            .replace(/\s+/g, ' ')
-            .trim();
-        } catch {
-          return String(s || '').toLowerCase().trim();
-        }
-      };
-      const isCnhLabel = (t) =>
-        t === 'carteira de habilitacao' ||
-        t === 'driver license' ||
-        t === "driver's license" ||
-        t === 'drivers license';
-      const label = Array.from(document.querySelectorAll('span,div,label')).find((el) => {
-        const own = normLocal(el.innerText || el.textContent || '');
-        if (!isCnhLabel(own)) return false;
-        const rect = el.getBoundingClientRect();
-        return rect.width >= 8 && rect.height >= 8;
-      });
-      const body = normLocal(document.body && (document.body.innerText || document.body.textContent) || '');
-      const upload = !!document.querySelector('input[type="file"]') || body.includes('carregue uma foto do seu documento');
-      const intro = (body.includes('com um documento') || body.includes('reconhecimento facial')) && (body.includes('identidade') || body.includes('identity'));
-      if (!label) return { gone: true, aria: false, pos: '', upload, intro };
-      let row = label;
-      let walk = label;
-      for (let i = 0; i < 8 && walk && walk.parentElement && walk.parentElement !== document.body; i++) {
-        const parent = walk.parentElement;
-        const text = normLocal(parent.innerText || parent.textContent || '');
-        if (text.length > 80) break;
-        row = parent;
-        walk = parent;
-      }
-      let aria = false;
-      let p = label;
-      while (p) {
-        if (p.getAttribute && (p.getAttribute('aria-checked') === 'true' || p.getAttribute('aria-selected') === 'true' || p.getAttribute('aria-pressed') === 'true')) aria = true;
-        if (p === row) break;
-        p = p.parentElement;
-      }
-      const input = row.querySelector && row.querySelector('input[type="radio"], input[type="checkbox"]');
-      if (input && input.checked) aria = true;
-      const icon = row.querySelector && row.querySelector('i[data-visualcompletion="css-img"]');
-      const pos = icon ? `${window.getComputedStyle(icon).backgroundPosition || ''}|${window.getComputedStyle(icon).backgroundImage || ''}` : '';
-      return { gone: false, aria, pos, changed: !!(beforePos && pos && pos !== beforePos) };
-    }, point.beforePos || '');
-    out.verified = !!(after && !after.intro && (after.aria || after.changed || (after.gone && after.upload)));
-    out.iconChanged = !!(after && after.changed);
-  } catch {}
+  await sleep(700);
+  out.verified = buttonLooksEnabled(await readNamedButton(page, ['avancar', 'next']));
   return out;
 }
 
@@ -1865,7 +1768,7 @@ async function clickCnhChoice(page) {
 async function selectDocTypeCnh(page) {
   const out = { clicked: false, verified: false, method: null, label: null };
   const labelHit = await clickCnhChoice(page);
-  if (labelHit && labelHit.verified) return Object.assign(out, labelHit);
+  if (labelHit && labelHit.clicked) return Object.assign(out, labelHit);
   try {
     const evalClick = await page.evaluate(() => {
       const normLocal = (s) => {
