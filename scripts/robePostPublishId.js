@@ -751,6 +751,36 @@ async function detectIdWizardScreen(page) {
   }
 }
 
+async function setOverlayClickShield(page, block) {
+  try {
+    await page.evaluate((on) => {
+      window.__ctHumanOverlayIgnoreClicks = !!on;
+      const host = document.getElementById('ct-human-overlay-host');
+      if (!host) return;
+      const value = on ? 'none' : 'auto';
+      host.style.pointerEvents = value;
+      const root = host.shadowRoot;
+      if (!root) return;
+      let style = root.querySelector('#ct-block-clicks');
+      if (on) {
+        if (!style) {
+          style = document.createElement('style');
+          style.id = 'ct-block-clicks';
+          style.textContent = '#wrap, #wrap * { pointer-events: none !important; }';
+          root.appendChild(style);
+        }
+      } else if (style) {
+        style.remove();
+      }
+      const wrap = root.querySelector('#wrap');
+      if (wrap) {
+        wrap.style.pointerEvents = value;
+        wrap.classList.toggle('blocked', !!on);
+      }
+    }, !!block);
+  } catch {}
+}
+
 async function clickConfirmeSuaIdentidade(page) {
   try {
     const point = await page.evaluate(() => {
@@ -800,6 +830,7 @@ async function clickConfirmeSuaIdentidade(page) {
       };
     });
     if (!point) return false;
+    await setOverlayClickShield(page, true);
     await page.mouse.move(point.x, point.y);
     await sleep(300);
     await page.mouse.click(point.x, point.y, { delay: 60 });
@@ -856,6 +887,7 @@ async function clickIdentityDocument(page) {
       return { x: rect.left + (rect.width / 2), y: rect.top + (rect.height / 2), label: bestLabel };
     });
     if (!point) return false;
+    await setOverlayClickShield(page, true);
     await page.mouse.move(point.x, point.y);
     await sleep(300);
     await page.mouse.click(point.x, point.y, { delay: 60 });
@@ -1013,6 +1045,7 @@ async function clickAvancar(page) {
   }
   if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
     try {
+      await setOverlayClickShield(page, true);
       await page.mouse.move(point.x, point.y);
       await sleep(150);
       await page.mouse.click(point.x, point.y, { delay: 80 });
@@ -1160,6 +1193,7 @@ async function clickBlueOverlay(page, labels) {
   } catch {}
   if (!(point && Number.isFinite(point.x) && Number.isFinite(point.y))) return false;
   try {
+    await setOverlayClickShield(page, true);
     await page.mouse.move(point.x, point.y);
     await sleep(150);
     await page.mouse.click(point.x, point.y, { delay: 80 });
@@ -1757,6 +1791,7 @@ async function clickCnhChoice(page) {
   out.clicked = true;
   out.label = point.label || 'Carteira de habilitação';
   try {
+    await setOverlayClickShield(page, true);
     await page.mouse.move(point.x, point.y);
     await sleep(150);
     await page.mouse.click(point.x, point.y, { delay: 60 });
@@ -1922,6 +1957,7 @@ async function selectDocTypeCnh(page) {
         try {
           const box = await el.boundingBox();
           if (box) {
+            await setOverlayClickShield(page, true);
             await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2, { delay: 30 });
             out.method = 'puppeteer_mouse';
           }
@@ -3701,6 +3737,8 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
       await setMarketplaceDocFlag(nome, { reason: 'marketplace_doc_error', text: String(msg).slice(0, 400) });
     }
     return fail;
+  } finally {
+    await setOverlayClickShield(page, false);
   }
 }
 
@@ -3710,6 +3748,7 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
   const workDeadline = Number(deadlineAt) || Date.now() + BUDGET_TOTAL_MS;
 
   try {
+    await setOverlayClickShield(page, true);
     if (!pageHandleState(page).ok) {
       logEvt(nome, source, 'human_page_gone', {});
       return { ok: false, error: 'page_gone' };
@@ -3776,6 +3815,8 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
       await setMarketplaceDocFlag(nome, { reason: 'marketplace_doc_error', text: String(msg).slice(0, 400) });
     }
     return fail;
+  } finally {
+    await setOverlayClickShield(page, false);
   }
 }
 
