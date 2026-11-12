@@ -69,6 +69,13 @@ function isMarketplaceActionText(text) {
   return MARKETPLACE_ACTION_RE.test(norm(text));
 }
 
+function isIdentityConfirmLabel(text) {
+  const n = norm(text);
+  if (!n || n.length > 80) return false;
+  if (!n.includes('identidade') && !n.includes('identity')) return false;
+  return /\b(confirme|confirmar|confirma|confirm|verifique|verificar|verifica|verify)\b/.test(n);
+}
+
 function isUnitedStatesDialOption(text) {
   const n = norm(text);
   if (!n) return false;
@@ -634,12 +641,23 @@ async function detectIdWizardScreen(page) {
       ) {
         if (!hasAria(/carregar documento/)) return 'continuar';
       }
+      const identityVerb = /\b(confirme|confirmar|confirma|confirm|verifique|verificar|verifica|verify)\b/;
+      const buttonSaysIdentity = Array.from(document.querySelectorAll('[role="button"],button')).some((el) => {
+        const label = normLocal(`${el.getAttribute('aria-label') || ''} ${el.innerText || el.textContent || ''}`).slice(0, 80);
+        if (!label || (!label.includes('identidade') && !label.includes('identity'))) return false;
+        return identityVerb.test(label);
+      });
       if (
+        buttonSaysIdentity ||
         hasAria(/confirme sua identidade/) ||
+        hasAria(/confirmar identidade/) ||
         hasAria(/^verificar identidade$/) ||
         body.includes('confirme sua identidade') ||
+        body.includes('confirmar identidade') ||
         body.includes('verifique sua identidade') ||
-        body.includes('verificar identidade')
+        body.includes('verificar identidade') ||
+        body.includes('verify your identity') ||
+        body.includes('confirm your identity')
       ) {
         return 'confirm';
       }
@@ -653,35 +671,56 @@ async function detectIdWizardScreen(page) {
 async function clickConfirmeSuaIdentidade(page) {
   try {
     const point = await page.evaluate(() => {
-      const exact = (el) => String(el && (el.innerText || el.textContent) || '').replace(/\s+/g, ' ').trim();
-      const wanted = ['Confirme sua identidade', 'Verificar identidade'];
-      const byAria = Array.from(document.querySelectorAll('[role="button"],button')).find((el) => {
-        return wanted.includes(exact(el.getAttribute('aria-label') || ''));
-      });
-      const label = byAria || Array.from(document.querySelectorAll('span')).find((el) => {
-        const text = exact(el);
-        return wanted.includes(text) && el.children.length === 0;
-      });
-      if (!label) return null;
-      let box = label;
-      let walk = label.parentElement;
-      while (walk && walk !== document.body) {
-        const overlay = Array.from(walk.children).find((child) => child.getAttribute && child.getAttribute('data-visualcompletion') === 'ignore');
-        if (overlay) {
-          box = walk;
-          break;
+      const normLocal = (s) => {
+        try {
+          return String(s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+        } catch {
+          return String(s || '').toLowerCase().trim();
         }
-        walk = walk.parentElement;
+      };
+      const isIdentity = (text) => {
+        const n = normLocal(text);
+        if (!n || n.length > 80) return false;
+        if (!n.includes('identidade') && !n.includes('identity')) return false;
+        return /\b(confirme|confirmar|confirma|confirm|verifique|verificar|verifica|verify)\b/.test(n);
+      };
+      const buttons = Array.from(document.querySelectorAll('[role="button"],button'));
+      let best = null;
+      let bestLen = 999;
+      let bestLabel = '';
+      for (const el of buttons) {
+        const aria = normLocal(el.getAttribute('aria-label') || '');
+        const own = normLocal(el.innerText || el.textContent || '');
+        const label = isIdentity(aria) ? aria : (isIdentity(own) ? own : '');
+        if (!label) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 8 || rect.height < 8) continue;
+        const style = window.getComputedStyle(el);
+        if (!style || style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') continue;
+        if (label.length < bestLen) {
+          best = el;
+          bestLen = label.length;
+          bestLabel = String(el.getAttribute('aria-label') || el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+        }
       }
-      const rect = box.getBoundingClientRect();
-      if (rect.width < 8 || rect.height < 8) return null;
-      return { x: rect.left + (rect.width / 2), y: rect.top + (rect.height / 2) };
+      if (!best) return null;
+      const rect = best.getBoundingClientRect();
+      return {
+        x: rect.left + (rect.width / 2),
+        y: rect.top + (rect.height / 2),
+        label: bestLabel
+      };
     });
     if (!point) return false;
     await page.mouse.move(point.x, point.y);
     await sleep(300);
     await page.mouse.click(point.x, point.y, { delay: 60 });
-    return true;
+    return point.label || true;
   } catch {
     return false;
   }
@@ -2559,15 +2598,16 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
 
   // 1) Confirme sua identidade (página do item / selling)
   if (screen === 'confirm' || screen === 'unknown') {
-    let confirmBtn = await clickConfirmeSuaIdentidade(page);
-    if (!confirmBtn) {
-      confirmBtn = await waitClickByText(
-        page,
-        ['confirme sua identidade', 'verifique sua identidade', 'verificar identidade'],
-        { maxMs: 20000, deadlineAt, withinDialog: false, settleMs: 1000 }
-      );
+    let confirmBtn = false;
+    const confirmStart = Date.now();
+    while (!confirmBtn && (Date.now() - confirmStart) < 20000 && deadlineLeft(deadlineAt) > 0) {
+      confirmBtn = await clickConfirmeSuaIdentidade(page);
+      if (!confirmBtn) await sleep(1500);
     }
-    logEvt(nome, source, 'wizard_confirme_identidade', { ok: !!confirmBtn });
+    logEvt(nome, source, 'wizard_confirme_identidade', {
+      ok: !!confirmBtn,
+      label: typeof confirmBtn === 'string' ? confirmBtn : null
+    });
     assertBudget(deadlineAt, 'wizard_after_confirm_btn');
     if (confirmBtn) await sleep(WAIT_STEP_MS);
     if (await isSuccessScreen(page)) {
@@ -2582,6 +2622,9 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
       });
     } else {
       screen = await detectIdWizardScreen(page);
+    }
+    if (screen === 'confirm') {
+      return { ok: false, error: 'confirm_identity_not_clicked' };
     }
     if (screen === 'marketplace_phone_confirm') {
       const handoff = await maybeMarketplacePhoneConfirm('after_confirm_btn');
@@ -3014,6 +3057,7 @@ module.exports = {
   ID_PNG_PATH,
   todaySP,
   isMarketplaceActionText,
+  isIdentityConfirmLabel,
   extractMarketplacePhoneConfirmInfoFromText,
   isUnitedStatesDialOption,
   isDoneTodayFromDay,

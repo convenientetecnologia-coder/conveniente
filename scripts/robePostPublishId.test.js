@@ -3,7 +3,18 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { extractMarketplacePhoneConfirmInfoFromText, isUnitedStatesDialOption, classifyIdToday, idFlagsForToday, phoneAlertFlagsForToday, shouldMarkDocError, isMarketplaceActionText } = require("./robePostPublishId.js");
+const { extractMarketplacePhoneConfirmInfoFromText, isUnitedStatesDialOption, classifyIdToday, idFlagsForToday, phoneAlertFlagsForToday, shouldMarkDocError, isMarketplaceActionText, isIdentityConfirmLabel } = require("./robePostPublishId.js");
+
+test("o botao de identidade vale pelo sentido, nao pela frase exata", () => {
+  assert.equal(isIdentityConfirmLabel("Confirmar identidade"), true);
+  assert.equal(isIdentityConfirmLabel("Confirme sua identidade"), true);
+  assert.equal(isIdentityConfirmLabel("Verificar identidade"), true);
+  assert.equal(isIdentityConfirmLabel("Verify your identity"), true);
+  assert.equal(isIdentityConfirmLabel("Confirm your identity"), true);
+  assert.equal(isIdentityConfirmLabel("Turbinar classificado"), false);
+  assert.equal(isIdentityConfirmLabel("Marcar como indisponível"), false);
+  assert.equal(isIdentityConfirmLabel("Verificação de identidade"), false);
+});
 
 test("reconhece o aviso novo de identidade e as frases antigas", () => {
   assert.equal(isMarketplaceActionText("Confirme sua identidade para publicar este e futuros classificados"), true);
