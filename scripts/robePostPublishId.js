@@ -1102,8 +1102,6 @@ async function readNamedButton(page, labels) {
 }
 
 async function clickBlueOverlay(page, labels) {
-  const state = await readNamedButton(page, labels);
-  if (!buttonLooksEnabled(state)) return false;
   const handle = await page.evaluateHandle((wanted) => {
     const normLocal = (s) => {
       try {
@@ -1119,36 +1117,21 @@ async function clickBlueOverlay(page, labels) {
     };
     const want = new Set(Array.isArray(wanted) ? wanted : []);
     const hits = [];
-    for (const el of Array.from(document.querySelectorAll('span'))) {
-      const own = normLocal(el.innerText || el.textContent || '');
-      if (!want.has(own) || own.length > 40) continue;
+    for (const el of Array.from(document.querySelectorAll('[role="button"],button'))) {
+      const aria = normLocal(el.getAttribute('aria-label') || '');
+      if (!want.has(aria)) continue;
+      if (el.getAttribute('aria-disabled') === 'true') continue;
+      if (el.getAttribute('aria-hidden') === 'true') continue;
+      if (el.closest && el.closest('[aria-hidden="true"]')) continue;
+      if (String(el.getAttribute('tabindex') || '') === '-1') continue;
       const rect = el.getBoundingClientRect();
-      if (rect.width < 8 || rect.height < 8 || rect.width > 220 || rect.height > 48) continue;
-      if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+      if (rect.width < 8 || rect.height < 8 || rect.bottom < 0 || rect.top > window.innerHeight) continue;
+      const style = window.getComputedStyle(el);
+      if (!style || style.display === 'none' || style.visibility === 'hidden') continue;
       hits.push({ el, area: rect.width * rect.height });
     }
     hits.sort((a, b) => a.area - b.area);
-    const label = hits[0] && hits[0].el;
-    if (!label) return null;
-    let box = label;
-    let walk = label;
-    for (let i = 0; i < 6 && walk.parentElement && walk.parentElement !== document.body; i++) {
-      const parent = walk.parentElement;
-      const rect = parent.getBoundingClientRect();
-      const text = normLocal(parent.innerText || parent.textContent || '');
-      if (text.length > 40 || rect.height > 72 || rect.width > 320) break;
-      box = parent;
-      walk = parent;
-    }
-    const dialog = box.closest && box.closest('[role="dialog"],[aria-modal="true"]');
-    if (dialog) {
-      const boxRect = box.getBoundingClientRect();
-      const dialogRect = dialog.getBoundingClientRect();
-      const nearCloseX = boxRect.left > dialogRect.right - 56;
-      const nearCloseY = boxRect.top < dialogRect.top + 56;
-      if (nearCloseX && nearCloseY) return null;
-    }
-    return box;
+    return hits[0] ? hits[0].el : null;
   }, labels);
   const el = handle && handle.asElement && handle.asElement();
   if (!el) {
@@ -1654,15 +1637,13 @@ async function probeDocTypeRadios(page) {
             document.querySelectorAll('button,[role="button"],a,[role="link"],div[tabindex="0"]')
           );
           for (const el of nodes) {
-            const label = normLocal(
-              `${el.getAttribute('aria-label') || ''} ${el.innerText || ''}`
-            );
-            if (!(label === 'avancar' || label.includes('avancar'))) continue;
-            const disabled =
-              el.getAttribute('aria-disabled') === 'true' ||
-              el.getAttribute('disabled') != null ||
-              String(el.getAttribute('tabindex') || '') === '-1';
-            return !disabled;
+            const aria = normLocal(el.getAttribute('aria-label') || '');
+            if (aria !== 'avancar' && aria !== 'next') continue;
+            if (el.getAttribute('aria-disabled') === 'true') continue;
+            if (el.getAttribute('aria-hidden') === 'true') continue;
+            if (el.closest && el.closest('[aria-hidden="true"]')) continue;
+            if (String(el.getAttribute('tabindex') || '') === '-1') continue;
+            return true;
           }
           return false;
         })()
@@ -1719,7 +1700,26 @@ async function clickCnhChoice(page) {
     out.label = point.label || 'Carteira de habilitação';
   } catch {}
   await sleep(700);
-  out.verified = buttonLooksEnabled(await readNamedButton(page, ['avancar', 'next']));
+  try {
+    out.verified = await page.evaluate(() => {
+      const normLocal = (s) => {
+        try {
+          return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+        } catch {
+          return String(s || '').toLowerCase().trim();
+        }
+      };
+      return Array.from(document.querySelectorAll('[role="button"],button')).some((el) => {
+        const aria = normLocal(el.getAttribute('aria-label') || '');
+        if (aria !== 'avancar' && aria !== 'next') return false;
+        if (el.getAttribute('aria-disabled') === 'true' || el.getAttribute('aria-hidden') === 'true') return false;
+        if (el.closest && el.closest('[aria-hidden="true"]')) return false;
+        if (String(el.getAttribute('tabindex') || '') === '-1') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width >= 8 && rect.height >= 8 && rect.bottom > 0 && rect.top < window.innerHeight;
+      });
+    });
+  } catch {}
   return out;
 }
 
