@@ -97,6 +97,12 @@ function isIdentityRetryText(text) {
   return n.includes('nao foi possivel') && (n.includes('identidade') || n.includes('identity'));
 }
 
+function isIdentityDocIntroText(text) {
+  const n = norm(text);
+  if (!n.includes('identidade') && !n.includes('identity')) return false;
+  return n.includes('com um documento') || n.includes('reconhecimento facial') || n.includes('facial recognition') || (n.includes('30 dias') && n.includes('documento'));
+}
+
 function isAdvanceLabel(text) {
   const n = norm(text);
   if (!n || n.length > 40) return false;
@@ -646,6 +652,12 @@ async function detectIdWizardScreen(page) {
         return 'pending_review';
       }
       if (
+        (body.includes('com um documento') || body.includes('reconhecimento facial') || body.includes('facial recognition') || (body.includes('30 dias') && body.includes('documento'))) &&
+        (body.includes('identidade') || body.includes('identity'))
+      ) {
+        return 'identity_doc_intro';
+      }
+      if (
         body.includes('nao foi possivel') &&
         (body.includes('identidade') || body.includes('identity'))
       ) {
@@ -820,16 +832,24 @@ async function clickIdentityDocument(page) {
   }
 }
 
-async function identityRetryStillOpen(page) {
+async function pageHasNorm(page, testFnSource) {
   try {
-    return await page.evaluate(() => {
+    return await page.evaluate((src) => {
       const raw = String((document.body && (document.body.innerText || document.body.textContent)) || '');
       const n = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-      return n.includes('nao foi possivel') && n.includes('identidade');
-    });
+      return (new Function('n', `return (${src});`))(n);
+    }, testFnSource);
   } catch {
     return false;
   }
+}
+
+async function identityRetryStillOpen(page) {
+  return pageHasNorm(page, "n.includes('nao foi possivel') && n.includes('identidade')");
+}
+
+async function identityDocIntroStillOpen(page) {
+  return pageHasNorm(page, "(n.includes('com um documento') || n.includes('reconhecimento facial')) && (n.includes('identidade') || n.includes('identity'))");
 }
 
 async function listAvancarPoints(page) {
@@ -854,7 +874,10 @@ async function listAvancarPoints(page) {
       };
       const retryBoxes = Array.from(document.querySelectorAll('div,section')).filter((el) => {
         const t = normLocal(el.innerText || el.textContent || '');
-        return t.includes('nao foi possivel') && t.includes('identidade') && t.length < 1200;
+        if (t.length > 1600 || !t.includes('avancar') && !t.includes('next')) return false;
+        const retry = t.includes('nao foi possivel') && t.includes('identidade');
+        const intro = (t.includes('com um documento') || t.includes('reconhecimento facial') || t.includes('facial recognition')) && (t.includes('identidade') || t.includes('identity'));
+        return retry || intro;
       });
       const scope = retryBoxes.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)[0] || document;
       const nodes = Array.from(scope.querySelectorAll('span,div,button,[role="button"]'));
@@ -902,6 +925,7 @@ async function listAvancarPoints(page) {
 
 async function clickAvancar(page) {
   const beforeRetry = await identityRetryStillOpen(page);
+  const beforeIntro = !beforeRetry && await identityDocIntroStillOpen(page);
   const points = await listAvancarPoints(page);
   if (!points.length) return false;
   for (const point of points) {
@@ -912,13 +936,17 @@ async function clickAvancar(page) {
     } catch {}
     await sleep(1200);
     if (beforeRetry) {
-      const still = await identityRetryStillOpen(page);
-      if (!still) return point.label || true;
+      if (!(await identityRetryStillOpen(page))) return point.label || true;
+      continue;
+    }
+    if (beforeIntro) {
+      if (!(await identityDocIntroStillOpen(page))) return point.label || true;
       continue;
     }
     return point.label || true;
   }
   if (beforeRetry && await identityRetryStillOpen(page)) return false;
+  if (beforeIntro && await identityDocIntroStillOpen(page)) return false;
   return points[0].label || true;
 }
 
@@ -2885,7 +2913,7 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
 
     // Atalho: às vezes Avançar → direto "Suas informações foram enviadas..."
     {
-      const earlyScr = await waitForWizardScreen(page, ['success', 'continuar', 'carregar_doc', 'marketplace_phone_confirm', 'marketplace_phone_entry'], {
+      const earlyScr = await waitForWizardScreen(page, ['success', 'continuar', 'carregar_doc', 'doc_type', 'upload_photo', 'identity_doc_intro', 'marketplace_phone_confirm', 'marketplace_phone_entry'], {
         maxMs: 45000,
         deadlineAt
       });
@@ -2904,6 +2932,22 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
         return { ok: false, error: 'avancar_not_clicked' };
       }
     }
+  }
+
+  if (screen === 'identity_doc_intro') {
+    let introAdvance = false;
+    const introStart = Date.now();
+    while (!introAdvance && (Date.now() - introStart) < 20000 && deadlineLeft(deadlineAt) > 0) {
+      introAdvance = await clickAvancar(page);
+      if (!introAdvance) await sleep(1000);
+    }
+    logEvt(nome, source, 'wizard_doc_intro_avancar', { ok: !!introAdvance });
+    if (!introAdvance) return { ok: false, error: 'doc_intro_avancar_not_clicked' };
+    screen = await waitForWizardScreen(page, ['carregar_doc', 'doc_type', 'upload_photo', 'continuar', 'success'], {
+      maxMs: 30000,
+      deadlineAt
+    });
+    if (screen === 'identity_doc_intro') return { ok: false, error: 'doc_intro_avancar_not_clicked' };
   }
 
   // 3) Continuar (tela "Verificação de identidade")
@@ -3280,6 +3324,7 @@ module.exports = {
   isIdentityDocumentLabel,
   isIdentityReviewText,
   isIdentityRetryText,
+  isIdentityDocIntroText,
   isAdvanceLabel,
   extractMarketplacePhoneConfirmInfoFromText,
   isUnitedStatesDialOption,
