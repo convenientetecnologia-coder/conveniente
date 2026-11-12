@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { extractMarketplacePhoneConfirmInfoFromText, isUnitedStatesDialOption, classifyIdToday, idFlagsForToday, phoneAlertFlagsForToday, shouldMarkDocError, isMarketplaceActionText, isIdentityConfirmLabel, isIdentityDocumentLabel, isIdentityReviewText, isIdentityRetryText, isIdentityDocIntroText, isAdvanceLabel, isCnhChoiceLabel } = require("./robePostPublishId.js");
+const { extractMarketplacePhoneConfirmInfoFromText, isUnitedStatesDialOption, classifyIdToday, idFlagsForToday, phoneAlertFlagsForToday, shouldMarkDocError, isMarketplaceActionText, isIdentityConfirmLabel, isIdentityDocumentLabel, isIdentityReviewText, isIdentityRetryText, isIdentityDocIntroText, isAdvanceLabel, isCnhChoiceLabel, isBlueFill, buttonLooksEnabled } = require("./robePostPublishId.js");
 
 test("o botao de identidade vale pelo sentido, nao pela frase exata", () => {
   assert.equal(isIdentityConfirmLabel("Confirmar identidade"), true);
@@ -33,6 +33,13 @@ test("o botao de identidade vale pelo sentido, nao pela frase exata", () => {
   assert.equal(isCnhChoiceLabel("Driver's license"), true);
   assert.equal(isCnhChoiceLabel("Confirme sua identidade com um documento"), false);
   assert.equal(isCnhChoiceLabel("Carteira de habilitação e passaporte"), false);
+  assert.equal(isBlueFill("rgb(8, 102, 255)"), true);
+  assert.equal(isBlueFill("rgb(24, 119, 242)"), true);
+  assert.equal(isBlueFill("rgb(228, 230, 235)"), false);
+  assert.equal(isBlueFill("rgb(255, 255, 255)"), false);
+  assert.equal(buttonLooksEnabled({ found: true, disabled: false, opacity: 1, bg: "rgb(8, 102, 255)" }), true);
+  assert.equal(buttonLooksEnabled({ found: true, disabled: false, opacity: 1, bg: "rgb(228, 230, 235)" }), false);
+  assert.equal(buttonLooksEnabled({ found: true, disabled: true, opacity: 1, bg: "rgb(8, 102, 255)" }), false);
 });
 
 test("reconhece o aviso novo de identidade e as frases antigas", () => {

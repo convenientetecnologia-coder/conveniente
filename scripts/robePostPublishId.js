@@ -115,6 +115,25 @@ function isCnhChoiceLabel(text) {
   return n === 'carteira de habilitacao' || n === 'driver license' || n === "driver's license" || n === 'drivers license';
 }
 
+function rgbParts(color) {
+  const m = String(color || '').match(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/i);
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+}
+
+function isBlueFill(color) {
+  const rgb = rgbParts(color);
+  if (!rgb) return false;
+  const [r, g, b] = rgb;
+  return b >= 80 && b > r + 25 && b >= g - 15;
+}
+
+function buttonLooksEnabled(state) {
+  if (!state || state.found !== true || state.disabled === true) return false;
+  if (Number(state.opacity) < 0.75) return false;
+  return isBlueFill(state.bg);
+}
+
 function isUnitedStatesDialOption(text) {
   const n = norm(text);
   if (!n) return false;
@@ -1005,6 +1024,176 @@ async function clickAvancar(page) {
   return !!point;
 }
 
+async function readNamedButton(page, labels) {
+  try {
+    return await page.evaluate((wanted) => {
+      const normLocal = (s) => {
+        try {
+          return String(s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+        } catch {
+          return String(s || '').toLowerCase().trim();
+        }
+      };
+      const want = new Set(Array.isArray(wanted) ? wanted : []);
+      const visible = (el) => {
+        if (!el || !el.getBoundingClientRect) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 4 || rect.height < 4) return false;
+        if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
+        const style = window.getComputedStyle(el);
+        return !!(style && style.display !== 'none' && style.visibility !== 'hidden');
+      };
+      const paint = (el) => {
+        if (!el) return '';
+        const bg = String(window.getComputedStyle(el).backgroundColor || '');
+        if (!bg || bg === 'transparent' || /rgba?\(\s*0\s*,\s*0\s*,\s*0\s*,\s*0\s*\)/.test(bg)) return '';
+        return bg;
+      };
+      const hits = [];
+      for (const el of Array.from(document.querySelectorAll('span,div,button,[role="button"]'))) {
+        const aria = normLocal(el.getAttribute('aria-label') || '');
+        const own = normLocal(el.innerText || el.textContent || '');
+        if (!want.has(aria) && !want.has(own)) continue;
+        if ((own && own.length > 40) || (aria && aria.length > 40)) continue;
+        if (!visible(el)) continue;
+        const rect = el.getBoundingClientRect();
+        hits.push({ el, area: rect.width * rect.height });
+      }
+      hits.sort((a, b) => a.area - b.area);
+      const label = hits[0] && hits[0].el;
+      if (!label) return { found: false };
+      let box = label;
+      let walk = label;
+      while (walk && walk !== document.body) {
+        const role = walk.getAttribute ? String(walk.getAttribute('role') || '') : '';
+        const overlay = Array.from(walk.children || []).find((child) => child.getAttribute && child.getAttribute('data-visualcompletion') === 'ignore');
+        if (overlay || role === 'button' || String(walk.tagName || '') === 'BUTTON') {
+          const probe = overlay || walk;
+          const rect = probe.getBoundingClientRect();
+          if (rect.width <= 500 && rect.height <= 220) box = walk;
+          break;
+        }
+        walk = walk.parentElement;
+      }
+      let disabled = false;
+      let p = box;
+      for (let i = 0; i < 6 && p; i++) {
+        if (p.getAttribute && (p.getAttribute('aria-disabled') === 'true' || p.getAttribute('disabled') != null)) disabled = true;
+        p = p.parentElement;
+      }
+      const style = window.getComputedStyle(box);
+      const opacity = Number(style && style.opacity);
+      const bg = paint(box) || paint(box.parentElement) || paint(box.firstElementChild) || '';
+      return {
+        found: true,
+        disabled,
+        opacity: Number.isFinite(opacity) ? opacity : 1,
+        bg
+      };
+    }, labels);
+  } catch {
+    return { found: false };
+  }
+}
+
+async function clickBlueOverlay(page, labels) {
+  const state = await readNamedButton(page, labels);
+  if (!buttonLooksEnabled(state)) return false;
+  let point = null;
+  try {
+    point = await page.evaluate((wanted) => {
+      const normLocal = (s) => {
+        try {
+          return String(s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+        } catch {
+          return String(s || '').toLowerCase().trim();
+        }
+      };
+      const want = new Set(Array.isArray(wanted) ? wanted : []);
+      const hits = [];
+      for (const el of Array.from(document.querySelectorAll('span,div,button,[role="button"]'))) {
+        const aria = normLocal(el.getAttribute('aria-label') || '');
+        const own = normLocal(el.innerText || el.textContent || '');
+        if (!want.has(aria) && !want.has(own)) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 4 || rect.height < 4) continue;
+        hits.push({ el, area: rect.width * rect.height, rect });
+      }
+      hits.sort((a, b) => a.area - b.area);
+      const label = hits[0] && hits[0].el;
+      if (!label) return null;
+      let box = label;
+      let overlay = null;
+      let walk = label;
+      while (walk && walk !== document.body) {
+        const found = Array.from(walk.children || []).find((child) => child.getAttribute && child.getAttribute('data-visualcompletion') === 'ignore');
+        if (found) {
+          const rect = found.getBoundingClientRect();
+          if (rect.width <= 500 && rect.height <= 220) {
+            box = walk;
+            overlay = found;
+          }
+          break;
+        }
+        walk = walk.parentElement;
+      }
+      const target = overlay || box;
+      const rect = target.getBoundingClientRect();
+      const x = rect.left + (rect.width / 2);
+      const y = rect.top + (rect.height / 2);
+      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+        target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }));
+      }
+      try { target.click(); } catch {}
+      return { x, y };
+    }, labels);
+  } catch {}
+  if (!(point && Number.isFinite(point.x) && Number.isFinite(point.y))) return false;
+  try {
+    await page.mouse.move(point.x, point.y);
+    await sleep(150);
+    await page.mouse.click(point.x, point.y, { delay: 80 });
+  } catch {}
+  return true;
+}
+
+async function uploadPromptOpen(page) {
+  const byText = await pageHasNorm(
+    page,
+    "n.includes('carregue uma foto') || n.includes('escolher arquivo') || n.includes('adicionar arquivo') || n.includes('upload a photo')"
+  );
+  if (byText) return true;
+  try {
+    return await page.evaluate(() => {
+      const dialog = document.querySelector('[role="dialog"],[aria-modal="true"]');
+      return !!(dialog && dialog.querySelector('input[type="file"]'));
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function advanceBlueAndSeeUpload(page, deadlineAt) {
+  const clicked = await clickBlueOverlay(page, ['avancar', 'next']);
+  if (!clicked) return false;
+  const start = Date.now();
+  while (Date.now() - start < 20000 && deadlineLeft(deadlineAt) > 0) {
+    if (await uploadPromptOpen(page)) return true;
+    await sleep(800);
+  }
+  return false;
+}
+
 async function clickDocIntroAvancar(page, deadlineAt) {
   let advanced = false;
   const start = Date.now();
@@ -1774,11 +1963,12 @@ async function waitCnhSelected(page, { maxMs = 90000, deadlineAt } = {}) {
       return { ok: true, probe };
     }
     const sel = await selectDocTypeCnh(page);
-    last = Object.assign({}, probe || {}, sel || {});
-    if (sel && sel.verified) {
+    const avancarBlue = buttonLooksEnabled(await readNamedButton(page, ['avancar', 'next']));
+    last = Object.assign({}, probe || {}, sel || {}, { avancarBlue });
+    if ((sel && sel.verified) || avancarBlue) {
       await sleep(700);
       const p2 = await probeDocTypeRadios(page);
-      return { ok: true, probe: p2 || probe, sel, avancarPending: !(p2 && p2.avancarEnabled) };
+      return { ok: true, probe: p2 || probe, sel, avancarBlue: true };
     }
     if (!(probe && probe.cnhLabel)) {
       await clickByText(page, ['ver mais', 'see more'], { withinDialog: false });
@@ -3294,24 +3484,15 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
       avancarEnabled: !!(cnhWait && cnhWait.probe && cnhWait.probe.avancarEnabled),
       radioCount: cnhWait && cnhWait.probe && cnhWait.probe.radioCount,
       method: cnhWait && cnhWait.sel && cnhWait.sel.method,
+      avancarBlue: !!(cnhWait && cnhWait.avancarBlue),
       items: (cnhWait && cnhWait.probe && cnhWait.probe.items) || []
     });
     if (!cnhOk) return { ok: false, error: 'cnh_not_selected' };
     await sleep(WAIT_STEP_MS);
     assertBudget(deadlineAt, 'wizard_after_cnh');
 
-    // 6) Avançar pós-CNH. O botão é a camada do texto, e só vale se a lista sair.
-    let advDoc = await clickAvancar(page);
-    let leftList = !!advDoc && !(await cnhChoiceVisible(page)) && !(await identityDocIntroStillOpen(page));
-    if (!leftList && await cnhChoiceVisible(page)) {
-      advDoc = await waitClickByText(page, ['avancar', 'avançar', 'next'], {
-        maxMs: 15000,
-        deadlineAt,
-        withinDialog: false,
-        settleMs: WAIT_STEP_MS
-      });
-      leftList = !!advDoc && !(await cnhChoiceVisible(page)) && !(await identityDocIntroStillOpen(page));
-    }
+    // 6) Avançar só quando estiver azul, e só segue se a tela de colocar o documento abrir.
+    const leftList = await advanceBlueAndSeeUpload(page, deadlineAt);
     logEvt(nome, source, 'wizard_avancar_pos_cnh', { ok: !!leftList });
     if (!leftList) return { ok: false, error: 'avancar_pos_cnh_not_clicked' };
     screen = await waitForWizardScreen(page, ['upload_photo'], { maxMs: 90000, deadlineAt });
@@ -3330,8 +3511,7 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
         radioCount: cnhWait && cnhWait.probe && cnhWait.probe.radioCount
       });
       if (!(cnhWait && cnhWait.ok)) return { ok: false, error: 'cnh_not_selected' };
-      const advDoc = await clickAvancar(page);
-      const leftList = !!advDoc && !(await cnhChoiceVisible(page)) && !(await identityDocIntroStillOpen(page));
+      const leftList = await advanceBlueAndSeeUpload(page, deadlineAt);
       logEvt(nome, source, 'wizard_avancar_pos_cnh', { ok: !!leftList, where: 'file_loop' });
       if (!leftList) return { ok: false, error: 'avancar_pos_cnh_not_clicked' };
       await sleep(1500);
@@ -3370,14 +3550,13 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
   await sleep(WAIT_AFTER_UPLOAD_MS);
   assertBudget(deadlineAt, 'wizard_after_upload');
 
-  // 8) Enviar (fica azul só depois do arquivo)
-  const sent = await waitClickByText(page, ['enviar', 'submit', 'send'], {
-    maxMs: 90000,
-    deadlineAt,
-    withinDialog: false,
-    exact: true,
-    settleMs: 3000
-  });
+  // 8) Enviar fica azul só depois do arquivo. É a mesma camada do Avançar, não um botão comum.
+  let sent = false;
+  const sendStart = Date.now();
+  while (!sent && Date.now() - sendStart < 90000 && deadlineLeft(deadlineAt) > 0) {
+    sent = await clickBlueOverlay(page, ['enviar', 'submit', 'send']);
+    if (!sent) await sleep(1500);
+  }
   logEvt(nome, source, 'wizard_enviar', { ok: !!sent });
   if (!sent) return { ok: false, error: 'enviar_not_clicked' };
 
@@ -3613,6 +3792,8 @@ module.exports = {
   isIdentityDocIntroText,
   isAdvanceLabel,
   isCnhChoiceLabel,
+  isBlueFill,
+  buttonLooksEnabled,
   extractMarketplacePhoneConfirmInfoFromText,
   isUnitedStatesDialOption,
   isDoneTodayFromDay,
