@@ -8546,13 +8546,7 @@ async function detectMarketplaceDisabled(page) {
   return out || { disabled: false };
 }
 
-async function detectAccountSuspended(page) {
-  try {
-    const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
-    const isFbOrMsg = /(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(href);
-    if (!isFbOrMsg) return { banned: false };
-
-    const v = await page.evaluate(() => {
+function readSuspendedDocument() {
       function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
       const href = String(location && location.href || '');
       const path = String(location && location.pathname || '');
@@ -8619,11 +8613,39 @@ async function detectAccountSuspended(page) {
           texts.find(s => /desabilitamos sua conta|desativamos sua conta|suspens/i.test(String(s||''))) ||
           texts.slice(0, 30).join(' | ').slice(0, 420);
       }
-      return { hit: any, more, disabledCheckpoint, snippet };
-    });
+  return { hit: any, more, disabledCheckpoint, snippet };
+}
 
+async function detectAccountSuspended(page) {
+  try {
+    const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
+    const isFbOrMsg = /(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(href);
+    if (!isFbOrMsg) return { banned: false };
+
+    const targets = [];
+    try {
+      const list = (typeof page.frames === 'function') ? page.frames() : [];
+      for (const fr of list) targets.push(fr);
+    } catch {}
+    if (!targets.length) targets.push(page);
+
+    const scan = async () => {
+      for (const target of targets) {
+        try {
+          const found = await target.evaluate(readSuspendedDocument);
+          if (found && found.hit) return found;
+        } catch {}
+      }
+      return null;
+    };
+
+    let v = await scan();
+    if ((!v || !v.hit) && /\/checkpoint\b/i.test(String(href || ''))) {
+      await new Promise((r) => setTimeout(r, 2000));
+      v = await scan();
+    }
     if (v && v.hit) {
-      const reason = v && v.disabledCheckpoint ? 'disabled_checkpoint' : 'suspended_ui';
+      const reason = v.disabledCheckpoint ? 'disabled_checkpoint' : 'suspended_ui';
       return { banned: true, reason, snippet: v.snippet || '' };
     }
   } catch {}

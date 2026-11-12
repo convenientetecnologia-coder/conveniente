@@ -4530,6 +4530,18 @@ async function ensureNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', reason
   }
 }
 
+function isFacebookMessagesUrl(raw) {
+  try {
+    const u = new URL(String(raw || ''));
+    const host = String(u.hostname || '').toLowerCase();
+    if (host === 'messenger.com' || host.endsWith('.messenger.com')) return true;
+    if (!(host === 'facebook.com' || host.endsWith('.facebook.com'))) return false;
+    return /^\/messages(\/|$)/i.test(String(u.pathname || ''));
+  } catch {
+    return false;
+  }
+}
+
 // Probe enterprise pós-abertura (anti-engessamento):
 // - garante que as flags reflitam a tela REAL (identity/appeal/captcha/login_form)
 // - não deixa "invocar humano" virar estado final por engano
@@ -4607,7 +4619,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
         try {
           if (desiredEngineAtProbe === 'delta') {
             const cur = (() => { try { return String(pg.url() || ''); } catch { return ''; } })();
-            const alreadyOnMessages = /facebook\.com\/messages/i.test(cur);
+            const alreadyOnMessages = isFacebookMessagesUrl(cur);
             if (!alreadyOnMessages) {
               await pg.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 });
             }
@@ -4619,10 +4631,23 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
               robeMeta[nome].lastEngineEvent = ev;
               robeMeta[nome].lastEngineEventAt = global.lastDeltaEventAt;
             } catch {}
+            const landed = (() => { try { return String(pg.url() || ''); } catch { return ''; } })();
+            if (!isFacebookMessagesUrl(landed)) {
+              okMsg = false;
+              errMsg = 'not_on_messages';
+            } else {
+              okMsg = true;
+            }
           } else {
             await virtusHelper.garantirMarketplace(pg, { timeoutMs: 45000 });
+            const landed = (() => { try { return String(pg.url() || ''); } catch { return ''; } })();
+            if (landed && !isFacebookMessagesUrl(landed) && /checkpoint/i.test(landed)) {
+              okMsg = false;
+              errMsg = 'not_on_messages';
+            } else {
+              okMsg = true;
+            }
           }
-          okMsg = true;
         } catch (e) {
           okMsg = false;
           errMsg = (e && e.message) ? String(e.message) : String(e);
@@ -4640,8 +4665,9 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
             url: (() => { try { return String(pg.url() || ''); } catch { return ''; } })()
           });
         } catch {}
-        if (okMsg) {
-          try {
+        try {
+          const landedNow = (() => { try { return String(pg.url() || ''); } catch { return ''; } })();
+          if (!okMsg || /checkpoint/i.test(landedNow)) {
             const bdReady = await browserHelper.detectAccountSuspended(pg).catch(()=>({ banned:false }));
             if (bdReady && bdReady.banned) {
               const banReason = String(bdReady.reason || 'banned');
@@ -4656,8 +4682,8 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
               try { await setBannedFlag(nome, { reason: banReason, snippet: banSnippet }); } catch {}
               return { ok: true, state: 'banned', reason: banReason };
             }
-          } catch {}
-        }
+          }
+        } catch {}
         if (!okMsg) {
           // Enterprise hardening:
           // Se o Messenger não ficou pronto, pode ser porque estamos em tela de captcha/identity/checkpoint.
@@ -10972,6 +10998,20 @@ async function getRobeModuleFor(nome) {
 async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDeletePolicy = "after_all_working_posted") {
   // #region agent log
   try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_entry', nome: String(nome || ''), robePauseMs: Number(robePauseMs || 0), workingNowCount: Array.isArray(workingNow) ? workingNow.length : -1 }); } catch {}
+  try {
+    const openPages = await browser.pages().catch(() => []);
+    for (const p of (openPages || []).slice(0, 6)) {
+      let u = '';
+      try { u = String((p && p.url && p.url()) || ''); } catch {}
+      if (!/facebook\.com|messenger\.com/i.test(u)) continue;
+      const bd = await browserHelper.detectAccountSuspended(p).catch(() => null);
+      if (bd && bd.banned) {
+        try { provisionAudit.append({ ts: Date.now(), event: 'robe_start_banned', nome: String(nome || ''), reason: String(bd.reason || '').slice(0, 140), url: u.slice(0, 220) }); } catch {}
+        try { await setBannedFlag(nome, { reason: bd.reason || 'suspended_ui', snippet: bd.snippet || '' }); } catch {}
+        return { ok: false, skipped: true, reason: 'banned' };
+      }
+    }
+  } catch {}
   // #endregion
   if (isDeltaEngineActiveStrict() && !isDeltaRobeAllowed()) {
     try { logger.info('[DELTA_ROBE_BLOCK] Módulo Robe suspenso para preservar o isolamento da escuta passiva.', { nome }); } catch {}

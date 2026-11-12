@@ -6652,8 +6652,17 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   function virtusPageUrl(p) {
     try { return String((p && p.url && p.url()) || ""); } catch { return ""; }
   }
+  function isFacebookMessagesUrl(raw) {
+    try {
+      const u = new URL(String(raw || ""));
+      const host = String(u.hostname || "").toLowerCase();
+      if (host === "messenger.com" || host.endsWith(".messenger.com")) return true;
+      if (!(host === "facebook.com" || host.endsWith(".facebook.com"))) return false;
+      return /^\/messages(\/|$)/i.test(String(u.pathname || ""));
+    } catch { return false; }
+  }
   const pages = await listVirtusPages();
-  let page = pages.find((p) => /facebook\.com\/messages/i.test(virtusPageUrl(p))) || null;
+  let page = pages.find((p) => isFacebookMessagesUrl(virtusPageUrl(p))) || null;
   if (!page && pages.length) {
     page = pages[restrictTab] || pages[0] || null;
   }
@@ -6682,7 +6691,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   // Boot minimal: garantir que estamos em /messages (permitido no boot; proibição é no reply flow).
   try {
     const u0 = String(page.url ? page.url() : "");
-    if (!/facebook\.com\/messages/i.test(u0)) {
+    if (!isFacebookMessagesUrl(u0)) {
       await __gotoWithBootInterlock(page, startUrl, {
         timeoutMs: 45000,
         profileName: ACCOUNT_LOGIN || nome,
