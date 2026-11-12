@@ -820,9 +820,21 @@ async function clickIdentityDocument(page) {
   }
 }
 
-async function clickAvancar(page) {
+async function identityRetryStillOpen(page) {
   try {
-    const point = await page.evaluate(() => {
+    return await page.evaluate(() => {
+      const raw = String((document.body && (document.body.innerText || document.body.textContent)) || '');
+      const n = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+      return n.includes('nao foi possivel') && n.includes('identidade');
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function listAvancarPoints(page) {
+  try {
+    return await page.evaluate(() => {
       const normLocal = (s) => {
         try {
           return String(s || '')
@@ -840,48 +852,74 @@ async function clickAvancar(page) {
         if (!n || n.length > 40) return false;
         return n === 'avancar' || n === 'next';
       };
-      const nodes = Array.from(document.querySelectorAll('[role="button"],button,span,div'));
-      let best = null;
-      let bestLen = 999;
-      let bestLabel = '';
+      const retryBoxes = Array.from(document.querySelectorAll('div,section')).filter((el) => {
+        const t = normLocal(el.innerText || el.textContent || '');
+        return t.includes('nao foi possivel') && t.includes('identidade') && t.length < 1200;
+      });
+      const scope = retryBoxes.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)[0] || document;
+      const nodes = Array.from(scope.querySelectorAll('span,div,button,[role="button"]'));
+      const out = [];
+      const seen = new Set();
       for (const el of nodes) {
         const aria = normLocal(el.getAttribute('aria-label') || '');
         const own = normLocal(el.innerText || el.textContent || '');
         if (!isAdvance(aria) && !isAdvance(own)) continue;
         let box = el;
+        let overlayEl = null;
         let walk = el;
         while (walk && walk !== document.body) {
           const role = walk.getAttribute ? String(walk.getAttribute('role') || '') : '';
-          const overlay = Array.from(walk.children || []).some((child) => child.getAttribute && child.getAttribute('data-visualcompletion') === 'ignore');
+          const overlay = Array.from(walk.children || []).find((child) => child.getAttribute && child.getAttribute('data-visualcompletion') === 'ignore');
+          if (overlay) overlayEl = overlay;
           if (role === 'button' || String(walk.tagName || '') === 'BUTTON' || overlay) {
             box = walk;
             if (role === 'button' || String(walk.tagName || '') === 'BUTTON') break;
           }
           walk = walk.parentElement;
         }
-        const rect = box.getBoundingClientRect();
-        if (rect.width < 8 || rect.height < 8) continue;
-        const style = window.getComputedStyle(box);
+        const target = overlayEl || box;
+        if (!target || seen.has(target)) continue;
+        seen.add(target);
+        const rect = target.getBoundingClientRect();
+        if (rect.width < 8 || rect.height < 8 || rect.width > 500 || rect.height > 160) continue;
+        if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) continue;
+        const style = window.getComputedStyle(target);
         if (!style || style.display === 'none' || style.visibility === 'hidden') continue;
-        const label = isAdvance(aria) ? aria : own;
-        if (label.length < bestLen) {
-          best = box;
-          bestLen = label.length;
-          bestLabel = label;
-        }
+        out.push({
+          x: rect.left + (rect.width / 2),
+          y: rect.top + (rect.height / 2),
+          label: isAdvance(aria) ? aria : own,
+          inRetry: scope !== document
+        });
       }
-      if (!best) return null;
-      const rect = best.getBoundingClientRect();
-      return { x: rect.left + (rect.width / 2), y: rect.top + (rect.height / 2), label: bestLabel };
+      out.sort((a, b) => Number(b.inRetry) - Number(a.inRetry));
+      return out.slice(0, 4);
     });
-    if (!point) return false;
-    await page.mouse.move(point.x, point.y);
-    await sleep(300);
-    await page.mouse.click(point.x, point.y, { delay: 60 });
-    return point.label || true;
   } catch {
-    return false;
+    return [];
   }
+}
+
+async function clickAvancar(page) {
+  const beforeRetry = await identityRetryStillOpen(page);
+  const points = await listAvancarPoints(page);
+  if (!points.length) return false;
+  for (const point of points) {
+    try {
+      await page.mouse.move(point.x, point.y);
+      await sleep(200);
+      await page.mouse.click(point.x, point.y, { delay: 80 });
+    } catch {}
+    await sleep(1200);
+    if (beforeRetry) {
+      const still = await identityRetryStillOpen(page);
+      if (!still) return point.label || true;
+      continue;
+    }
+    return point.label || true;
+  }
+  if (beforeRetry && await identityRetryStillOpen(page)) return false;
+  return points[0].label || true;
 }
 
 async function waitForScreenAfterConfirmIdentity(page, { deadlineAt, minMs = 8000, maxMs = 60000 } = {}) {
@@ -2861,6 +2899,9 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
           skipAdvance: screen === 'marketplace_phone_entry'
         });
         if (handoff) return handoff;
+      }
+      if (screen === 'identity_retry') {
+        return { ok: false, error: 'avancar_not_clicked' };
       }
     }
   }
