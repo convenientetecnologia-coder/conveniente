@@ -92,6 +92,17 @@ function isIdentityReviewText(text) {
   return n.includes('em andamento') || n.includes('analis') || n.includes('enviad') || n.includes('submitted');
 }
 
+function isIdentityRetryText(text) {
+  const n = norm(text);
+  return n.includes('nao foi possivel') && (n.includes('identidade') || n.includes('identity'));
+}
+
+function isAdvanceLabel(text) {
+  const n = norm(text);
+  if (!n || n.length > 40) return false;
+  return n === 'avancar' || n === 'next';
+}
+
 function isUnitedStatesDialOption(text) {
   const n = norm(text);
   if (!n) return false;
@@ -634,6 +645,12 @@ async function detectIdWizardScreen(page) {
       ) {
         return 'pending_review';
       }
+      if (
+        body.includes('nao foi possivel') &&
+        (body.includes('identidade') || body.includes('identity'))
+      ) {
+        return 'identity_retry';
+      }
       if (hasFile || body.includes('carregue uma foto do seu documento')) return 'upload_photo';
       // doc_type: exige o título da lista (não basta “carteira…” solto no body)
       if (
@@ -803,6 +820,70 @@ async function clickIdentityDocument(page) {
   }
 }
 
+async function clickAvancar(page) {
+  try {
+    const point = await page.evaluate(() => {
+      const normLocal = (s) => {
+        try {
+          return String(s || '')
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .toLowerCase()
+            .replace(/\s+/g, ' ')
+            .trim();
+        } catch {
+          return String(s || '').toLowerCase().trim();
+        }
+      };
+      const isAdvance = (text) => {
+        const n = normLocal(text);
+        if (!n || n.length > 40) return false;
+        return n === 'avancar' || n === 'next';
+      };
+      const nodes = Array.from(document.querySelectorAll('[role="button"],button,span,div'));
+      let best = null;
+      let bestLen = 999;
+      let bestLabel = '';
+      for (const el of nodes) {
+        const aria = normLocal(el.getAttribute('aria-label') || '');
+        const own = normLocal(el.innerText || el.textContent || '');
+        if (!isAdvance(aria) && !isAdvance(own)) continue;
+        let box = el;
+        let walk = el;
+        while (walk && walk !== document.body) {
+          const role = walk.getAttribute ? String(walk.getAttribute('role') || '') : '';
+          const overlay = Array.from(walk.children || []).some((child) => child.getAttribute && child.getAttribute('data-visualcompletion') === 'ignore');
+          if (role === 'button' || String(walk.tagName || '') === 'BUTTON' || overlay) {
+            box = walk;
+            if (role === 'button' || String(walk.tagName || '') === 'BUTTON') break;
+          }
+          walk = walk.parentElement;
+        }
+        const rect = box.getBoundingClientRect();
+        if (rect.width < 8 || rect.height < 8) continue;
+        const style = window.getComputedStyle(box);
+        if (!style || style.display === 'none' || style.visibility === 'hidden') continue;
+        const label = isAdvance(aria) ? aria : own;
+        if (label.length < bestLen) {
+          best = box;
+          bestLen = label.length;
+          bestLabel = label;
+        }
+      }
+      if (!best) return null;
+      const rect = best.getBoundingClientRect();
+      return { x: rect.left + (rect.width / 2), y: rect.top + (rect.height / 2), label: bestLabel };
+    });
+    if (!point) return false;
+    await page.mouse.move(point.x, point.y);
+    await sleep(300);
+    await page.mouse.click(point.x, point.y, { delay: 60 });
+    return point.label || true;
+  } catch {
+    return false;
+  }
+}
+
 async function waitForScreenAfterConfirmIdentity(page, { deadlineAt, minMs = 8000, maxMs = 60000 } = {}) {
   const start = Date.now();
   const readyScreens = new Set([
@@ -813,7 +894,8 @@ async function waitForScreenAfterConfirmIdentity(page, { deadlineAt, minMs = 800
     'doc_type',
     'upload_photo',
     'success',
-    'pending_review'
+    'pending_review',
+    'identity_retry'
   ]);
   let last = '';
   let streak = 0;
@@ -2721,18 +2803,26 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
     screen !== 'marketplace_phone_confirm' &&
     screen !== 'marketplace_phone_entry'
   ) {
-    let advanced = await waitClickByText(
-      page,
-      [
-        'a seguir: continue para a verificacao',
-        'a seguir: continue para a verificação',
-        'continue para a verificacao',
-        'continue para a verificação',
-        'avancar',
-        'avançar'
-      ],
-      { maxMs: 90000, deadlineAt, withinDialog: false, settleMs: WAIT_STEP_MS + 3000 }
-    );
+    let advanced = false;
+    const advStart = Date.now();
+    while (!advanced && (Date.now() - advStart) < 15000 && deadlineLeft(deadlineAt) > 0) {
+      advanced = await clickAvancar(page);
+      if (!advanced) await sleep(1000);
+    }
+    if (!advanced) {
+      advanced = await waitClickByText(
+        page,
+        [
+          'a seguir: continue para a verificacao',
+          'a seguir: continue para a verificação',
+          'continue para a verificacao',
+          'continue para a verificação',
+          'avancar',
+          'avançar'
+        ],
+        { maxMs: 20000, deadlineAt, withinDialog: false, settleMs: WAIT_STEP_MS + 3000 }
+      );
+    }
     if (!advanced) {
       try {
         advanced = await page.evaluate(() => {
@@ -3148,6 +3238,8 @@ module.exports = {
   isIdentityConfirmLabel,
   isIdentityDocumentLabel,
   isIdentityReviewText,
+  isIdentityRetryText,
+  isAdvanceLabel,
   extractMarketplacePhoneConfirmInfoFromText,
   isUnitedStatesDialOption,
   isDoneTodayFromDay,

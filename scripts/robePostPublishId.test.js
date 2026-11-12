@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { extractMarketplacePhoneConfirmInfoFromText, isUnitedStatesDialOption, classifyIdToday, idFlagsForToday, phoneAlertFlagsForToday, shouldMarkDocError, isMarketplaceActionText, isIdentityConfirmLabel, isIdentityDocumentLabel, isIdentityReviewText } = require("./robePostPublishId.js");
+const { extractMarketplacePhoneConfirmInfoFromText, isUnitedStatesDialOption, classifyIdToday, idFlagsForToday, phoneAlertFlagsForToday, shouldMarkDocError, isMarketplaceActionText, isIdentityConfirmLabel, isIdentityDocumentLabel, isIdentityReviewText, isIdentityRetryText, isAdvanceLabel } = require("./robePostPublishId.js");
 
 test("o botao de identidade vale pelo sentido, nao pela frase exata", () => {
   assert.equal(isIdentityConfirmLabel("Confirmar identidade"), true);
@@ -21,6 +21,12 @@ test("o botao de identidade vale pelo sentido, nao pela frase exata", () => {
   assert.equal(isIdentityReviewText("Confirmação de identidade em andamento"), true);
   assert.equal(isIdentityReviewText("Análise de identidade em andamento"), true);
   assert.equal(isIdentityReviewText("Confirme sua identidade para publicar"), false);
+  assert.equal(isIdentityRetryText("Não foi possível verificar sua identidade"), true);
+  assert.equal(isIdentityRetryText("Não foi possível verificar sua identidade com as informações fornecidas. Tente novamente."), true);
+  assert.equal(isIdentityRetryText("Confirmar identidade"), false);
+  assert.equal(isAdvanceLabel("Avançar"), true);
+  assert.equal(isAdvanceLabel("Next"), true);
+  assert.equal(isAdvanceLabel("Confirmar identidade"), false);
 });
 
 test("reconhece o aviso novo de identidade e as frases antigas", () => {
