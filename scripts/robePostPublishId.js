@@ -778,6 +778,7 @@ async function clickConfirmeSuaIdentidade(page) {
 }
 
 async function clickIdentityDocument(page) {
+  if (await identityDocIntroStillOpen(page)) return false;
   try {
     const point = await page.evaluate(() => {
       const normLocal = (s) => {
@@ -2984,6 +2985,7 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
   }
 
   // 4) Carregar / enviar o documento de identidade. O texto do botão pode mudar.
+  if (await identityDocIntroStillOpen(page)) screen = 'identity_doc_intro';
   if (screen === 'carregar_doc' || screen === 'unknown' || screen === 'continuar') {
     let loadDoc = false;
     const loadStart = Date.now();
@@ -3063,10 +3065,22 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
   let input = null;
   const findStart = Date.now();
   while (!input && Date.now() - findStart < 120000 && deadlineLeft(deadlineAt) > 0) {
+    if (await identityDocIntroStillOpen(page)) {
+      const advanced = await clickAvancar(page);
+      logEvt(nome, source, 'wizard_doc_intro_avancar_late', { ok: !!advanced });
+      if (!advanced) return { ok: false, error: 'doc_intro_avancar_not_clicked' };
+      await sleep(1500);
+      continue;
+    }
+    if (await identityRetryStillOpen(page)) {
+      const advanced = await clickAvancar(page);
+      if (!advanced) return { ok: false, error: 'avancar_not_clicked' };
+      await sleep(1500);
+      continue;
+    }
     input = await findFileInputEverywhere(page);
     if (input) break;
-    // UI mostra botão "Carregar" — clicar ajuda a montar o input em alguns builds.
-    await clickByText(page, ['carregar', 'upload', 'adicionar arquivo', 'escolher arquivo'], {
+    await clickByText(page, ['carregar documento de identidade', 'enviar documento de identidade', 'escolher arquivo', 'adicionar arquivo'], {
       withinDialog: false,
       exact: false
     });
