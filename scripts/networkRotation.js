@@ -20,6 +20,9 @@ const PUBLIC_IP_REFRESH_MS = 2 * 60 * 1000;
 const BROWSER_LAUNCH_TIMEOUT_MS = Math.max(5000, Number(process.env.NETWORK_ROTATION_BROWSER_LAUNCH_TIMEOUT_MS || 25000) || 25000);
 const INPROGRESS_STALE_MS = Math.max(60 * 1000, Number(process.env.NETWORK_ROTATION_INPROGRESS_STALE_MS || (25 * 60 * 1000)) || (25 * 60 * 1000));
 const CYCLE_TIMEOUT_MS = Math.max(60 * 1000, Number(process.env.NETWORK_ROTATION_CYCLE_TIMEOUT_MS || (15 * 60 * 1000)) || (15 * 60 * 1000));
+// A pausa no worker pode esperar conta ocupada por 120s e a pausa em si por 45s.
+// O comando aceita 180s. Cortar o HTTP em 45s abortava o ciclo antes do modem.
+const RUNTIME_HTTP_TIMEOUT_MS = Math.max(180000, Number(process.env.NETWORK_ROTATION_RUNTIME_HTTP_TIMEOUT_MS || 200000) || 200000);
 const AUTO_DEFAULT_MODEM_LOGIN_URL = String(process.env.NETWORK_ROTATION_DEFAULT_LOGIN_URL || "http://192.168.2.1:2080/").trim();
 const AUTO_DEFAULT_MODEM_REBOOT_URL = String(process.env.NETWORK_ROTATION_DEFAULT_REBOOT_URL || "http://192.168.2.1:2080/Reboot").trim();
 const AUTO_DEFAULT_MODEM_USER = String(process.env.NETWORK_ROTATION_DEFAULT_MODEM_USER || "SupAdmin").trim();
@@ -398,6 +401,12 @@ async function refreshPublicIpSnapshot({ force = false } = {}) {
   return ip || st.currentPublicIp || null;
 }
 
+function localCallError(e, label) {
+  const msg = (e && e.message) ? String(e.message) : String(e || "");
+  if ((e && e.name === "AbortError") || /aborted/i.test(msg)) return `${label}_timeout`;
+  return msg || `${label}_failed`;
+}
+
 async function httpJson(url, body = null, timeoutMs = 45000) {
   const ac = new AbortController();
   const t = setTimeout(() => { try { ac.abort(); } catch {} }, timeoutMs);
@@ -699,7 +708,15 @@ async function runCycle({ manualOptions = null } = {}) {
     const activeNames = await listActiveProfileNames().catch(() => []);
     shouldPauseRuntime = Array.isArray(activeNames) && activeNames.length > 0;
     if (shouldPauseRuntime) {
-      pauseResult = await httpJson(`http://127.0.0.1:${localPort}/api/network-rotation/pause-runtime`, { reason: "network_rotation_cycle" });
+      try {
+        pauseResult = await httpJson(
+          `http://127.0.0.1:${localPort}/api/network-rotation/pause-runtime`,
+          { reason: "network_rotation_cycle" },
+          RUNTIME_HTTP_TIMEOUT_MS
+        );
+      } catch (e) {
+        throw new Error(localCallError(e, "pause_runtime"));
+      }
       pausedNames = Array.isArray(pauseResult && pauseResult.pausedNames) ? pauseResult.pausedNames : [];
       timeline.push({
         ts: now(),
@@ -768,7 +785,15 @@ async function runCycle({ manualOptions = null } = {}) {
   } finally {
     try {
       if (shouldPauseRuntime) {
-        resumeResult = await httpJson(`http://127.0.0.1:${localPort}/api/network-rotation/resume-runtime`, { pausedNames });
+        try {
+          resumeResult = await httpJson(
+            `http://127.0.0.1:${localPort}/api/network-rotation/resume-runtime`,
+            { pausedNames },
+            RUNTIME_HTTP_TIMEOUT_MS
+          );
+        } catch (e) {
+          throw new Error(localCallError(e, "resume_runtime"));
+        }
         timeline.push({
           ts: now(),
           step: "resume_runtime",
