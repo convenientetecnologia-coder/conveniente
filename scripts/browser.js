@@ -8559,28 +8559,34 @@ async function detectAccountSuspended(page) {
       const nodes = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2500);
       const texts = nodes.map(el => (el.innerText || el.textContent || '')).filter(Boolean);
       const tnorm = texts.map(norm);
+      let rawBody = '';
+      try { rawBody = String((document.body && (document.body.innerText || document.body.textContent)) || ''); } catch {}
+      if (rawBody.length > 40000) rawBody = rawBody.slice(0, 40000);
+      const blob = norm(rawBody + ' ' + String(document.title || ''));
 
       // Multilíngue PT/EN/ES variantes para “suspensa/suspendida/suspended”
-      const hit = tnorm.some(t =>
-        t.includes('sua conta foi suspensa') ||
-        t.includes('sua conta esta suspensa') ||
-        t.includes('desabilitamos sua conta') ||
-        t.includes('desativamos sua conta') ||
-        t.includes('conta desabilitada') ||
-        t.includes('conta desativada') ||
-        t.includes('suspendemos seu perfil') ||
-        t.includes('seu perfil ser desabilitado permanentemente') ||
-        t.includes('your account was suspended') ||
-        t.includes('your account is suspended') ||
-        t.includes('we disabled your account') ||
-        t.includes('your account has been disabled') ||
-        t.includes('we suspended your profile') ||
-        t.includes('your profile is permanently disabled') ||
-        t.includes('tu cuenta ha sido suspendida') ||
-        t.includes('tu cuenta esta suspendida') ||
-        t.includes('suspendimos tu perfil') ||
-        t.includes('tu perfil sea deshabilitado permanentemente')
-      );
+      const phrases = [
+        'sua conta foi suspensa',
+        'sua conta esta suspensa',
+        'desabilitamos sua conta',
+        'desativamos sua conta',
+        'conta desabilitada',
+        'conta desativada',
+        'suspendemos seu perfil',
+        'seu perfil ser desabilitado permanentemente',
+        'your account was suspended',
+        'your account is suspended',
+        'we disabled your account',
+        'your account has been disabled',
+        'we suspended your profile',
+        'your profile is permanently disabled',
+        'tu cuenta ha sido suspendida',
+        'tu cuenta esta suspendida',
+        'suspendimos tu perfil',
+        'tu perfil sea deshabilitado permanentemente'
+      ];
+      const hasPhrase = (t) => phrases.some((p) => t.includes(p));
+      const hit = hasPhrase(blob) || tnorm.some(hasPhrase);
 
       // Evidência adicional contendo prazo/efeito (opcional e robusta)
       const more = tnorm.some(t =>
@@ -8605,7 +8611,11 @@ async function detectAccountSuspended(page) {
 
       const any = !!hit || !!disabledCheckpoint;
       if (any) {
+        const fromBody = /suspendemos seu perfil|seu perfil ser desabilitado permanentemente|desabilitamos sua conta|desativamos sua conta|suspens/i.test(rawBody)
+          ? rawBody.replace(/\s+/g, ' ').trim().slice(0, 420)
+          : '';
         snippet =
+          fromBody ||
           texts.find(s => /desabilitamos sua conta|desativamos sua conta|suspens/i.test(String(s||''))) ||
           texts.slice(0, 30).join(' | ').slice(0, 420);
       }

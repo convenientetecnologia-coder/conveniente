@@ -4640,6 +4640,24 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
             url: (() => { try { return String(pg.url() || ''); } catch { return ''; } })()
           });
         } catch {}
+        if (okMsg) {
+          try {
+            const bdReady = await browserHelper.detectAccountSuspended(pg).catch(()=>({ banned:false }));
+            if (bdReady && bdReady.banned) {
+              const banReason = String(bdReady.reason || 'banned');
+              const banSnippet = String(bdReady.snippet || '');
+              try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_banned', nome: String(nome||''), source: String(source||''), reason: banReason.slice(0,140), when: 'after_messenger_ready' }); } catch {}
+              if (_isOpenAll) {
+                try { if (ctrl) ctrl.trabalhando = false; } catch {}
+                try { await stopVirtus(nome); } catch {}
+                setImmediate(() => { setBannedFlag(nome, { reason: banReason, snippet: banSnippet }).catch(()=>{}); });
+                return { ok: true, state: 'banned_scheduled', reason: banReason };
+              }
+              try { await setBannedFlag(nome, { reason: banReason, snippet: banSnippet }); } catch {}
+              return { ok: true, state: 'banned', reason: banReason };
+            }
+          } catch {}
+        }
         if (!okMsg) {
           // Enterprise hardening:
           // Se o Messenger não ficou pronto, pode ser porque estamos em tela de captcha/identity/checkpoint.
