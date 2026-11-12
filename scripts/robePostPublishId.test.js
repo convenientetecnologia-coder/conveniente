@@ -3,7 +3,23 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { extractMarketplacePhoneConfirmInfoFromText, isUnitedStatesDialOption, classifyIdToday, idFlagsForToday, phoneAlertFlagsForToday, shouldMarkDocError } = require("./robePostPublishId.js");
+const { extractMarketplacePhoneConfirmInfoFromText, isUnitedStatesDialOption, classifyIdToday, idFlagsForToday, phoneAlertFlagsForToday, shouldMarkDocError, isMarketplaceActionText } = require("./robePostPublishId.js");
+
+test("reconhece o aviso novo de identidade e as frases antigas", () => {
+  assert.equal(isMarketplaceActionText("Confirme sua identidade para publicar este e futuros classificados"), true);
+  assert.equal(isMarketplaceActionText("Confirme sua identidade"), true);
+  assert.equal(isMarketplaceActionText("Uma ação é necessária para esse classificado"), true);
+  assert.equal(isMarketplaceActionText("Ação necessária"), true);
+  assert.equal(isMarketplaceActionText("Verifique sua identidade para publicar"), true);
+  assert.equal(isMarketplaceActionText("Verify your identity to publish"), true);
+  assert.equal(isMarketplaceActionText("Action required"), true);
+  assert.equal(isMarketplaceActionText("Se requiere una acción"), true);
+  assert.equal(isMarketplaceActionText("Documento de identidade"), true);
+  assert.equal(isMarketplaceActionText("Mudança valor imbatível, Carreto, Frete"), false);
+  assert.equal(isMarketplaceActionText("Anunciado em 04/11"), false);
+  assert.equal(isMarketplaceActionText("Turbinar classificado"), false);
+  assert.equal(isMarketplaceActionText("Marcar como indisponível"), false);
+});
 
 test("detecta fluxo novo de confirmacao de celular no Marketplace", () => {
   const sample = `

@@ -61,6 +61,14 @@ function norm(s) {
   }
 }
 
+// Frases antigas continuam. A tela nova diz "Confirme sua identidade para publicar...".
+// A palavra identidade cobre uma frase futura que mude o resto e mantenha essa palavra.
+const MARKETPLACE_ACTION_RE = /uma\s+acao\s+e\s+necessaria(\s+para\s+esse\s+classificado)?|acao\s+necessaria|confirme\s+sua\s+identidade|verifique\s+sua\s+identidade\s+para\s+publicar|verify\s+your\s+identity\s+to\s+publish|action\s+required|se\s+requiere\s+una\s+accion|\bidentidade\b/;
+
+function isMarketplaceActionText(text) {
+  return MARKETPLACE_ACTION_RE.test(norm(text));
+}
+
 function isUnitedStatesDialOption(text) {
   const n = norm(text);
   if (!n) return false;
@@ -1505,7 +1513,7 @@ async function openActionNeededListing(page, { mode = 'today', preferTitle = '' 
 
   try {
     return await page.evaluate(
-      (modeIn, preferIn, hintsIn) => {
+      (modeIn, preferIn, hintsIn, actionSource) => {
         const normLocal = (s) => {
           try {
             return String(s || '')
@@ -1562,8 +1570,7 @@ async function openActionNeededListing(page, { mode = 'today', preferTitle = '' 
           return m ? String(m[0]).slice(0, 40) : null;
         };
 
-        const actionRe =
-          /uma\s+acao\s+e\s+necessaria(\s+para\s+esse\s+classificado)?|acao\s+necessaria|verifique\s+sua\s+identidade\s+para\s+publicar|verify\s+your\s+identity\s+to\s+publish|action\s+required|se\s+requiere\s+una\s+accion/;
+        const actionRe = new RegExp(actionSource);
         const preferN = normLocal(preferIn).slice(0, 48);
 
         const actionNodes = Array.from(
@@ -1751,7 +1758,8 @@ async function openActionNeededListing(page, { mode = 'today', preferTitle = '' 
       },
       mode,
       prefer,
-      hints
+      hints,
+      MARKETPLACE_ACTION_RE.source
     );
   } catch (e) {
     return { found: false, error: 'open_evaluate_failed:' + String((e && e.message) || e).slice(0, 120) };
@@ -3005,6 +3013,7 @@ module.exports = {
   BUDGET_SKIP_MS,
   ID_PNG_PATH,
   todaySP,
+  isMarketplaceActionText,
   extractMarketplacePhoneConfirmInfoFromText,
   isUnitedStatesDialOption,
   isDoneTodayFromDay,
