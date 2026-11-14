@@ -36,6 +36,7 @@ function classifyAccountKind(perfil, robeRec) {
   if (p.marketplaceDisabled === true) return 'marketplace_disabled';
 
   if (p.captchaCheckpoint === true) return 'captcha';
+  if (p.whatsappConfirm === true) return 'whatsapp_confirm';
   if (p.twoFactor === true) return 'two_factor';
 
   // ID Virtus (Messenger "para enviar mensagens") — ≠ identity selfie/vídeo.
@@ -92,6 +93,7 @@ function emptyFlagsAgg() {
     anuncio_error: 0,
     marketplace_phone_no_balance: 0,
     marketplace_phone_confirm: 0,
+    whatsapp_confirm: 0,
     // Marketplace ID doc 1x/dia (pill conta "ID - sim"); ≠ Facebook identity checkpoint
     id_sim: 0,
     id_celular_sim: 0,
@@ -140,6 +142,7 @@ function buildServerCardAggs(status, opts = {}) {
       }
     }
     if (p.loginRemediateFailed === true) flagsAgg.login_cookies_failed++;
+    if (p.whatsappConfirm === true) flagsAgg.whatsapp_confirm++;
     if (p.appealSubmitted === true) flagsAgg.appeal_submitted++;
     if (p.marketplacePhoneError === true) flagsAgg.marketplace_phone_error++;
     if (p.marketplaceDocError === true) flagsAgg.marketplace_doc_error++;

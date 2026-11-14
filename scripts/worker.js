@@ -4961,8 +4961,22 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
     }
 
     // 2FA: marca humanHold e segue (browser fica aberto). Não engessa open-all.
+    try {
+      const pcW = require('./pcSessionLogin.js');
+      if (await pcW.whatsappScreen(pg)) {
+        await pcW.markWhatsappConfirm(nome);
+        try { await enterHumanMode(nome, controllers.get(nome), { reason: 'whatsapp_confirm' }); } catch {}
+        return { ok: true, state: 'whatsapp_confirm', reason: 'whatsapp_confirm' };
+      }
+    } catch {}
     if (rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor')) {
       try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_two_factor', nome: String(nome||''), source: String(source||''), reason: rr.slice(0,160) }); } catch {}
+      const pc = require('./pcSessionLogin.js');
+      const man = await manifestStore.read(nome).catch(() => null);
+      if (pc.readTotpSecret(man)) {
+        try { await pc.passAuthenticatorCode(pg, nome); } catch {}
+        return { ok: true, state: 'auth_app', reason: rr };
+      }
       try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String(lr && lr.title || '') }); } catch {}
       return { ok: true, state: 'two_factor', reason: rr };
     }
@@ -12291,7 +12305,21 @@ async function start_work({ nome, operator }) {
           // 2FA => exclusão automática (não é humano, não é automação)
           if (lr && lr.loginRequired) {
             const rr = String(lr.reason || '').toLowerCase();
+            try {
+              const pcW = require('./pcSessionLogin.js');
+              if (await pcW.whatsappScreen(p0)) {
+                await pcW.markWhatsappConfirm(nome);
+                try { await enterHumanMode(nome, controllers.get(nome), { reason: 'whatsapp_confirm' }); } catch {}
+                return { ok: false, error: 'whatsapp_confirm' };
+              }
+            } catch {}
             if (rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor')) {
+              const pc = require('./pcSessionLogin.js');
+              const man = await manifestStore.read(nome).catch(() => null);
+              if (pc.readTotpSecret(man)) {
+                try { await pc.passAuthenticatorCode(p0, nome); } catch {}
+                return { ok: true, skipped: 'auth_app' };
+              }
               try { await setTwoFactorFlag(nome, { reason: rr || 'two_factor', snippet: String((lr && lr.title) ? lr.title : '') }); } catch {}
               try { await issues.append(nome, 'mil_action', `start_work_preflight_two_factor reason=${rr}`); } catch {}
               return { ok: false, error: 'two_factor' };
@@ -13218,6 +13246,7 @@ const handlers = {
         if (s.includes('checkpoint')) return true;
         if (s.includes('two_factor') || s.includes('2fa') || s.includes('two_step')) return true;
         if (s.includes('disabled') || s.includes('suspended')) return true;
+        if (s.includes('hacked') || s.includes('password_reset') || s.includes('human_confirm')) return true;
         return false;
       };
       const scanHardBlock = async () => {
@@ -13393,12 +13422,7 @@ const handlers = {
             });
           } catch {}
 
-          const driven = await browserHelper.driveFacebookLogin(workPage, {
-            nome,
-            login: login2,
-            password: password2,
-            maxPerStep: 3
-          }).catch(() => ({ ok: false, error: 'login_drive_exception' }));
+          const driven = { ok: false, error: 'login_already_attempted_in_configure_profile' };
           if (driven && driven.terminal) {
             after = { loginRequired: true, reason: String(driven.terminal) };
           } else if (driven && driven.ok) {
@@ -13735,6 +13759,13 @@ const handlers = {
         return { ok: true, closedForRam };
       } catch (e) {
         const errMsg = (e && e.message) ? String(e.message) : String(e || 'falha_injetar_cookies');
+        if (/whatsapp_confirm/i.test(errMsg)) {
+          enteredHuman = true;
+          try { await enterHumanMode(nome, controllers.get(nome), { reason: 'whatsapp_confirm' }); } catch {}
+          try { await ensureHumanOverlay(nome, controllers.get(nome), { reason: 'whatsapp_confirm' }); } catch {}
+          try { await snapshotStatusAndWrite(); } catch {}
+          return { ok: false, error: 'whatsapp_confirm', closedForRam };
+        }
         try { await issues.append(nome, 'cookie_inject_failed', errMsg); } catch {}
         logger.error('[HANDLER] configure erro', { nome, error: errMsg }, e);
         try { provisionAudit.append({ ts: Date.now(), event: 'configure_exception', nome: String(nome||''), operator: op || null, error: errMsg }); } catch {}
@@ -14132,34 +14163,48 @@ const handlers = {
         pushStep({ step: 'headroom_recover_failed' });
       }
 
-      // 4) tentativa 1: reinjetar cookies (configureProfile)
-      if (!skipAttempt1InjectCookies) {
+      // 4) Entrada: login e senha. Cookie só se faltar um dos dois.
+      let sessionRestored = false;
+      let credentialAttempted = false;
+      const pcGate = require('./pcSessionLogin.js');
+      const manGate = await manifestStore.read(nome).catch(() => null);
+      const loginGate = manGate && (manGate.login || manGate.email || manGate.user || manGate.username);
+      const passGate = manGate && (manGate.password || manGate.pass);
+      const pagesNow = await ctrl.browser.pages().catch(() => []);
+      const pSession = pagesNow && pagesNow[0];
+      if (ctrl.trabalhando) {
+        pushStep({ step: 'attempt1_inject_cookies_skipped', reason: 'already_posting' });
+      } else if (pSession && String(loginGate || '').trim() && String(passGate || '').trim()) {
+        credentialAttempted = true;
         try {
-          const man0 = await manifestStore.read(nome).catch(()=>null);
-          const cookies = (man0 && Array.isArray(man0.cookies)) ? man0.cookies : [];
-          if (!cookies.length) {
-            pushStep({ step: 'missing_cookies_in_manifest' });
-            await failFastToHuman('missing_cookies_in_manifest');
-            return { ok: false, error: 'missing_cookies_in_manifest', steps };
+          pushStep({ step: 'open_fresh_login' });
+          await pcGate.openFreshLoginPage(pSession, nome);
+          const entered = await pcGate.attemptCredentialRelogin(pSession, nome, {
+            login: String(loginGate).trim(),
+            password: String(passGate)
+          });
+          sessionRestored = !!(entered && entered.ok === true);
+          pushStep({ step: 'attempt_credential_relogin', ok: sessionRestored, error: entered && entered.error ? String(entered.error) : null });
+          if (entered && entered.error === 'whatsapp_confirm') {
+            try { await enterHumanMode(nome, controllers.get(nome), { reason: 'whatsapp_confirm' }); } catch {}
+            try { await ensureHumanOverlay(nome, controllers.get(nome), { reason: 'whatsapp_confirm' }); } catch {}
+            try { await snapshotStatusAndWrite(); } catch {}
+            return { ok: false, error: 'whatsapp_confirm', steps, closedForRam, pausedVirtus };
           }
-          // Blindagem: durante configureProfile (abre várias abas), não deixar aboutBlankKiller matar as abas ainda em load.
-          try {
-            const guard = (ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {});
-            guard[nome] = Math.max(Number(guard[nome] || 0) || 0, Date.now() + (6 * 60 * 1000));
-          } catch {}
-          pushStep({ step: 'attempt1_inject_cookies_begin' });
-          await withTimeout('injectCookies', browserHelper.configureProfile(ctrl.browser, nome, cookies), stageTimeoutMs.injectCookies);
-          pushStep({ step: 'attempt1_inject_cookies_done' });
         } catch (e) {
-          pushStep({ step: 'attempt1_inject_cookies_fail', error: (e && e.message) || String(e) });
-        } finally {
-          // Não desativar configurando aqui: a validação pós-injeção ainda precisa das 3 abas vivas.
-          // O reset acontece no finally global do login_remediate (abaixo).
-          // Também não remove suppress imediatamente: popups/redirects podem abrir abas e ficar blank por alguns segundos após configure.
+          pushStep({ step: 'attempt_credential_relogin_fail', error: (e && e.message) || String(e) });
+        }
+      } else if (pSession) {
+        try {
+          pushStep({ step: 'emergency_cookie_missing_credentials' });
+          const restored = await pcGate.tryExistingPcSession(pSession, nome);
+          sessionRestored = !!(restored && restored.in === true);
+          pushStep({ step: 'emergency_cookie_done', in: sessionRestored, reason: restored && restored.reason ? String(restored.reason) : null });
+        } catch (e) {
+          pushStep({ step: 'emergency_cookie_fail', error: (e && e.message) || String(e) });
         }
       } else {
-        // Modo password_first: pula injeção e vai direto para login/senha.
-        pushStep({ step: 'attempt1_inject_cookies_skipped', authMode, reason: 'password_first' });
+        pushStep({ step: 'attempt1_no_page' });
       }
 
       // 5) validar loginRequired em TODAS as abas reais (sem “puxar” tudo para /marketplace)
@@ -14187,7 +14232,14 @@ const handlers = {
         const pAny = (pages && pages[0]) || pMsg || pCreate || pFb || null;
 
         const checkOne = async (page, label) => {
+          if (sessionRestored) return { ui: { ok: true }, lr: { loginRequired: false, reason: 'session_restored' } };
           if (!page) return null;
+          try {
+            const pre = await browserHelper.classifyFacebookLoginSurface(page);
+            if (pre && (pre.kind === 'hacked_stop' || pre.terminal === 'human_confirm')) {
+              return { ui: null, lr: { loginRequired: true, reason: pre.terminal || 'hacked_review' } };
+            }
+          } catch {}
           // Blindagem: garanta que estamos checando o domínio correto
           try {
             const u0 = safeUrl(page);
@@ -14255,15 +14307,18 @@ const handlers = {
         pushStep({ step: 'missing_required_tabs_for_validation', hasMsg: !!lrMessenger, hasFb: !!lrFacebook, authMode, action: 'continue_drive' });
       }
 
-      let needsLogin =
+      let needsLogin = !sessionRestored && (
         skipAttempt1InjectCookies ||
         (lrMessenger && lrMessenger.loginRequired) ||
-        (lrFacebook && lrFacebook.loginRequired);
+        (lrFacebook && lrFacebook.loginRequired)
+      );
 
       const hardBlockReason = (lr) => {
         const r = String(lr && lr.reason || '').toLowerCase();
+        const u = String(lr && (lr.url || '') || '');
+        if (/\/authentication\//i.test(u)) return false;
         if (!r) return false;
-        if (r.includes('two_factor') || r.includes('2fa') || r.includes('two factor')) return true;
+        if (r.includes('two_factor') || r.includes('2fa') || r.includes('two factor')) return false;
         if (r.includes('identity')) return true;
         if (r.includes('captcha_persona')) return true;
         if (r === 'checkpoint_captcha') return true;
@@ -14294,7 +14349,7 @@ const handlers = {
         if (pgLive && typeof browserHelper.classifyFacebookLoginSurface === 'function') {
           const surf = await browserHelper.classifyFacebookLoginSurface(pgLive).catch(() => null);
           const k = surf && surf.kind;
-          if (k === 'image_captcha' || k === 'continuar' || k === 'comecar' || k === 'password' || k === 'login_form') needsLogin = true;
+          if (k === 'image_captcha' || k === 'continuar' || k === 'comecar' || k === 'password' || k === 'login_form' || k === 'auth_app' || k === 'enterprise_box' || k === 'hacked_stop') needsLogin = true;
         }
       } catch {}
 
@@ -14355,18 +14410,28 @@ const handlers = {
           // Captcha antigo, ban, 2FA e identidade param na hora.
           pushStep({ step: 'login_drive_begin' });
           if (await checkAndAbortIfBanned(p0, 'before_login_drive')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
-          const driven = await withTimeout('loginFb', browserHelper.driveFacebookLogin(p0, {
-            nome,
-            login: login2,
-            password: password2,
-            maxPerStep: 3
-          }), stageTimeoutMs.loginFb + stageTimeoutMs.loginMsg);
+          if (credentialAttempted) {
+            pushStep({ step: 'login_drive_skipped', reason: 'already_attemptCredentialRelogin' });
+            await failFastToHuman('login_already_attempted');
+            return { ok: false, error: 'login_already_attempted', steps, closedForRam, pausedVirtus };
+          }
+          const driven = await withTimeout('loginFb', (async () => {
+            const pc = require('./pcSessionLogin.js');
+            await pc.openFreshLoginPage(p0, nome);
+            return pc.attemptCredentialRelogin(p0, nome, { login: login2, password: password2 });
+          })(), stageTimeoutMs.loginFb + stageTimeoutMs.loginMsg);
           pushStep({
             step: 'login_drive_done',
             ok: !!(driven && driven.ok),
             error: driven && driven.error ? String(driven.error).slice(0, 160) : null,
             terminal: driven && driven.terminal ? String(driven.terminal).slice(0, 80) : null
           });
+          if (driven && driven.error === 'whatsapp_confirm') {
+            try { await enterHumanMode(nome, controllers.get(nome), { reason: 'whatsapp_confirm' }); } catch {}
+            try { await ensureHumanOverlay(nome, controllers.get(nome), { reason: 'whatsapp_confirm' }); } catch {}
+            try { await snapshotStatusAndWrite(); } catch {}
+            return { ok: false, error: 'whatsapp_confirm', steps, closedForRam, pausedVirtus };
+          }
           if (await checkAndAbortIfBanned(p0, 'after_login_drive')) return { ok: false, error: 'banned', steps, closedForRam, pausedVirtus };
           if (driven && driven.terminal) {
             await failFastToHuman(String(driven.terminal));
@@ -14460,8 +14525,8 @@ const handlers = {
         pushStep({ step: 'non_automatable_after_login', reason: na, lrMessenger, lrFacebook });
         // 2FA => exclusão automática (não vira humano)
         if (String(na) === 'two_factor') {
-          try { await setTwoFactorFlag(nome, { reason: 'two_factor', snippet: '' }); } catch {}
-          return { ok: false, error: 'two_factor', steps, closedForRam, pausedVirtus };
+          pushStep({ step: 'auth_app_stop_without_delete', reason: na });
+          return { ok: false, error: 'auth_app_stop', steps, closedForRam, pausedVirtus };
         }
         try { await setLoginRequiredFlag(nome, { reason: na, source: 'login_remediate' }); } catch {}
         await failFastToHuman(na);
@@ -17003,6 +17068,8 @@ const twoFactor = man ? !!(man.accountFlags && man.accountFlags.twoFactor === tr
 const twoFactorAt = man ? ((man.accountFlags && man.accountFlags.twoFactorAt) || null) : null;
 const twoFactorReason = man ? ((man.accountFlags && man.accountFlags.twoFactorReason) || null) : null;
 const twoFactorText = man ? ((man.accountFlags && man.accountFlags.twoFactorText) || null) : null;
+const whatsappConfirm = man ? !!(man.accountFlags && man.accountFlags.whatsappConfirm === true) : false;
+const whatsappConfirmAt = man ? ((man.accountFlags && man.accountFlags.whatsappConfirmAt) || null) : null;
 const identityRequired = man ? !!(man.accountFlags && man.accountFlags.identityRequired === true) : false;
 const identitySubmitted = man ? !!(man.accountFlags && man.accountFlags.identitySubmitted === true) : false;
 const identityNextCheckAt = man ? ((man.accountFlags && man.accountFlags.identityNextCheckAt) || null) : null;
@@ -17237,6 +17304,8 @@ perfis.push({
   twoFactorAt,
   twoFactorReason,
   twoFactorText,
+  whatsappConfirm,
+  whatsappConfirmAt,
   identityRequired,
   identitySubmitted,
   identityNextCheckAt,
@@ -20847,8 +20916,26 @@ async function nurseTick() {
           // return aqui engessava "Abrir Todos" (pending eternamente). Segue o próximo perfil.
           try {
             const rr0 = String(lr && lr.reason || '').toLowerCase();
+            try {
+              const pcW = require('./pcSessionLogin.js');
+              const pgW = lrPage || p0;
+              if (pgW && await pcW.whatsappScreen(pgW)) {
+                await pcW.markWhatsappConfirm(nome);
+                try { await enterHumanMode(nome, controllers.get(nome), { reason: 'whatsapp_confirm' }); } catch {}
+                continue;
+              }
+            } catch {}
             if (rr0.includes('two_factor') || rr0.includes('2fa') || rr0.includes('two factor')) {
               try { await issues.append(nome, 'mil_action', `two_factor_detected_continue reason=${rr0}`); } catch {}
+              const pc = require('./pcSessionLogin.js');
+              const man = await manifestStore.read(nome).catch(() => null);
+              if (pc.readTotpSecret(man)) {
+                const pgAuth = lrPage || p0;
+                if (pgAuth) {
+                  try { await pc.passAuthenticatorCode(pgAuth, nome); } catch {}
+                }
+                continue;
+              }
               try { await setTwoFactorFlag(nome, { reason: rr0 || 'two_factor', snippet: String(lr && lr.title || '') }); } catch {}
               continue;
             }

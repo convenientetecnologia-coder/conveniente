@@ -215,42 +215,24 @@ async function injectCookies(page, cookies) {
   try {
     if (!Array.isArray(cookies) || !cookies.length) return;
     const allowed = ['name','value','domain','path','expires','httpOnly','secure','sameSite'];
-    const fixDomain = (d) => {
-      let dd = String(d || '.facebook.com').replace(/\s/g, '').toLowerCase();
-      if (!dd.startsWith('.')) dd = '.' + dd;
-      if (!dd.includes('.facebook.com')) dd = '.facebook.com';
-      return dd;
-    };
-    const fixPath = (p) => (typeof p === 'string' ? p.trim() : '/');
-    const ascii = (s) => String(s || '').normalize('NFD').replace(/[^\w\-]/g, '');
     const filtered = cookies.map(c => {
       const obj = {};
       for (const k of allowed) {
-        if (c[k] !== undefined) {
-          if (k === 'httpOnly' || k === 'secure') {
-            obj[k] = Boolean(c[k] === true || c[k] === 'true' || c[k] === 1 || c[k] === '1');
-          } else if (k === 'domain') {
-            obj[k] = fixDomain(c[k]);
-          } else if (k === 'path') {
-            obj[k] = fixPath(c[k]);
-          } else if (k === 'name') {
-            obj[k] = ascii(c[k]);
-          } else if (k === 'expires') {
-            let v = Number(c[k]);
-            if (Number.isNaN(v) && c.expirationDate) v = Number(c.expirationDate);
-            if (Number.isNaN(v) && c.datadeexpiraao) v = Number(c.datadeexpiraao) / 1000;
-            if (Number.isFinite(v) && v > 1000000000) obj[k] = Math.floor(v); // segundos
-          } else {
-            obj[k] = String(c[k]);
-          }
+        if (c[k] === undefined || c[k] === null || c[k] === '') continue;
+        if (k === 'httpOnly' || k === 'secure') {
+          obj[k] = c[k] === true || c[k] === 'true' || c[k] === 1 || c[k] === '1';
+        } else if (k === 'expires') {
+          let v = Number(c[k]);
+          if (!Number.isFinite(v) && c.expirationDate) v = Number(c.expirationDate);
+          if (Number.isFinite(v) && v > 9999999999) v = Math.floor(v / 1000);
+          if (Number.isFinite(v) && v > 0) obj[k] = Math.floor(v);
+        } else {
+          obj[k] = String(c[k]).trim();
         }
       }
-      obj.name = ascii(obj.name || '');
-      obj.value = String(obj.value || '');
-      obj.domain = fixDomain(obj.domain);
-      obj.path = fixPath(obj.path);
+      if (!obj.path) obj.path = '/';
       return obj;
-    }).filter(c => c.name && c.value && c.domain && c.path);
+    }).filter(c => c.name && c.value && c.domain);
     if (process.env.BROWSER_DEBUG === '1') {
       logger.debug('[COOKIES] PARA INJETAR FINAL:', { cookies: filtered });
     }
@@ -5400,14 +5382,6 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     } catch {}
   }
 
-  const cookies = Array.isArray(cookiesOverride) && cookiesOverride.length
-    ? cookiesOverride
-    : (manifest && Array.isArray(manifest.cookies) ? manifest.cookies : []);
-  if (!Array.isArray(cookies) || !cookies.length) {
-    if (dbg) logger.debug('[CONFIG] missing cookies', { nome });
-    return; // caller (worker) vai detectar missing_cookies e tratar
-  }
-
   const createUrl = (String(robeMode || '').toLowerCase() === 'veiculos')
     ? 'https://www.facebook.com/marketplace/create/vehicle'
     : 'https://www.facebook.com/marketplace/create/item';
@@ -5421,7 +5395,30 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
     if (dbg) logger.debug('[CONFIG] blindar p0 fail', { nome, error: (e && e.message) || String(e) });
     throw e;
   }
-  await injectCookies(p0, cookies);
+  const pcLogin = require('./pcSessionLogin.js');
+  const loginNow = manifest && (manifest.login || manifest.email || manifest.user || manifest.username);
+  const passNow = manifest && (manifest.password || manifest.pass);
+  if (String(loginNow || '').trim() && String(passNow || '').trim()) {
+    await pcLogin.openFreshLoginPage(p0, nome);
+    const entered = await pcLogin.attemptCredentialRelogin(p0, nome, {
+      login: String(loginNow).trim(),
+      password: String(passNow)
+    });
+    if (!entered || entered.ok !== true) {
+      if (entered && entered.error === 'whatsapp_confirm') {
+        const stop = new Error('whatsapp_confirm');
+        throw stop;
+      }
+      if (dbg) logger.debug('[CONFIG] credential login failed', { nome, error: entered && entered.error });
+      return;
+    }
+  } else {
+    const restored = await pcLogin.tryExistingPcSession(p0, nome);
+    if (!restored || restored.in !== true) {
+      if (dbg) logger.debug('[CONFIG] emergency cookie did not open feed', { nome, reason: restored && restored.reason });
+      return;
+    }
+  }
   try { await p0.goto(fb0Url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
   try { await sleep(900); } catch {}
   try {
@@ -5478,7 +5475,6 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   let p1 = null;
   try {
     p1 = await newPageDaConta(browser, nome, { source: 'configure_p1' });
-    await injectCookies(p1, cookies);
     await p1.goto(createUrl, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{});
     await sleep(1200);
     const ui1 = await ensureFbUiUnblocked(p1, nome, { reasonBase: 'configure_create', allowGpt: true, maxRounds: 2 }).catch(()=>null);
@@ -7871,25 +7867,7 @@ async function hackedAssistStep(page, { newPassword = '', maxWaitMs = 45_000, tr
           (bodyTxt.includes('troque a senha') || bodyTxt.includes('change your password')) &&
           (bodyTxt.includes('pode ter sido invadida') || bodyTxt.includes('may have been hacked') || bodyTxt.includes('manter sua conta protegida') || bodyTxt.includes('keep your account secure'));
         if (passwordNag) {
-          const dialog = document.querySelector('div[role="dialog"][aria-modal="true"]') || document.querySelector('div[role="dialog"]') || document;
-          const closers = Array.from(dialog.querySelectorAll('[role="button"],button')).slice(0, 60);
-          for (const el of closers) {
-            const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
-            if (aria !== 'fechar' && aria !== 'close') continue;
-            const r0 = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
-            if (!r0 || r0.width < 8 || r0.height < 8) continue;
-            try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
-            const rect = el.getBoundingClientRect();
-            return {
-              ready: true,
-              filled: 0,
-              clicked: 'fechar',
-              text: aria,
-              x: rect.left + rect.width / 2,
-              y: rect.top + rect.height / 2
-            };
-          }
-          return { ok: false, error: 'fechar_not_found' };
+          return { ok: false, error: 'hacked_stop' };
         }
 
         // 1) Se houver inputs de senha, preencher primeiro (sem clicar em outros elementos).
@@ -8005,6 +7983,7 @@ async function hackedAssistStep(page, { newPassword = '', maxWaitMs = 45_000, tr
       return { ok: true, ...r, via: 'mouse', waitedMs: Date.now() - start, attempts: attempt };
     }
     if (r && r.ok) return { ok: true, ...r, waitedMs: Date.now() - start, attempts: attempt };
+    if (r && r.error === 'hacked_stop') return { ok: false, error: 'hacked_stop', waitedMs: Date.now() - start, attempts: attempt };
     lastErr = r && r.error ? String(r.error) : 'error';
     if (attempt >= minTries) {
       // Se não clicou nada em alguns segundos, não martela.
@@ -8170,14 +8149,23 @@ async function classifyFacebookLoginSurface(page) {
     return t.includes('digite o texto') || t.includes('type the text from the image');
   }).catch(() => false);
   if (imageText || textHint || /\/captcha\/tfbimage\//i.test(imgSrc)) return { kind: 'image_captcha', lr, cap };
-  if (reason.includes('two_factor') || reason.includes('2fa') || reason.includes('two factor')) return { kind: 'terminal', terminal: 'two_factor', lr };
+  const pcLogin = require('./pcSessionLogin.js');
+  const hrefNow = (typeof page.url === 'function') ? String(page.url() || '') : '';
+  if (await pcLogin.humanConfirmScreen(page)) return { kind: 'terminal', terminal: 'human_confirm', lr };
+  if (await pcLogin.hackedScreen(page) || reason.includes('hacked_review') || reason.includes('password_reset')) {
+    return { kind: 'hacked_stop', lr };
+  }
+  if (/\/two_step_verification\/authentication\//i.test(hrefNow)) return { kind: 'enterprise_box', lr };
+  if (reason.includes('two_factor') || reason.includes('2fa') || reason.includes('two factor') || /\/two_factor\//i.test(hrefNow)) {
+    return { kind: 'auth_app', lr };
+  }
   if (reason.includes('identity')) return { kind: 'terminal', terminal: 'identity', lr };
   if (reason.includes('banned') || reason.includes('suspended') || reason.includes('disabled_checkpoint')) return { kind: 'terminal', terminal: 'banned', lr };
   const checkpointTerminal = reason.includes('checkpoint') && !reason.includes('checkpoint_back_to_facebook');
   if (reason.includes('captcha_persona') || checkpointTerminal || (reason.includes('captcha') && !imageText && !reason.includes('captcha_image'))) {
     return { kind: 'terminal', terminal: 'captcha_persona', lr };
   }
-  if (reason.includes('hacked_review') || reason.includes('password_reset') || reason.includes('checkpoint_back_to_facebook')) {
+  if (reason.includes('checkpoint_back_to_facebook')) {
     return { kind: 'comecar', lr };
   }
   if (!(lr && lr.loginRequired) && !(surface && surface.hasPass)) return { kind: 'in', lr };
@@ -8202,8 +8190,27 @@ async function driveFacebookLogin(page, { login, password, nome, maxPerStep = 3 
     const s = await classifyFacebookLoginSurface(page);
     const kind = s && s.kind ? s.kind : 'unknown';
     steps.push({ i, kind, reason: s && s.lr ? String(s.lr.reason || '') : '' });
-    if (kind === 'in') return { ok: true, steps };
+    if (kind === 'in') {
+      const savedIn = await require('./pcSessionLogin.js').persistFreshSessionCookies(page, nome);
+      if (savedIn && savedIn.ok) return { ok: true, steps };
+      return { ok: false, error: (savedIn && savedIn.reason) || 'not_in', steps };
+    }
     if (kind === 'terminal') return { ok: false, terminal: s.terminal || 'human', error: s.terminal || 'human', steps };
+    if (kind === 'hacked_stop') return { ok: false, terminal: 'hacked_review', error: 'hacked_review', steps };
+    if (kind === 'enterprise_box') {
+      const box = await require('./pcSessionLogin.js').watchAndSolveLoginCheckbox(page, nome);
+      if (box && box.ok === false) return { ok: false, error: box.reason || 'recaptcha_failed', steps };
+      continue;
+    }
+    if (kind === 'auth_app') {
+      const pcAuth = require('./pcSessionLogin.js');
+      const auth = await pcAuth.passAuthenticatorCode(page, nome);
+      if (auth && auth.asked && !auth.ok) return { ok: false, error: auth.error || 'auth_app_code_failed', steps };
+      await pcAuth.clickTrustThisDevice(page, nome);
+      const saved = await pcAuth.persistFreshSessionCookies(page, nome);
+      if (saved && saved.ok) return { ok: true, steps };
+      continue;
+    }
     if (kind === 'image_captcha') {
       const solved = await solveFacebookImageCaptcha(page, {
         nome,
@@ -8225,19 +8232,8 @@ async function driveFacebookLogin(page, { login, password, nome, maxPerStep = 3 
       }
       continue;
     }
-    if (kind === 'comecar') {
-      const step = await hackedAssistStep(page, {
-        newPassword: password,
-        maxWaitMs: 12000,
-        tries: 2
-      }).catch(() => ({ ok: false, error: 'comecar_exception' }));
-      await sleep(1200);
-      const clicked = String((step && step.clicked) || '');
-      const advanced = !!(step && step.ok && clicked && clicked !== 'scroll_nudge');
-      if (!advanced && bump('comecar') >= limit) {
-        return { ok: false, error: (step && step.error) || 'comecar_failed', steps };
-      }
-      continue;
+    if (kind === 'comecar' || kind === 'hacked_stop') {
+      return { ok: false, terminal: 'hacked_review', error: 'hacked_review', steps };
     }
     if (kind === 'password' || kind === 'login_form') {
       const r = await tryLoginEmailPass(page, {
@@ -8250,7 +8246,7 @@ async function driveFacebookLogin(page, { login, password, nome, maxPerStep = 3 
       await sleep(900);
       if (!(r && r.ok)) {
         const err = String((r && r.error) || '');
-        if (/captcha_persona|two_factor|2fa|identity|banned/i.test(err)) {
+        if (/hacked_review|human_confirm|auth_app_no_secret|captcha_persona|two_factor|2fa|identity|banned/i.test(err)) {
           return { ok: false, terminal: err, error: err, steps };
         }
         if (bump(kind) >= limit) return { ok: false, error: err || 'login_failed', steps };
@@ -8263,193 +8259,23 @@ async function driveFacebookLogin(page, { login, password, nome, maxPerStep = 3 
   return { ok: false, error: 'login_drive_exhausted', steps };
 }
 
-async function tryLoginEmailPass(page, { login, password, nome, allowGpt = true, allowAymhContinue = false } = {}) {
-  const email = String(login || '').trim();
-  const pass = String(password || '').trim();
-  if (!email || !pass) return { ok: false, error: 'missing_credentials' };
-
-  // 1) destravar telas comuns:
-  //    - allowAymhContinue: clica Continuar do perfil salvo e segue para a senha.
-  //      Não clica "Usar outro perfil".
-  //    - se já tem form → NÃO clica "Usar outro perfil"
-  //    - senão, "Usar outro perfil" só para cair no form em branco clássico
-  await _maybeClickCloseX(page);
-  try {
-    const aymh = await detectLoginRequired(page).catch(() => null);
-    const aymhReason = String((aymh && aymh.reason) || '').toLowerCase();
-    if (aymh && aymh.loginRequired && (aymhReason.includes('aymh_continue') || aymhReason === 'aymh')) {
-      if (!allowAymhContinue) {
-        return { ok: false, error: 'aymh_continue_human_only' };
-      }
-      const clk = await tryClickAymhContinuar(page).catch(() => ({ ok: false }));
-      if (!(clk && clk.ok)) {
-        return { ok: false, error: 'aymh_continue_click_failed' };
-      }
-      await sleep(1200);
-    }
-  } catch {}
-  try {
-    const surface = await page.evaluate(() => {
-      const hasEmail = !!document.querySelector('input[name="email"], input#email, input[type="email"]');
-      const hasPass = !!document.querySelector('input[name="pass"], input#pass, input[type="password"]');
-      return { hasEmail, hasPass };
-    }).catch(() => ({ hasEmail: false, hasPass: false }));
-    if (!(surface && (surface.hasEmail || surface.hasPass))) {
-      // Em cadastro com AYMH, NÃO clicar "Usar outro perfil" — Continuar já foi o caminho.
-      if (!allowAymhContinue) {
-        await _maybeClickUseAnotherProfile(page);
-        await sleep(700);
-      }
-    }
-  } catch {}
-
-  // 2) preencher formulário (FB / Messenger) — email opcional se a página só pedir senha
-  try {
-    await page.waitForTimeout(600);
-  } catch {}
-
-  try {
-    // aguarda inputs aparecerem (evita “atropelo” de render)
-    await page.waitForSelector('input[name="pass"], input#pass, input[type="password"]', { timeout: 12000 }).catch(()=>{});
-    await page.waitForSelector('input[name="email"], input#email', { timeout: 2500 }).catch(()=>{});
-
-    // limpa e digita com pequeno delay humano
-    await page.evaluate(() => {
-      const e = document.querySelector('input[name="email"], input#email');
-      const p = document.querySelector('input[name="pass"], input#pass, input[type="password"]');
-      if (e) e.value = '';
-      if (p) p.value = '';
-    }).catch(()=>{});
-    const hasEmailSel = await page.$('input[name="email"], input#email').catch(() => null);
-    if (hasEmailSel) {
-      await page.type('input[name="email"], input#email', email, { delay: 28 }).catch(()=>{});
-    }
-    await page.type('input[name="pass"], input#pass, input[type="password"]', pass, { delay: 28 }).catch(()=>{});
-  } catch (e) {
-    return { ok: false, error: (e && e.message) || 'type_failed' };
-  }
-
-  // 3) marcar "manter-me conectado" se existir
-  await _maybeClickKeepConnected(page);
-
-  // 4) submit (enterprise): click -> Enter -> form.submit -> GPT -> click (2a)
-  try {
-    // dá um respiro pra UI renderizar botões/handlers após preencher inputs
-    await sleep(600);
-    const clickLoginCta = () => page.evaluate(() => {
-      function norm(s) {
-        try { return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
-        catch { return String(s || '').toLowerCase(); }
-      }
-      const classic =
-        document.querySelector('button#loginbutton, button[name="login"], button[type="submit"], [data-testid="royal-login-button"]') ||
-        document.querySelector('form#login_form button[type="submit"]') ||
-        document.querySelector('form[data-testid="royal_login_form"] button[type="submit"]') ||
-        document.querySelector('form#aymh_password_entry_view input[type="submit"]');
-      if (classic) {
-        try { classic.click(); return true; } catch { return false; }
-      }
-      // AYMH pós-Continuar: CTA "Entrar" é div[role=button], não <button type=submit>
-      const candidates = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"]')).slice(0, 1600);
-      for (const el of candidates) {
-        const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
-        const txt = norm(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-        const tabIndex = el.getAttribute && el.getAttribute('tabindex') === '-1';
-        const ariaDisabled = el.getAttribute && el.getAttribute('aria-disabled') === 'true';
-        if (tabIndex || ariaDisabled) continue;
-        const isEntrar =
-          aria === 'entrar' || txt === 'entrar' ||
-          aria === 'log in' || txt === 'log in' ||
-          aria === 'sign in' || txt === 'sign in' ||
-          /^entrar(\s|$)/.test(aria) || /^entrar(\s|$)/.test(txt);
-        if (!isEntrar) continue;
-        try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
-        try { el.click(); return true; } catch {}
-      }
-      return false;
-    }).catch(() => false);
-
-    const clicked = await clickLoginCta();
-
-    if (!clicked) {
-      // fallback 1: Enter no campo senha
-      try {
-        await page.focus('input[name="pass"], input#pass, input[type="password"]').catch(()=>{});
-        await page.keyboard.press('Enter').catch(()=>{});
-        await sleep(450);
-      } catch {}
-
-      // fallback 2: form.submit() (inclui AYMH password entry)
-      try {
-        const submitted = await page.evaluate(() => {
-          const form =
-            document.querySelector('form#login_form') ||
-            document.querySelector('form[data-testid="royal_login_form"]') ||
-            document.querySelector('form#aymh_password_entry_view') ||
-            document.querySelector('form[action*="/login/password/"]') ||
-            document.querySelector('form[action*="/login/"]');
-          if (!form) return false;
-          try { form.submit(); return true; } catch { return false; }
-        });
-        if (submitted) await sleep(450);
-      } catch {}
-
-      // fallback 3: GPT (opcional) e tenta clique novamente 1x
-      if (allowGpt && nome) {
-        try { await gptRemediateFbUi(page, nome, { reason: 'login_submit_fallback', stage: 'login_submit' }); } catch {}
-        await sleep(900);
-        const clicked2 = await clickLoginCta();
-        if (!clicked2) return { ok: false, error: 'login_submit_failed' };
-      } else {
-        // Sem GPT: ainda tenta CTA Entrar uma 2ª vez (AYMH password-only)
-        const clicked2 = await clickLoginCta();
-        if (!clicked2) return { ok: false, error: 'login_submit_failed' };
-      }
-    }
-  } catch (e) {
-    return { ok: false, error: (e && e.message) || 'click_failed' };
-  }
-
-  // 5) aguardar navegação estabilizar
-  try { await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
-  // “anti-atropelo”: alguns popups/redirects vêm 1-3s depois
-  try { await sleep(2600); } catch {}
-  for (let loginCheck = 1; loginCheck <= 3; loginCheck++) {
-    const lr = await detectLoginRequired(page).catch(()=>({ loginRequired:false }));
-    if (!(lr && lr.loginRequired)) return { ok: true };
-    const reason = String((lr && lr.reason) || 'login').toLowerCase();
-    if (reason.includes('captcha_persona_pre_screen')) {
-      return { ok: false, error: 'still_login_required:captcha_persona_pre_screen' };
-    }
-    if (reason.includes('captcha_persona') || reason.includes('checkpoint_captcha')) {
-      const solved = await solveFacebookImageCaptcha(page, {
-        nome,
-        operator: `login_email_pass:${String(nome || '').slice(0, 80)}`,
-        maxAttempts: 2
-      }).catch(() => ({ ok: false, error: 'captcha_solver_exception' }));
-      if (!(solved && solved.ok)) {
-        return { ok: false, error: solved && solved.error ? String(solved.error) : `still_login_required:${reason}` };
-      }
-      try { await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
-      try { await sleep(2600); } catch {}
-      continue;
-    }
-    return { ok: false, error: `still_login_required:${lr.reason||'login'}` };
-  }
-  return { ok: false, error: 'captcha_loop_exhausted' };
+async function tryLoginEmailPass(page, { login, password, nome } = {}) {
+  const pc = require('./pcSessionLogin.js');
+  return pc.attemptCredentialRelogin(page, nome, { login, password });
 }
 
 async function collectFreshCookies(browser) {
   try {
-    const pages = await browser.pages();
-    const p0 = pages && pages[0];
-    if (!p0) return { ok: false, error: 'no_pages' };
-    // Não navegar. O jar já está no browser. Ir para messenger.com/marketplace
-    // jogava a aba 0 no login legado (next=messenger.com/marketplace).
-    const cookiesMsg = await p0.cookies('https://www.messenger.com').catch(()=>[]);
-    const cookiesFb = await p0.cookies('https://www.facebook.com').catch(()=>[]);
-    const all = utils.normalizeCookies([...(cookiesMsg||[]), ...(cookiesFb||[])]);
-    return { ok: true, cookies: all };
+    const pc = require('./pcSessionLogin.js');
+    let page = null;
+    if (browser && typeof browser.pages === 'function') {
+      const pages = await browser.pages().catch(() => []);
+      page = pages && pages[0];
+    } else if (browser && typeof browser.cookies === 'function') {
+      page = browser;
+    }
+    if (!page) return { ok: false, error: 'no_pages' };
+    return pc.collectFreshCookies(page);
   } catch (e) {
     return { ok: false, error: (e && e.message) || String(e) };
   }
@@ -8824,6 +8650,7 @@ module.exports = {
   identityAssistStep,
   hackedAssistStep,
   tryLoginEmailPass,
+  tryExistingPcSession: (page, nome) => require('./pcSessionLogin.js').tryExistingPcSession(page, nome),
   driveFacebookLogin,
   classifyFacebookLoginSurface,
   collectFreshCookies,
