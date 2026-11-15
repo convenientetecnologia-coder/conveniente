@@ -730,6 +730,88 @@ async function confirmAuthApp(page, nome) {
   return { ok: true, outcome: 'auth_app_ok' };
 }
 
+async function clickLabeled(page, labels, { forbid = [] } = {}) {
+  return page.evaluate((wanted, blocked) => {
+    function n(s) {
+      try { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase(); }
+      catch { return String(s || '').toLowerCase().trim(); }
+    }
+    const nodes = Array.from(document.querySelectorAll('button, [role="button"], [role="radio"], label, div, span, a'));
+    const hits = [];
+    for (const el of nodes) {
+      if (el.disabled) continue;
+      const text = n(el.getAttribute('aria-label') || el.innerText || el.textContent || '');
+      if (!text) continue;
+      if (blocked.some((b) => text.includes(b))) continue;
+      const exact = wanted.some((w) => text === w);
+      const partial = wanted.some((w) => text.includes(w));
+      if (!exact && !partial) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 20 || r.height < 12) continue;
+      hits.push({ el, area: r.width * r.height, exact });
+    }
+    if (!hits.length) return false;
+    hits.sort((a, b) => (a.exact === b.exact ? a.area - b.area : (a.exact ? -1 : 1)));
+    try { hits[0].el.click(); return true; } catch { return false; }
+  }, labels, forbid).catch(() => false);
+}
+
+function otherDeviceApprovalText(text) {
+  const t = String(text || '');
+  return t.includes('verifique suas notificacoes')
+    || t.includes('aguardando aprovacao')
+    || t.includes('notificacao em outro dispositivo')
+    || t.includes('check your notifications')
+    || t.includes('waiting for approval');
+}
+
+async function leaveOtherDeviceApproval(page, nome) {
+  const until = Date.now() + 8000;
+  let otherDevice = false;
+  while (Date.now() < until) {
+    if (await markAuthField(page)) return { ok: true, skipped: true };
+    const text = await pageText(page);
+    if (otherDeviceApprovalText(text)) {
+      otherDevice = true;
+      break;
+    }
+    const url = pageUrl(page);
+    if (!/two_factor|two_step_verification/i.test(url)) return { ok: true, skipped: true };
+    await sleep(400);
+  }
+  if (await markAuthField(page)) return { ok: true, skipped: true };
+  if (!otherDevice && !otherDeviceApprovalText(await pageText(page))) return { ok: true, skipped: true };
+
+  const man = await manifestStore.read(String(nome || '')).catch(() => null);
+  if (!readTotpSecret(man)) {
+    logger.warn('[LOGIN][pc] pediu aprovação em outro aparelho e a conta não tem a chave. Paro.', { nome });
+    return { ok: false, error: 'auth_app_no_secret' };
+  }
+
+  const opened = await clickLabeled(page, ['tentar outra forma', 'try another way']);
+  if (!opened) return { ok: false, error: 'other_device_no_switch' };
+  await sleep(800);
+
+  const picked = await clickLabeled(page, ['app de autenticacao', 'authentication app', 'authenticator app'], {
+    forbid: ['notificacao em outro dispositivo', 'notification on another device', 'another device']
+  });
+  if (!picked) return { ok: false, error: 'other_device_no_app' };
+  await sleep(400);
+
+  const continued = await clickContinue(page);
+  if (!continued) return { ok: false, error: 'other_device_no_continue' };
+
+  const codeUntil = Date.now() + 8000;
+  while (Date.now() < codeUntil) {
+    if (await markAuthField(page)) {
+      logger.info('[LOGIN][pc] saí da aprovação em outro aparelho e abri o app de autenticação.', { nome });
+      return { ok: true, switched: true };
+    }
+    await sleep(400);
+  }
+  return { ok: false, error: 'auth_app_code_failed' };
+}
+
 async function passAuthenticatorCode(page, nome) {
   const url = pageUrl(page);
   const text = await pageText(page);
@@ -858,6 +940,8 @@ async function attemptCredentialRelogin(page, nome, { login, password } = {}) {
     return { ok: false, error: 'whatsapp_confirm', terminal: 'whatsapp_confirm' };
   }
 
+  const switched = await leaveOtherDeviceApproval(page, nome);
+  if (switched && switched.ok === false) return { ok: false, error: switched.error || 'other_device_switch_failed' };
   const auth = await passAuthenticatorCode(page, nome);
   if (auth && auth.asked && !auth.ok) return { ok: false, error: auth.error || 'auth_app_code_failed' };
   await clickTrustThisDevice(page, nome);
