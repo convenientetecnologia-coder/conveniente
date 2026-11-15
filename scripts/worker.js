@@ -2344,8 +2344,189 @@ async function ensureTerminalHumanHoldOnce(nome, { reason = 'human_mode' } = {})
   return { ok: true, invoked: false };
 }
 
+const OWN_PROFILE_PROOF_MS = 10 * 60 * 1000;
+const OWN_PROFILE_PROBE_URL = 'https://m.facebook.com/profile.php';
+const OWN_PROFILE_HOME_URL = 'https://www.facebook.com/messages';
+
+function isRealBlockUrl(url) {
+  return /\/login|\/checkpoint|two_step_verification|\/two_factor\/|remember_browser|disabled_checkpoint/i.test(String(url || ''));
+}
+
+function profileReleaseReason(reason) {
+  const r = String(reason || '').toLowerCase();
+  if (!r) return true;
+  if (r.includes('marketplace')) return false;
+  if (r.includes('whatsapp')) return false;
+  if (r.includes('identity')) return false;
+  if (r.includes('appeal')) return false;
+  if (r.includes('missing_credentials')) return false;
+  return true;
+}
+
+function durableHumanHold(flags) {
+  return !!(flags && (
+    flags.marketplaceDisabled === true ||
+    flags.marketplacePhoneConfirm === true ||
+    flags.identityRequired === true ||
+    flags.identitySubmitted === true ||
+    flags.appealSubmitted === true ||
+    flags.whatsappConfirm === true
+  ));
+}
+
+function ownProfileFromUrl(url, cUser) {
+  const id = String(cUser || '').trim();
+  const u = String(url || '');
+  if (!/^\d+$/.test(id) || isRealBlockUrl(u)) return false;
+  const found = (u.match(/[?&]id=(\d+)/) || [])[1] || '';
+  return found === id;
+}
+
+async function pagesShowRealBlock(ctrl) {
+  try {
+    const pages = await ctrl.browser.pages();
+    for (const pg of pages || []) {
+      let u = '';
+      try { u = typeof pg.url === 'function' ? String(pg.url() || '') : ''; } catch {}
+      if (isRealBlockUrl(u)) return true;
+    }
+  } catch {}
+  return false;
+}
+
+async function ownProfileProofIsFresh(nome, ctrl) {
+  robeMeta[nome] = robeMeta[nome] || {};
+  const at = Number(robeMeta[nome].ownProfileProofAt || 0) || 0;
+  if (!at || (Date.now() - at) > OWN_PROFILE_PROOF_MS) return false;
+  if (ctrl && await pagesShowRealBlock(ctrl)) {
+    robeMeta[nome].ownProfileProofAt = 0;
+    return false;
+  }
+  return true;
+}
+
+async function readCUserForProfile(nome, page) {
+  try {
+    if (page && typeof page.cookies === 'function') {
+      const cookies = await page.cookies('https://www.facebook.com/', 'https://m.facebook.com/');
+      const row = (cookies || []).find((c) => c && c.name === 'c_user' && /^\d+$/.test(String(c.value || '')));
+      if (row) return String(row.value);
+    }
+  } catch {}
+  try {
+    const man = await manifestStore.read(nome).catch(() => null);
+    const cookies = man && Array.isArray(man.cookies) ? man.cookies : [];
+    const row = cookies.find((c) => c && c.name === 'c_user' && /^\d+$/.test(String(c.value || '')));
+    if (row) return String(row.value);
+  } catch {}
+  return '';
+}
+
+async function rememberFacebookProfileUrl(nome, cUser) {
+  const link = `https://m.facebook.com/profile.php?id=${cUser}`;
+  await manifestStore.update(nome, (m) => {
+    m = m || {};
+    if (m.facebookProfileUrl === link) return m;
+    m.facebookProfileUrl = link;
+    return m;
+  });
+}
+
+async function pickMessagesProbePage(ctrl) {
+  const pages = await ctrl.browser.pages().catch(() => []);
+  let fallback = null;
+  for (const pg of pages || []) {
+    let u = '';
+    try { u = typeof pg.url === 'function' ? String(pg.url() || '') : ''; } catch {}
+    if (/\/marketplace\/(create|you\/selling)/i.test(u)) continue;
+    if (/facebook\.com\/messages|messenger\.com/i.test(u)) return pg;
+    if (!fallback && /facebook\.com|messenger\.com/i.test(u)) fallback = pg;
+  }
+  return fallback;
+}
+
+async function confirmOwnProfile(nome, ctrl) {
+  robeMeta[nome] = robeMeta[nome] || {};
+  if (robeMeta[nome].ownProfileProbeBusy) return 'busy';
+  if (await ownProfileProofIsFresh(nome, ctrl)) return 'logged_in';
+  const blockedAt = Number(robeMeta[nome].ownProfileBlockAt || 0) || 0;
+  if (blockedAt && (Date.now() - blockedAt) < OWN_PROFILE_PROOF_MS) return 'block';
+  if (!isLiveBrowserCtrl(ctrl)) return 'skipped';
+  if (await pagesShowRealBlock(ctrl)) {
+    robeMeta[nome].ownProfileProofAt = 0;
+    robeMeta[nome].ownProfileBlockAt = Date.now();
+    return 'block';
+  }
+  const page = await pickMessagesProbePage(ctrl);
+  if (!page) return 'skipped';
+  robeMeta[nome].ownProfileProbeBusy = true;
+  try {
+    const cUser = await readCUserForProfile(nome, page);
+    if (!cUser) {
+      robeMeta[nome].ownProfileBlockAt = Date.now();
+      return 'unknown';
+    }
+    await page.goto(OWN_PROFILE_PROBE_URL, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    await sleep(600);
+    let landed = '';
+    try { landed = typeof page.url === 'function' ? String(page.url() || '') : ''; } catch {}
+    const loggedIn = ownProfileFromUrl(landed, cUser);
+    await page.goto(OWN_PROFILE_HOME_URL, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    if (loggedIn) {
+      robeMeta[nome].ownProfileProofAt = Date.now();
+      robeMeta[nome].ownProfileBlockAt = 0;
+      try { await rememberFacebookProfileUrl(nome, cUser); } catch {}
+      try { provisionAudit.append({ ts: Date.now(), event: 'own_profile_confirmed', nome: String(nome || ''), profileId: cUser }); } catch {}
+      return 'logged_in';
+    }
+    robeMeta[nome].ownProfileProofAt = 0;
+    robeMeta[nome].ownProfileBlockAt = Date.now();
+    try { provisionAudit.append({ ts: Date.now(), event: 'own_profile_not_logged_in', nome: String(nome || ''), url: landed.slice(0, 180) }); } catch {}
+    return 'block';
+  } catch {
+    robeMeta[nome].ownProfileBlockAt = Date.now();
+    try { await page.goto(OWN_PROFILE_HOME_URL, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {}); } catch {}
+    return 'unknown';
+  } finally {
+    robeMeta[nome].ownProfileProbeBusy = false;
+  }
+}
+
+async function releaseOwnProfileFalseInvoke(nome, ctrl) {
+  await clearAccountFlags(nome, ['captchaCheckpoint', 'twoFactor', 'idVirtus', 'banned', 'loginRequired', 'loginRemediateFailed', 'messengerPin']);
+  try {
+    await fileStore.withDesiredFileLockUpdate((d) => {
+      d = d || {};
+      d.perfis = d.perfis || {};
+      const cur = d.perfis[nome] || {};
+      d.perfis[nome] = { ...cur, active: true, virtus: 'on', humanHold: false };
+      return d;
+    });
+  } catch {}
+  if (ctrl) {
+    ctrl.humanControl = false;
+    try { await syncDeltaHumanHoldBrowserGuard(nome, false, { reason: 'own_profile_logged_in' }); } catch {}
+    try { await browserHelper.disableGlassForWorkBrowser(ctrl.browser, nome, { source: 'own_profile_logged_in', onlyIfArmed: true }); } catch {}
+  }
+  try { provisionAudit.append({ ts: Date.now(), event: 'own_profile_release_invoke', nome: String(nome || '') }); } catch {}
+  if (ctrl && ctrl.configurando !== true && !(robeMeta[nome] && robeMeta[nome].emExecucao === true)) {
+    setTimeout(() => { try { handlers.start_work({ nome, operator: 'own_profile_logged_in' }).catch(() => {}); } catch {} }, 0);
+  }
+}
+
+async function releaseIfOwnProfile(nome, ctrl, reason) {
+  if (!profileReleaseReason(reason)) return false;
+  const flags = await readAccountFlags(nome).catch(() => null);
+  if (durableHumanHold(flags)) return false;
+  const verdict = await confirmOwnProfile(nome, ctrl);
+  if (verdict !== 'logged_in') return false;
+  await releaseOwnProfileFalseInvoke(nome, ctrl);
+  return true;
+}
+
 async function nurseEnsureTerminalHumanOnce(nome, ctrl, want, reason) {
   const live = isLiveBrowserCtrl(ctrl);
+  if (live && await releaseIfOwnProfile(nome, ctrl, reason)) return;
   const invoked = !!(live && ctrl && ctrl.humanControl === true && want && want.humanHold === true);
   if (live && !invoked) {
     try { await enterHumanMode(nome, ctrl, { reason: String(reason || 'human_mode') }); } catch {}
@@ -2359,6 +2540,7 @@ async function nurseEnsureTerminalHumanOnce(nome, ctrl, want, reason) {
 // Contrato ops: captcha/checkpoint → NÃO fecha browser, marca flag, INVOCA humano.
 // Usuário verifica no dia; exclusão diária fecha+exclui no horário configurado.
 async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = '', title = '' } = {}) {
+  if (await ownProfileProofIsFresh(nome, controllers.get(nome))) return;
   let already = false;
   try {
     const prev = await readAccountFlags(nome).catch(() => null);
@@ -2418,6 +2600,7 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
 // Contrato ops: ID Virtus (Messenger "para enviar mensagens") → flag + INVOCA humano.
 // Distinto de identityRequired (selfie/vídeo), que NÃO invoca humano.
 async function setIdVirtusFlag(nome, { reason = '', source = '', url = '', title = '' } = {}) {
+  if (await ownProfileProofIsFresh(nome, controllers.get(nome))) return;
   let already = false;
   try {
     const prev = await readAccountFlags(nome).catch(() => null);
@@ -2490,6 +2673,9 @@ async function setIdVirtusFlag(nome, { reason = '', source = '', url = '', title
 }
 
 async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
+  try {
+    if (await releaseIfOwnProfile(nome, ctrl, reason)) return;
+  } catch {}
   try { robeQueue.skip && robeQueue.skip(nome); } catch {}
   const live = isLiveBrowserCtrl(ctrl);
   const alreadyHold = readDesiredHumanHoldFlag(nome) === true;
@@ -6068,6 +6254,7 @@ async function identityMonitorCheckNow(nome, ctrl) {
 async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
   try { invalidateAccountFlagsCache(nome); } catch {}
   return lockProfileAction(nome, async () => {
+    if (await ownProfileProofIsFresh(nome, controllers.get(nome))) return { ok: true, skipped: 'own_profile' };
     let banResult = { ok: true, action: 'human_hold_banned' };
     try {
       const prev = await readAccountFlags(nome);
@@ -6313,6 +6500,7 @@ async function setMarketplaceDisabledFlag(nome, { reason = 'cannot_buy_or_sell',
 async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = {}) {
   try { invalidateAccountFlagsCache(nome); } catch {}
   return lockProfileAction(nome, async () => {
+    if (await ownProfileProofIsFresh(nome, controllers.get(nome))) return { ok: true, skipped: 'own_profile' };
     try {
       const prev = await readAccountFlags(nome);
       const already = prev && prev.twoFactor === true;
