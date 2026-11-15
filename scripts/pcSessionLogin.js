@@ -449,43 +449,84 @@ async function waitUntilLeaveAuthentication(page, ms) {
   return !onLoginOrTwoStep(url);
 }
 
+async function boxIsOnScreen(page) {
+  const url = pageUrl(page);
+  if (onAuthentication(url)) return true;
+  if (!/two_step_verification/i.test(url)) return false;
+  const text = await pageText(page);
+  if (text.includes('recaptcha') || text.includes('nao sou um robo')) return true;
+  const frame = await page.$('iframe[src*="recaptcha"], iframe[src*="fbsbx.com"]').catch(() => null);
+  return !!frame;
+}
+
+async function readSitekeyWithPatience(page, nome, attempt) {
+  const enterprise = require('./recaptchaEnterprisePage.js');
+  let widget = null;
+  for (let i = 0; i < 4; i++) {
+    widget = await readWidget(page);
+    if (widget && widget.sitekey) return widget;
+    enterprise.recaptchaLog('warn', '[RECAPTCHA] sem sitekey', {
+      nome: nome || '',
+      attempt,
+      read: i + 1,
+      source: (widget && widget.source) || 'missing',
+      anchorPath: (widget && widget.anchorPath) || '',
+      frames: (widget && widget.frames) || [],
+      page: (widget && widget.websiteURL) || ''
+    });
+    if (i < 3) await sleep(1500);
+  }
+  return widget;
+}
+
+function tokenLanded(result) {
+  return !!(result && result.applied && (result.applied.areas || result.applied.called));
+}
+
 async function watchAndSolveLoginCheckbox(page, nome) {
   const enterprise = require('./recaptchaEnterprisePage.js');
-  const deadline = Date.now() + 30000;
-  let widget = null;
-  while (Date.now() < deadline) {
-    const url = pageUrl(page);
-    if (!onLoginOrTwoStep(url) && !onAuthentication(url)) return { ok: true, skipped: true };
-    widget = await readWidget(page);
-    if (widget && widget.sitekey) break;
-    await sleep(1500);
-  }
-  const urlNow = pageUrl(page);
-  if (!onLoginOrTwoStep(urlNow) && !onAuthentication(urlNow)) return { ok: true, skipped: true };
-  if (!widget || !widget.sitekey) {
-    if (!onAuthentication(urlNow)) return { ok: true, skipped: true };
-    return { ok: false, reason: 'no_sitekey' };
-  }
-
-  const first = await enterprise.solveOnce(page, { nome, attempt: 1, timeoutMs: 90_000 });
-  const firstApplied = !!(first && first.applied && (first.applied.areas || first.applied.called));
-  if (await waitUntilLeaveAuthentication(page, firstApplied ? 20000 : 4000)) {
-    return { ok: true, solved: true };
-  }
-  if (firstApplied || captchaBuyStop(first && first.error)) {
-    if (await waitUntilLeaveAuthentication(page, 15000)) return { ok: true, solved: true };
-    return { ok: false, reason: (first && first.error) || 'still_on_authentication' };
-  }
-  if (!first || first.ok !== true) {
-    const second = await enterprise.solveOnceV2(page, { nome, timeoutMs: 90_000 });
-    const secondApplied = !!(second && second.applied && (second.applied.areas || second.applied.called));
-    if (await waitUntilLeaveAuthentication(page, secondApplied ? 20000 : 8000)) {
-      return { ok: true, solved: true };
+  const appearDeadline = Date.now() + 8000;
+  let recognized = false;
+  while (Date.now() < appearDeadline) {
+    if (!onLoginOrTwoStep(pageUrl(page)) && !onAuthentication(pageUrl(page))) {
+      return { ok: true, skipped: true };
     }
-    return { ok: false, reason: (second && second.error) || (first && first.error) || 'recaptcha_failed' };
+    if (await boxIsOnScreen(page)) {
+      recognized = true;
+      break;
+    }
+    await sleep(400);
   }
-  if (await waitUntilLeaveAuthentication(page, 15000)) return { ok: true, solved: true };
-  return { ok: false, reason: 'still_on_authentication' };
+  if (!recognized) return { ok: true, skipped: true };
+
+  let purchases = 0;
+  let lastError = '';
+  while (purchases < 2) {
+    const widget = await readSitekeyWithPatience(page, nome, purchases + 1);
+    if (!widget || !widget.sitekey) {
+      enterprise.recaptchaLog('warn', '[RECAPTCHA] enterprise não resolveu', {
+        nome: nome || '',
+        error: 'no_sitekey'
+      });
+      return { ok: false, reason: 'recaptcha_enterprise_failed' };
+    }
+    purchases += 1;
+    const useV2 = purchases === 2 && lastError && lastError !== 'token_not_applied';
+    const solved = useV2
+      ? await enterprise.solveOnceV2(page, { nome, timeoutMs: 120_000 })
+      : await enterprise.solveOnce(page, { nome, attempt: purchases, timeoutMs: 120_000 });
+    lastError = (solved && solved.error) || '';
+    if (captchaBuyStop(lastError)) return { ok: false, reason: lastError };
+    if (!onAuthentication(pageUrl(page)) && tokenLanded(solved)) return { ok: true, solved: true };
+    if (lastError === 'token_not_applied' || !tokenLanded(solved)) {
+      if (!onAuthentication(pageUrl(page))) return { ok: true, solved: true };
+      if (purchases >= 2) return { ok: false, reason: 'recaptcha_enterprise_failed' };
+      continue;
+    }
+    if (await waitUntilLeaveAuthentication(page, 8000)) return { ok: true, solved: true };
+    if (purchases >= 2) return { ok: true, solved: true };
+  }
+  return { ok: true, solved: true };
 }
 
 async function markAuthField(page) {

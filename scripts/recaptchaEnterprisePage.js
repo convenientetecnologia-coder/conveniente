@@ -1,6 +1,22 @@
 'use strict';
 
+const fs = require('fs');
+const path = require('path');
 const logger = require('./logger.js');
+const provisionAudit = require('./provisionAudit.js');
+
+function recaptchaLog(level, msg, ctx) {
+  const safe = ctx && typeof ctx === 'object' ? ctx : {};
+  try { logger[level === 'warn' ? 'warn' : 'info'](msg, safe); } catch {}
+  try {
+    const bits = Object.entries(safe).map(([k, v]) => `${k}=${typeof v === 'string' ? v : JSON.stringify(v)}`).join(' ');
+    const ts = new Date().toISOString().replace('T', ' ').split('.')[0];
+    fs.appendFileSync(path.join(__dirname, '..', 'dados', 'logger.log'), `[${ts}] [${String(level || 'info').toUpperCase()}] ${msg}${bits ? ' ' + bits : ''}\n`);
+  } catch {}
+  try {
+    provisionAudit.append({ ts: Date.now(), event: 'recaptcha', level: level || 'info', msg, ...safe });
+  } catch {}
+}
 
 function originFromCo(co) {
   const raw = String(co || '').trim();
@@ -210,13 +226,22 @@ async function applyToken(page, token) {
 async function solveOnce(page, { nome, timeoutMs = 90_000, attempt } = {}) {
   const widget = await readWidget(page);
   if (!widget || !widget.sitekey) {
+    recaptchaLog('warn', '[RECAPTCHA] sem sitekey', {
+      nome: nome || '',
+      source: (widget && widget.source) || 'missing',
+      anchorPath: (widget && widget.anchorPath) || '',
+      frames: (widget && widget.frames) || [],
+      page: (widget && widget.websiteURL) || ''
+    });
     return { ok: false, error: 'no_sitekey', widget };
   }
-  logger.info('[RECAPTCHA] widget lido', {
-    nome,
+  recaptchaLog('info', '[RECAPTCHA] widget lido', {
+    nome: nome || '',
     attempt: attempt || 1,
     source: widget.source || '',
-    sitekeyLen: String(widget.sitekey).length
+    anchorPath: widget.anchorPath || '',
+    sitekeyLen: String(widget.sitekey).length,
+    page: widget.websiteURL || ''
   });
   const anti = require('./antiCaptchaClient.js');
   let userAgent = '';
@@ -230,10 +255,21 @@ async function solveOnce(page, { nome, timeoutMs = 90_000, attempt } = {}) {
     timeoutMs
   };
   const solved = await anti.solveRecaptchaEnterprise(buy);
-  if (!solved || !solved.ok) return Object.assign({ widget }, solved || { ok: false, error: 'anticaptcha_failed' });
+  if (!solved || !solved.ok) {
+    recaptchaLog('warn', '[RECAPTCHA] enterprise não resolveu', {
+      nome: nome || '',
+      error: (solved && solved.error) || 'anticaptcha_failed'
+    });
+    return Object.assign({ widget }, solved || { ok: false, error: 'anticaptcha_failed' });
+  }
   const applied = await applyToken(page, solved.token);
+  recaptchaLog('info', '[RECAPTCHA] token aplicado', {
+    nome: nome || '',
+    areas: applied && applied.areas,
+    called: applied && applied.called
+  });
   if (!(applied && applied.areas) && !(applied && applied.called)) {
-    return { ok: false, error: 'token_not_applied', taskId: solved.taskId, widget };
+    return { ok: false, error: 'token_not_applied', taskId: solved.taskId, widget, applied };
   }
   return { ok: true, taskId: solved.taskId, cost: solved.cost, applied, widget };
 }
@@ -267,4 +303,4 @@ async function solveOnceV2(page, opts) {
   return { ok: true, taskId: solved.taskId, cost: solved.cost, applied, widget };
 }
 
-module.exports = { readWidget, applyToken, solveOnce, solveOnceV2 };
+module.exports = { readWidget, applyToken, solveOnce, solveOnceV2, recaptchaLog };

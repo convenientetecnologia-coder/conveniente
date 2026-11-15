@@ -6887,9 +6887,31 @@ async function detectLoginRequired(page) {
         evidence: { hasRoyal, hasInputs, hasEmailInput, hasPassInput, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
       };
     }
+    // A caixa "Não sou um robô" mora nesta URL. Não é selfie.
+    if (/\/two_step_verification\/authentication\//i.test(String(path || '')) || /\/two_step_verification\/authentication\//i.test(String(href || ''))) {
+      return {
+        loginRequired: true,
+        reason: 'recaptcha_enterprise',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { path }
+      };
+    }
     // Identidade (selfie/vídeo) deve ser reconhecida mesmo fora de /checkpoint.
     // Motivo: em alguns fluxos o FB renderiza a etapa dentro de / (home) com modal/SPA.
     // Blindagem anti-falso-positivo: exigir hints fortes (selfie+vídeo) para considerar.
+    // /ixt/ e ixtselfie continuam sendo selfie. /authentication/ não entra aqui.
+    if (/\/ixt\/|ixtselfie/i.test(String(path || '') + String(href || ''))) {
+      return {
+        loginRequired: true,
+        reason: 'identity_confirm_selfie',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { path }
+      };
+    }
     if (hasIdentitySubmitted || (identityStrongHints && bodyHasIdentityHints) || (hasIdentityText && (strongLoginPath || /checkpoint/i.test(title)))) {
       return {
         loginRequired: true,
