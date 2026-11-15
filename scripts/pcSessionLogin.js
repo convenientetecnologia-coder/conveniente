@@ -483,50 +483,132 @@ function tokenLanded(result) {
   return !!(result && result.applied && (result.applied.areas || result.applied.called));
 }
 
-async function watchAndSolveLoginCheckbox(page, nome) {
-  const enterprise = require('./recaptchaEnterprisePage.js');
-  const appearDeadline = Date.now() + 8000;
-  let recognized = false;
-  while (Date.now() < appearDeadline) {
-    if (!onLoginOrTwoStep(pageUrl(page)) && !onAuthentication(pageUrl(page))) {
-      return { ok: true, skipped: true };
-    }
-    if (await boxIsOnScreen(page)) {
-      recognized = true;
-      break;
-    }
+function onBareLoginUrl(url) {
+  return /\/login\.php|\/login\/|\/login\?/i.test(String(url || ''));
+}
+
+async function waitForRobotBox(page) {
+  const until = Date.now() + 15000;
+  while (Date.now() < until) {
+    const url = pageUrl(page);
+    if (!onLoginOrTwoStep(url) && !onAuthentication(url)) return false;
+    if (await boxIsOnScreen(page)) return true;
     await sleep(400);
   }
-  if (!recognized) return { ok: true, skipped: true };
+  return false;
+}
 
-  let purchases = 0;
-  let lastError = '';
-  while (purchases < 2) {
-    const widget = await readSitekeyWithPatience(page, nome, purchases + 1);
-    if (!widget || !widget.sitekey) {
-      enterprise.recaptchaLog('warn', '[RECAPTCHA] enterprise não resolveu', {
-        nome: nome || '',
-        error: 'no_sitekey'
-      });
-      return { ok: false, reason: 'recaptcha_enterprise_failed' };
-    }
-    purchases += 1;
-    const useV2 = purchases === 2 && lastError && lastError !== 'token_not_applied';
-    const solved = useV2
-      ? await enterprise.solveOnceV2(page, { nome, timeoutMs: 120_000 })
-      : await enterprise.solveOnce(page, { nome, attempt: purchases, timeoutMs: 120_000 });
-    lastError = (solved && solved.error) || '';
-    if (captchaBuyStop(lastError)) return { ok: false, reason: lastError };
-    if (!onAuthentication(pageUrl(page)) && tokenLanded(solved)) return { ok: true, solved: true };
-    if (lastError === 'token_not_applied' || !tokenLanded(solved)) {
-      if (!onAuthentication(pageUrl(page))) return { ok: true, solved: true };
-      if (purchases >= 2) return { ok: false, reason: 'recaptcha_enterprise_failed' };
+async function classifyAfterCaptchaToken(page) {
+  const until = Date.now() + 15000;
+  while (Date.now() < until) {
+    if (onAuthentication(pageUrl(page))) {
+      await sleep(400);
       continue;
     }
-    if (await waitUntilLeaveAuthentication(page, 8000)) return { ok: true, solved: true };
-    if (purchases >= 2) return { ok: true, solved: true };
+    if (await loginFormStillVisible(page)) return 'form_back';
+    if (onBareLoginUrl(pageUrl(page))) {
+      await sleep(400);
+      continue;
+    }
+    return 'passed';
   }
-  return { ok: true, solved: true };
+  if (onAuthentication(pageUrl(page))) return 'still_box';
+  if (await loginFormStillVisible(page)) return 'form_back';
+  if (onBareLoginUrl(pageUrl(page))) return 'not_settled';
+  return 'passed';
+}
+
+async function buyCaptcha(page, nome, { v2, attempt }) {
+  const enterprise = require('./recaptchaEnterprisePage.js');
+  const widget = await readSitekeyWithPatience(page, nome, attempt);
+  if (!widget || !widget.sitekey) {
+    enterprise.recaptchaLog('warn', '[RECAPTCHA] enterprise não resolveu', { nome: nome || '', error: 'no_sitekey' });
+    return { ok: false, error: 'no_sitekey' };
+  }
+  const solved = v2
+    ? await enterprise.solveOnceV2(page, { nome, timeoutMs: 120_000 })
+    : await enterprise.solveOnce(page, { nome, attempt, timeoutMs: 120_000 });
+  return solved || { ok: false, error: 'anticaptcha_failed' };
+}
+
+async function watchAndSolveLoginCheckbox(page, nome, user, pass) {
+  let purchases = 0;
+  let reloaded = false;
+  let nextIsV2 = false;
+
+  const typeAndSubmit = async () => {
+    await openFreshLoginPage(page, nome);
+    const inputs = await waitForLoginForm(page, nome);
+    if (!inputs) return { ok: false, error: 'login_form_not_found' };
+    const typeInto = async (handle, value) => {
+      try { await handle.click({ clickCount: 3 }); } catch {}
+      try { await page.keyboard.press('Backspace'); } catch {}
+      try { await handle.type(String(value || ''), { delay: 15 }); } catch {}
+    };
+    await typeInto(inputs.email, user);
+    await typeInto(inputs.pass, pass);
+    await sleep(120);
+    let submitted = false;
+    for (const sel of ['button[name="login"]', 'button[type="submit"]', '#loginbutton', 'input[type="submit"]']) {
+      const btn = await page.$(sel).catch(() => null);
+      if (!btn) continue;
+      try { await btn.click({ delay: 30 }); submitted = true; break; } catch {}
+    }
+    if (!submitted) {
+      try { await page.keyboard.press('Enter'); submitted = true; } catch {}
+    }
+    if (!submitted) return { ok: false, error: 'login_submit_failed' };
+    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+    await sleep(800);
+    return { ok: true };
+  };
+
+  while (purchases < 2) {
+    const present = await waitForRobotBox(page);
+    if (!present) {
+      if (reloaded && await loginFormStillVisible(page)) return { ok: false, reason: 'captcha_back_to_login' };
+      if (reloaded) return { ok: false, reason: 'login_not_accepted' };
+      return { ok: true, skipped: true };
+    }
+    const solved = await buyCaptcha(page, nome, { v2: nextIsV2, attempt: purchases + 1 });
+    nextIsV2 = false;
+    purchases += 1;
+    if (captchaBuyStop(solved && solved.error)) return { ok: false, reason: solved.error };
+    const landed = tokenLanded(solved);
+    if (!landed) {
+      if (!onAuthentication(pageUrl(page)) && !(await loginFormStillVisible(page))) {
+        return { ok: true, solved: true };
+      }
+      if (await loginFormStillVisible(page)) {
+        if (reloaded || purchases >= 2) return { ok: false, reason: 'captcha_back_to_login' };
+        reloaded = true;
+        const again = await typeAndSubmit();
+        if (!again.ok) return { ok: false, reason: again.error || 'login_submit_failed' };
+        if (await badLoginText(page)) return { ok: false, reason: 'login_not_accepted' };
+        if (solved.error && solved.error !== 'token_not_applied' && solved.error !== 'no_sitekey') nextIsV2 = true;
+        continue;
+      }
+      if (purchases >= 2) return { ok: false, reason: solved.error || 'recaptcha_enterprise_failed' };
+      if (solved.error && solved.error !== 'token_not_applied' && solved.error !== 'no_sitekey') nextIsV2 = true;
+      continue;
+    }
+    const kind = await classifyAfterCaptchaToken(page);
+    if (kind === 'passed') return { ok: true, solved: true };
+    if (kind === 'still_box') {
+      if (purchases >= 2) return { ok: false, reason: 'captcha_still_there' };
+      continue;
+    }
+    if (kind === 'form_back') {
+      if (reloaded || purchases >= 2) return { ok: false, reason: 'captcha_back_to_login' };
+      reloaded = true;
+      const again = await typeAndSubmit();
+      if (!again.ok) return { ok: false, reason: again.error || 'login_submit_failed' };
+      if (await badLoginText(page)) return { ok: false, reason: 'login_not_accepted' };
+      continue;
+    }
+    return { ok: false, reason: 'login_not_accepted' };
+  }
+  return { ok: false, reason: 'captcha_still_there' };
 }
 
 async function markAuthField(page) {
@@ -757,7 +839,7 @@ async function attemptCredentialRelogin(page, nome, { login, password } = {}) {
   if (await badLoginText(page)) return { ok: false, error: 'login_not_accepted' };
   if (await hackedScreen(page)) return { ok: false, error: 'hacked_review', terminal: 'hacked_review' };
 
-  const box = await watchAndSolveLoginCheckbox(page, nome);
+  const box = await watchAndSolveLoginCheckbox(page, nome, user, pass);
   if (box && box.ok === false) return { ok: false, error: box.reason || 'recaptcha_failed' };
   const image = await waitForLoginImageCaptcha(page);
   if (image) {
@@ -779,11 +861,6 @@ async function attemptCredentialRelogin(page, nome, { login, password } = {}) {
   const auth = await passAuthenticatorCode(page, nome);
   if (auth && auth.asked && !auth.ok) return { ok: false, error: auth.error || 'auth_app_code_failed' };
   await clickTrustThisDevice(page, nome);
-  await page.goto(HOME_URL, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
-  await sleep(800);
-
-  const boxAgain = await watchAndSolveLoginCheckbox(page, nome);
-  if (boxAgain && boxAgain.ok === false) return { ok: false, error: boxAgain.reason || 'recaptcha_failed' };
 
   if (await whatsappScreen(page)) {
     await markWhatsappConfirm(nome);
