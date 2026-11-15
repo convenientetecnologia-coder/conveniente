@@ -228,6 +228,64 @@ async function solveRecaptchaV2(opts) {
   return solveRecaptchaEnterprise(Object.assign({}, opts || {}, { taskType: "RecaptchaV2TaskProxyless" }));
 }
 
+async function solveFunCaptcha({
+  websiteURL,
+  websitePublicKey,
+  funcaptchaApiJSSubdomain,
+  userAgent,
+  timeoutMs = 120_000
+} = {}) {
+  const cfg = readAntiCaptchaConfig();
+  if (!cfg.apiKey) return { ok: false, error: "anticaptcha_key_missing" };
+  const publicKey = String(websitePublicKey || "").trim();
+  const pageUrl = String(websiteURL || "").trim();
+  const subdomain = String(funcaptchaApiJSSubdomain || "").trim();
+  if (!publicKey || !pageUrl || !subdomain) return { ok: false, error: "funcaptcha_widget_incomplete" };
+  const task = {
+    type: "FunCaptchaTaskProxyless",
+    websiteURL: pageUrl,
+    websitePublicKey: publicKey,
+    funcaptchaApiJSSubdomain: subdomain
+  };
+  const ua = String(userAgent || "").trim();
+  if (ua) task.userAgent = ua;
+  const created = await antiCaptchaPost("/createTask", { softId: 0, task }, { timeoutMs: 20_000 });
+  if (!created.ok) {
+    const code = String(created.errorCode || "").trim();
+    if (code === "ERROR_ZERO_BALANCE") return { ok: false, error: "ERROR_ZERO_BALANCE" };
+    if (code === "ERROR_KEY_DOES_NOT_EXIST") return { ok: false, error: "ERROR_KEY_DOES_NOT_EXIST" };
+    return { ok: false, error: code || created.error || "create_task_failed" };
+  }
+  const taskId = Number(created.data && created.data.taskId) || 0;
+  if (!taskId) return { ok: false, error: "anticaptcha_task_id_missing" };
+  const started = Date.now();
+  const limit = Math.max(10_000, Number(timeoutMs || 0) || 120_000);
+  while ((Date.now() - started) < limit) {
+    const res = await antiCaptchaPost("/getTaskResult", { taskId }, { timeoutMs: 20_000 });
+    if (!res.ok) {
+      if (String(res.error || "") === "anticaptcha_timeout") {
+        await new Promise((r) => setTimeout(r, 3000));
+        continue;
+      }
+      return { ok: false, error: res.error || "anticaptcha_task_failed", taskId };
+    }
+    const status = String(res.data && res.data.status || "").trim().toLowerCase();
+    if (status !== "ready") {
+      await new Promise((r) => setTimeout(r, 3000));
+      continue;
+    }
+    const token = String(res.data && res.data.solution && res.data.solution.token || "").trim();
+    if (token.length < 20) return { ok: false, error: "empty_token", taskId };
+    return {
+      ok: true,
+      token,
+      taskId,
+      cost: res.data && res.data.cost != null ? Number(res.data.cost) : null
+    };
+  }
+  return { ok: false, error: "anticaptcha_timeout", taskId, waitedMs: Date.now() - started };
+}
+
 module.exports = {
   DEFAULT_ANTICAPTCHA_BASE,
   readAntiCaptchaConfig,
@@ -236,5 +294,6 @@ module.exports = {
   getTaskResult,
   solveImageCaptcha,
   solveRecaptchaEnterprise,
-  solveRecaptchaV2
+  solveRecaptchaV2,
+  solveFunCaptcha
 };

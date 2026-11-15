@@ -228,9 +228,10 @@ async function badLoginText(page) {
 
 async function humanConfirmScreen(page) {
   const t = await pageText(page);
-  return (t.includes('confirme que voce e humano') && t.includes('para usar sua conta'))
+  return (t.includes('confirme que voce e humano') && (t.includes('para usar sua conta') || t.includes('para usar seu perfil')))
     || t.includes('confirm that you are human')
-    || t.includes('confirm you are human to use your account');
+    || t.includes('confirm you are human to use your account')
+    || t.includes('confirm you are human to use your profile');
 }
 
 async function hackedScreen(page) {
@@ -564,13 +565,16 @@ function onBareLoginUrl(url) {
 }
 
 async function waitForRobotBox(page) {
+  const fun = require('./funCaptchaPage.js');
   const until = Date.now() + 15000;
   while (Date.now() < until) {
+    if (await fun.securityVerificationScreen(page)) return 'funcaptcha';
     const url = pageUrl(page);
     if (!onLoginOrTwoStep(url) && !onAuthentication(url)) return false;
     if (await boxIsOnScreen(page)) return true;
     await sleep(400);
   }
+  if (await fun.securityVerificationScreen(page)) return 'funcaptcha';
   return false;
 }
 
@@ -641,6 +645,7 @@ async function watchAndSolveLoginCheckbox(page, nome, user, pass) {
 
   while (purchases < 2) {
     const present = await waitForRobotBox(page);
+    if (present === 'funcaptcha') return { ok: true, skipped: true, funcaptcha: true };
     if (!present) {
       if (reloaded && await loginFormStillVisible(page)) return { ok: false, reason: 'captcha_back_to_login' };
       if (reloaded) return { ok: false, reason: 'login_not_accepted' };
@@ -1109,6 +1114,8 @@ async function attemptCredentialRelogin(page, nome, { login, password } = {}) {
 
   const box = await watchAndSolveLoginCheckbox(page, nome, user, pass);
   if (box && box.ok === false) return { ok: false, error: box.reason || 'recaptcha_failed' };
+  const fun = await require('./funCaptchaPage.js').watchAndSolveFunCaptcha(page, nome);
+  if (fun && fun.ok === false) return { ok: false, error: fun.reason || 'funcaptcha_failed' };
   const image = await waitForLoginImageCaptcha(page);
   if (image) {
     const solvedImage = await require('./browser.js').solveFacebookImageCaptcha(page, {
