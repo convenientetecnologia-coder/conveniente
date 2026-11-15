@@ -167,15 +167,17 @@ async function solveRecaptchaEnterprise({
   enterpriseS,
   isInvisible,
   userAgent,
-  timeoutMs = 90_000
+  timeoutMs = 90_000,
+  taskType
 } = {}) {
   const cfg = readAntiCaptchaConfig();
   if (!cfg.apiKey) return { ok: false, error: "anticaptcha_key_missing" };
   const sitekey = String(websiteKey || "").trim();
   const pageUrl = String(websiteURL || "https://www.fbsbx.com/").trim();
   if (!sitekey || !pageUrl) return { ok: false, error: "recaptcha_widget_incomplete" };
+  const type = taskType || "RecaptchaV2EnterpriseTaskProxyless";
   const task = {
-    type: "RecaptchaV2EnterpriseTaskProxyless",
+    type,
     websiteURL: pageUrl,
     websiteKey: sitekey,
     isInvisible: isInvisible === true
@@ -183,7 +185,8 @@ async function solveRecaptchaEnterprise({
   const ua = String(userAgent || "").trim();
   if (ua) task.userAgent = ua;
   const s = String(enterpriseS || "").trim();
-  if (s) task.enterprisePayload = { s };
+  if (s && type === "RecaptchaV2EnterpriseTaskProxyless") task.enterprisePayload = { s };
+  if (s && type === "RecaptchaV2TaskProxyless") task.recaptchaDataSValue = s;
   const created = await antiCaptchaPost("/createTask", { softId: 0, task }, { timeoutMs: 20_000 });
   if (!created.ok) {
     const code = String(created.errorCode || "").trim();
@@ -221,6 +224,10 @@ async function solveRecaptchaEnterprise({
   return { ok: false, error: "anticaptcha_timeout", taskId, waitedMs: Date.now() - started };
 }
 
+async function solveRecaptchaV2(opts) {
+  return solveRecaptchaEnterprise(Object.assign({}, opts || {}, { taskType: "RecaptchaV2TaskProxyless" }));
+}
+
 module.exports = {
   DEFAULT_ANTICAPTCHA_BASE,
   readAntiCaptchaConfig,
@@ -228,5 +235,6 @@ module.exports = {
   createImageToTextTask,
   getTaskResult,
   solveImageCaptcha,
-  solveRecaptchaEnterprise
+  solveRecaptchaEnterprise,
+  solveRecaptchaV2
 };

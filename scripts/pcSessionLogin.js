@@ -419,47 +419,73 @@ async function readWidget(page) {
   return enterprise.readWidget(page);
 }
 
-async function watchAndSolveLoginCheckbox(page, nome) {
-  const enterprise = require('./recaptchaEnterprisePage.js');
-  const url = pageUrl(page);
-  const text = await pageText(page);
-  const onBox = /\/two_step_verification\/authentication\//i.test(url)
-    && (text.includes('nao sou um robo') || text.includes('not a robot') || /recaptcha/i.test(url + text));
-  if (!onBox && !/\/authentication\//i.test(url) && !text.includes('nao sou um robo') && !text.includes('not a robot') && !(await humanConfirmScreen(page))) {
-    return { ok: true, skipped: true };
-  }
-  let widget = await readWidget(page);
-  let waits = 0;
-  while ((!widget || !widget.sitekey) && waits < 4) {
-    waits += 1;
-    await sleep(1500);
-    widget = await readWidget(page);
-  }
-  if (!widget || !widget.sitekey) return { ok: false, reason: 'no_sitekey' };
-  const started = Date.now();
-  const solved = await enterprise.solveOnce(page, { nome, attempt: 1, timeoutMs: 90_000 });
-  if (!/\/authentication\//i.test(pageUrl(page))) {
-    if (await loginFormStillVisible(page)) {
-      return { ok: false, reason: 'captcha_back_to_login', save: false };
-    }
-    return { ok: true, solved: true };
-  }
-  if ((Date.now() - started) >= 90_000 && await loginFormStillVisible(page)) {
-    return { ok: false, reason: 'captcha_timeout_form_back', save: false };
-  }
-  if (!solved || !solved.ok) return { ok: false, reason: (solved && solved.error) || 'recaptcha_failed', save: false };
-  const until = Date.now() + 8000;
+function onLoginOrTwoStep(url) {
+  return /\/login|two_step_verification/i.test(String(url || ''));
+}
+
+function onAuthentication(url) {
+  return /\/authentication\//i.test(String(url || ''));
+}
+
+function captchaBuyStop(error) {
+  return error === 'aborted'
+    || error === 'anticaptcha_key_missing'
+    || error === 'ERROR_ZERO_BALANCE'
+    || error === 'ERROR_KEY_DOES_NOT_EXIST';
+}
+
+async function waitUntilLeaveAuthentication(page, ms) {
+  const until = Date.now() + ms;
+  let saw = onAuthentication(pageUrl(page));
   while (Date.now() < until) {
-    if (!/\/authentication\//i.test(pageUrl(page))) {
-      if (await loginFormStillVisible(page)) {
-        return { ok: false, reason: 'captcha_back_to_login', save: false };
-      }
-      return { ok: true, solved: true };
-    }
+    const url = pageUrl(page);
+    if (onAuthentication(url)) saw = true;
+    else if (saw || !onLoginOrTwoStep(url)) return true;
     await sleep(500);
   }
-  if (await loginFormStillVisible(page)) return { ok: false, reason: 'captcha_back_to_login', save: false };
-  return { ok: false, reason: 'still_on_authentication', save: false };
+  const url = pageUrl(page);
+  if (onAuthentication(url)) return false;
+  if (saw) return true;
+  return !onLoginOrTwoStep(url);
+}
+
+async function watchAndSolveLoginCheckbox(page, nome) {
+  const enterprise = require('./recaptchaEnterprisePage.js');
+  const deadline = Date.now() + 30000;
+  let widget = null;
+  while (Date.now() < deadline) {
+    const url = pageUrl(page);
+    if (!onLoginOrTwoStep(url) && !onAuthentication(url)) return { ok: true, skipped: true };
+    widget = await readWidget(page);
+    if (widget && widget.sitekey) break;
+    await sleep(1500);
+  }
+  const urlNow = pageUrl(page);
+  if (!onLoginOrTwoStep(urlNow) && !onAuthentication(urlNow)) return { ok: true, skipped: true };
+  if (!widget || !widget.sitekey) {
+    if (!onAuthentication(urlNow)) return { ok: true, skipped: true };
+    return { ok: false, reason: 'no_sitekey' };
+  }
+
+  const first = await enterprise.solveOnce(page, { nome, attempt: 1, timeoutMs: 90_000 });
+  const firstApplied = !!(first && first.applied && (first.applied.areas || first.applied.called));
+  if (await waitUntilLeaveAuthentication(page, firstApplied ? 20000 : 4000)) {
+    return { ok: true, solved: true };
+  }
+  if (firstApplied || captchaBuyStop(first && first.error)) {
+    if (await waitUntilLeaveAuthentication(page, 15000)) return { ok: true, solved: true };
+    return { ok: false, reason: (first && first.error) || 'still_on_authentication' };
+  }
+  if (!first || first.ok !== true) {
+    const second = await enterprise.solveOnceV2(page, { nome, timeoutMs: 90_000 });
+    const secondApplied = !!(second && second.applied && (second.applied.areas || second.applied.called));
+    if (await waitUntilLeaveAuthentication(page, secondApplied ? 20000 : 8000)) {
+      return { ok: true, solved: true };
+    }
+    return { ok: false, reason: (second && second.error) || (first && first.error) || 'recaptcha_failed' };
+  }
+  if (await waitUntilLeaveAuthentication(page, 15000)) return { ok: true, solved: true };
+  return { ok: false, reason: 'still_on_authentication' };
 }
 
 async function markAuthField(page) {
@@ -639,6 +665,18 @@ async function clickTrustThisDevice(page, nome) {
   return { seen: true, clicked: true, left: !/remember_browser/i.test(pageUrl(page)) };
 }
 
+async function waitForLoginImageCaptcha(page) {
+  const until = Date.now() + 12000;
+  while (Date.now() < until) {
+    const image = await page.$('img[src*="/captcha/tfbimage/"]').catch(() => null);
+    if (image) return image;
+    const url = pageUrl(page);
+    if (!onLoginOrTwoStep(url) && !/checkpoint/i.test(url)) return null;
+    await sleep(1000);
+  }
+  return page.$('img[src*="/captcha/tfbimage/"]').catch(() => null);
+}
+
 async function attemptCredentialRelogin(page, nome, { login, password } = {}) {
   const user = String(login || '').trim();
   const pass = String(password || '').trim();
@@ -675,20 +713,12 @@ async function attemptCredentialRelogin(page, nome, { login, password } = {}) {
   await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
   await sleep(800);
 
-  if (await badLoginText(page) || await loginFormStillVisible(page)) {
-    return { ok: false, error: 'login_not_accepted' };
-  }
+  if (await badLoginText(page)) return { ok: false, error: 'login_not_accepted' };
   if (await hackedScreen(page)) return { ok: false, error: 'hacked_review', terminal: 'hacked_review' };
-  if (await whatsappScreen(page)) {
-    await markWhatsappConfirm(nome);
-    return { ok: false, error: 'whatsapp_confirm', terminal: 'whatsapp_confirm' };
-  }
 
   const box = await watchAndSolveLoginCheckbox(page, nome);
-  if (box && box.ok === false && box.reason !== 'no_sitekey') {
-    return { ok: false, error: box.reason || 'recaptcha_failed' };
-  }
-  const image = await page.$('img[src*="/captcha/tfbimage/"]').catch(() => null);
+  if (box && box.ok === false) return { ok: false, error: box.reason || 'recaptcha_failed' };
+  const image = await waitForLoginImageCaptcha(page);
   if (image) {
     const solvedImage = await require('./browser.js').solveFacebookImageCaptcha(page, {
       nome,
@@ -699,22 +729,26 @@ async function attemptCredentialRelogin(page, nome, { login, password } = {}) {
       return { ok: false, error: (solvedImage && solvedImage.error) || 'image_captcha_failed' };
     }
   }
-  if (await humanConfirmScreen(page)) return { ok: false, error: 'human_confirm' };
+  if (await hackedScreen(page)) return { ok: false, error: 'hacked_review', terminal: 'hacked_review' };
   if (await whatsappScreen(page)) {
     await markWhatsappConfirm(nome);
     return { ok: false, error: 'whatsapp_confirm', terminal: 'whatsapp_confirm' };
   }
-  if (await badLoginText(page) || await loginFormStillVisible(page)) return { ok: false, error: 'login_not_accepted' };
 
   const auth = await passAuthenticatorCode(page, nome);
   if (auth && auth.asked && !auth.ok) return { ok: false, error: auth.error || 'auth_app_code_failed' };
   await clickTrustThisDevice(page, nome);
+  await page.goto(HOME_URL, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+  await sleep(800);
 
-  if (blockedSaveUrl(pageUrl(page)) || await loginFormStillVisible(page) || await badLoginText(page) || await humanConfirmScreen(page) || await hackedScreen(page) || await whatsappScreen(page)) {
-    if (await whatsappScreen(page)) {
-      await markWhatsappConfirm(nome);
-      return { ok: false, error: 'whatsapp_confirm', terminal: 'whatsapp_confirm' };
-    }
+  const boxAgain = await watchAndSolveLoginCheckbox(page, nome);
+  if (boxAgain && boxAgain.ok === false) return { ok: false, error: boxAgain.reason || 'recaptcha_failed' };
+
+  if (await whatsappScreen(page)) {
+    await markWhatsappConfirm(nome);
+    return { ok: false, error: 'whatsapp_confirm', terminal: 'whatsapp_confirm' };
+  }
+  if (blockedSaveUrl(pageUrl(page)) || await loginFormStillVisible(page) || await badLoginText(page) || await humanConfirmScreen(page) || await hackedScreen(page)) {
     return { ok: false, error: 'login_not_accepted' };
   }
   const saved = await persistFreshSessionCookies(page, nome);

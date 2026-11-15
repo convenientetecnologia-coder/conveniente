@@ -221,14 +221,15 @@ async function solveOnce(page, { nome, timeoutMs = 90_000, attempt } = {}) {
   const anti = require('./antiCaptchaClient.js');
   let userAgent = '';
   try { userAgent = await page.evaluate(() => navigator.userAgent); } catch {}
-  const solved = await anti.solveRecaptchaEnterprise({
-    websiteURL: widget.websiteURL || 'https://www.facebook.com/',
+  const buy = {
+    websiteURL: captchaWebsiteUrl(widget.websiteURL),
     websiteKey: widget.sitekey,
     enterpriseS: widget.s,
     isInvisible: widget.size === 'invisible',
     userAgent,
     timeoutMs
-  });
+  };
+  const solved = await anti.solveRecaptchaEnterprise(buy);
   if (!solved || !solved.ok) return Object.assign({ widget }, solved || { ok: false, error: 'anticaptcha_failed' });
   const applied = await applyToken(page, solved.token);
   if (!(applied && applied.areas) && !(applied && applied.called)) {
@@ -237,4 +238,33 @@ async function solveOnce(page, { nome, timeoutMs = 90_000, attempt } = {}) {
   return { ok: true, taskId: solved.taskId, cost: solved.cost, applied, widget };
 }
 
-module.exports = { readWidget, applyToken, solveOnce };
+function captchaWebsiteUrl(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return 'https://www.fbsbx.com/';
+  if (/^https?:\/\/([a-z0-9-]+\.)?facebook\.com/i.test(raw)) return 'https://www.fbsbx.com/';
+  return raw;
+}
+
+async function solveOnceV2(page, opts) {
+  const widget = await readWidget(page);
+  if (!widget || !widget.sitekey) return { ok: false, error: 'no_sitekey', widget };
+  const anti = require('./antiCaptchaClient.js');
+  let userAgent = '';
+  try { userAgent = await page.evaluate(() => navigator.userAgent); } catch {}
+  const solved = await anti.solveRecaptchaV2({
+    websiteURL: captchaWebsiteUrl(widget.websiteURL),
+    websiteKey: widget.sitekey,
+    enterpriseS: widget.s,
+    isInvisible: widget.size === 'invisible',
+    userAgent,
+    timeoutMs: opts && opts.timeoutMs
+  });
+  if (!solved || !solved.ok) return Object.assign({ widget }, solved || { ok: false, error: 'anticaptcha_failed' });
+  const applied = await applyToken(page, solved.token);
+  if (!(applied && applied.areas) && !(applied && applied.called)) {
+    return { ok: false, error: 'token_not_applied', taskId: solved.taskId, widget, applied };
+  }
+  return { ok: true, taskId: solved.taskId, cost: solved.cost, applied, widget };
+}
+
+module.exports = { readWidget, applyToken, solveOnce, solveOnceV2 };
