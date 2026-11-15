@@ -105,6 +105,12 @@ function websiteUrlFor(url) {
   return 'https://www.facebook.com/login/';
 }
 
+function captchaAlreadyLeftUrl(url) {
+  const u = String(url || '');
+  if (/remember_browser/i.test(u)) return true;
+  return /two_step_verification\/two_factor/i.test(u) || /\/two_factor\//i.test(u);
+}
+
 async function securityVerificationScreen(page) {
   if (await bothLoginFieldsVisible(page)) return false;
   const text = await pageText(page);
@@ -147,12 +153,34 @@ async function readArkose(page) {
   return { publicKey, subdomain };
 }
 
+async function arkoseFramePresent(page) {
+  const frames = (page && typeof page.frames === 'function') ? page.frames() : [];
+  for (const frame of frames) {
+    let src = '';
+    try { src = typeof frame.url === 'function' ? String(frame.url() || '') : ''; } catch {}
+    if (isArkoseUrl(src)) return true;
+  }
+  const srcs = await page.evaluate(() => {
+    return Array.from(document.querySelectorAll('iframe')).map((el) => el.src || el.getAttribute('src') || '');
+  }).catch(() => []);
+  return (srcs || []).some((src) => isArkoseUrl(src));
+}
+
 async function readArkoseWithPatience(page) {
   let widget = { publicKey: '', subdomain: DEFAULT_SUBDOMAIN };
-  for (let i = 0; i < 4; i++) {
+  const until = Date.now() + 12000;
+  while (Date.now() < until) {
+    const text = await pageText(page);
+    if (accountHumanStopText(text)) return { ...widget, human: true };
     widget = await readArkose(page);
     if (widget && widget.publicKey) return widget;
-    if (i < 3) await sleep(1000);
+    const frame = await arkoseFramePresent(page);
+    if (captchaAlreadyLeftUrl(pageUrl(page)) && !frame) return { ...widget, passed: true };
+    if (!frame && !(await securityVerificationScreen(page))) return { ...widget, left: true };
+    await sleep(400);
+  }
+  if (captchaAlreadyLeftUrl(pageUrl(page)) && !(await arkoseFramePresent(page))) {
+    return { ...widget, passed: true };
   }
   return widget;
 }
@@ -193,11 +221,13 @@ async function applyFunToken(page, token) {
 async function waitAfterFunToken(page) {
   const until = Date.now() + 15000;
   while (Date.now() < until) {
+    if (captchaAlreadyLeftUrl(pageUrl(page)) && !(await arkoseFramePresent(page))) return 'passed';
     const text = await pageText(page);
     if (funRejectedText(text)) return 'rejected';
     if (!securityVerificationText(text)) return 'passed';
     await sleep(400);
   }
+  if (captchaAlreadyLeftUrl(pageUrl(page)) && !(await arkoseFramePresent(page))) return 'passed';
   const text = await pageText(page);
   if (funRejectedText(text)) return 'rejected';
   if (!securityVerificationText(text)) return 'passed';
@@ -211,16 +241,39 @@ function buyStop(error) {
     || error === 'ERROR_KEY_DOES_NOT_EXIST';
 }
 
+function passedAlone(page, frameStillThere) {
+  return captchaAlreadyLeftUrl(pageUrl(page)) && !frameStillThere;
+}
+
+function logPassedAlone(nome) {
+  funLog('info', '[LOGIN][pc] Facebook ja abriu o app de autenticacao. Nao havia quadro para comprar. Sigo para o codigo.', { nome: nome || '' });
+}
+
 async function watchAndSolveFunCaptcha(page, nome) {
   if (accountHumanStopText(await pageText(page))) return { ok: false, reason: 'human_confirm' };
+  if (passedAlone(page, await arkoseFramePresent(page))) {
+    logPassedAlone(nome);
+    return { ok: true, skipped: true };
+  }
   if (!(await securityVerificationScreen(page))) return { ok: true, skipped: true };
 
   let purchases = 0;
   while (purchases < 2) {
+    if (passedAlone(page, await arkoseFramePresent(page))) {
+      logPassedAlone(nome);
+      return { ok: true, skipped: true };
+    }
     if (funRejectedText(await pageText(page))) return { ok: false, reason: 'funcaptcha_rejected' };
     if (!(await securityVerificationScreen(page))) return { ok: true, solved: purchases > 0 };
     const widget = await readArkoseWithPatience(page);
+    if (widget && widget.human) return { ok: false, reason: 'human_confirm' };
+    const frameStillThere = await arkoseFramePresent(page);
     if (!widget || !widget.publicKey) {
+      if ((widget && widget.passed) || passedAlone(page, frameStillThere)) {
+        logPassedAlone(nome);
+        return { ok: true, skipped: true };
+      }
+      if (!frameStillThere && !(await securityVerificationScreen(page))) return { ok: true, solved: purchases > 0 };
       funLog('warn', '[LOGIN][pc] verificacao Arkose sem chave publica no quadro', { nome: nome || '' });
       return { ok: false, reason: 'funcaptcha_no_key' };
     }
@@ -285,6 +338,8 @@ async function watchAndSolveFunCaptcha(page, nome) {
 module.exports = {
   pkFromUrl,
   websiteUrlFor,
+  captchaAlreadyLeftUrl,
+  arkoseFramePresent,
   securityVerificationText,
   securityVerificationScreen,
   watchAndSolveFunCaptcha

@@ -527,19 +527,26 @@ async function waitUntilLeaveAuthentication(page, ms) {
 }
 
 async function boxIsOnScreen(page) {
+  const fun = require('./funCaptchaPage.js');
+  if (await fun.arkoseFramePresent(page)) return false;
+  if (fun.captchaAlreadyLeftUrl(pageUrl(page))) return false;
   const url = pageUrl(page);
   if (onAuthentication(url)) return true;
   if (!/two_step_verification/i.test(url)) return false;
   const text = await pageText(page);
   if (text.includes('recaptcha') || text.includes('nao sou um robo')) return true;
   const frame = await page.$('iframe[src*="recaptcha"], iframe[src*="fbsbx.com"]').catch(() => null);
-  return !!frame;
+  if (!frame) return false;
+  const src = await page.evaluate((el) => el.src || el.getAttribute('src') || '', frame).catch(() => '');
+  return !/arkose|arkoselabs/i.test(String(src || ''));
 }
 
 async function readSitekeyWithPatience(page, nome, attempt) {
   const enterprise = require('./recaptchaEnterprisePage.js');
+  const fun = require('./funCaptchaPage.js');
   let widget = null;
   for (let i = 0; i < 4; i++) {
+    if (fun.captchaAlreadyLeftUrl(pageUrl(page)) && !(await fun.arkoseFramePresent(page))) return { left: true };
     widget = await readWidget(page);
     if (widget && widget.sitekey) return widget;
     enterprise.recaptchaLog('warn', '[RECAPTCHA] sem sitekey', {
@@ -553,6 +560,7 @@ async function readSitekeyWithPatience(page, nome, attempt) {
     });
     if (i < 3) await sleep(1500);
   }
+  if (fun.captchaAlreadyLeftUrl(pageUrl(page)) && !(await fun.arkoseFramePresent(page))) return { left: true };
   return widget;
 }
 
@@ -568,13 +576,21 @@ async function waitForRobotBox(page) {
   const fun = require('./funCaptchaPage.js');
   const until = Date.now() + 15000;
   while (Date.now() < until) {
-    if (await fun.securityVerificationScreen(page)) return 'funcaptcha';
+    const frame = await fun.arkoseFramePresent(page);
+    if (fun.captchaAlreadyLeftUrl(pageUrl(page)) && !frame) return false;
+    if (await fun.securityVerificationScreen(page) && frame) return 'funcaptcha';
+    if (frame || await fun.securityVerificationScreen(page)) {
+      await sleep(400);
+      continue;
+    }
     const url = pageUrl(page);
     if (!onLoginOrTwoStep(url) && !onAuthentication(url)) return false;
     if (await boxIsOnScreen(page)) return true;
     await sleep(400);
   }
-  if (await fun.securityVerificationScreen(page)) return 'funcaptcha';
+  const frame = await fun.arkoseFramePresent(page);
+  if (fun.captchaAlreadyLeftUrl(pageUrl(page)) && !frame) return false;
+  if (await fun.securityVerificationScreen(page) && frame) return 'funcaptcha';
   return false;
 }
 
@@ -601,6 +617,7 @@ async function classifyAfterCaptchaToken(page) {
 async function buyCaptcha(page, nome, { v2, attempt }) {
   const enterprise = require('./recaptchaEnterprisePage.js');
   const widget = await readSitekeyWithPatience(page, nome, attempt);
+  if (widget && widget.left) return { ok: true, skipped: true };
   if (!widget || !widget.sitekey) {
     enterprise.recaptchaLog('warn', '[RECAPTCHA] enterprise não resolveu', { nome: nome || '', error: 'no_sitekey' });
     return { ok: false, error: 'no_sitekey' };
@@ -652,6 +669,7 @@ async function watchAndSolveLoginCheckbox(page, nome, user, pass) {
       return { ok: true, skipped: true };
     }
     const solved = await buyCaptcha(page, nome, { v2: nextIsV2, attempt: purchases + 1 });
+    if (solved && solved.skipped) return { ok: true, skipped: true };
     nextIsV2 = false;
     purchases += 1;
     if (captchaBuyStop(solved && solved.error)) return { ok: false, reason: solved.error };
@@ -666,6 +684,12 @@ async function watchAndSolveLoginCheckbox(page, nome, user, pass) {
     }
     const landed = tokenLanded(solved);
     if (!landed) {
+      if (solved && solved.error === 'no_sitekey') {
+        const fun = require('./funCaptchaPage.js');
+        if (fun.captchaAlreadyLeftUrl(pageUrl(page)) && !(await fun.arkoseFramePresent(page))) {
+          return { ok: true, skipped: true };
+        }
+      }
       if (!onAuthentication(pageUrl(page)) && !(await loginFormStillVisible(page))) {
         return { ok: true, solved: true };
       }
