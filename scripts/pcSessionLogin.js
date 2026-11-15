@@ -823,10 +823,11 @@ async function confirmAuthApp(page, nome) {
   }
   if (!continued) {
     await sleep(1200);
+    if (await isTrustScreen(page)) return { ok: true, outcome: 'auth_app_ok' };
     const url = pageUrl(page);
-    const still = /two_step_verification\/two_factor|\/two_factor\//i.test(url);
+    const stillCode = /two_step_verification\/two_factor/i.test(url) && !/remember_browser/i.test(url);
     const field = await markAuthField(page);
-    if (!field && !still) return { ok: true, outcome: 'auth_app_ok' };
+    if (!field && !stillCode) return { ok: true, outcome: 'auth_app_ok' };
     return { ok: false, outcome: 'failed', error: 'auth_app_code_failed' };
   }
   await sleep(800);
@@ -931,9 +932,15 @@ async function leaveOtherDeviceApproval(page, nome) {
 
 async function passAuthenticatorCode(page, nome) {
   for (let attempt = 1; attempt <= 2; attempt++) {
+    if (await isTrustScreen(page)) {
+      await clickTrustThisDevice(page, nome);
+      return { asked: true, ok: true };
+    }
     const url = pageUrl(page);
     const text = await pageText(page);
-    const asked = /\/two_factor\/|two_step_verification\/two_factor/i.test(url)
+    const onCodeUrl = /two_step_verification\/two_factor/i.test(url)
+      || (/\/two_factor\//i.test(url) && !/remember_browser/i.test(url));
+    const asked = onCodeUrl
       || text.includes('ir para o app de autenticacao')
       || text.includes('app de autenticacao')
       || text.includes('authentication app')
@@ -952,45 +959,96 @@ async function passAuthenticatorCode(page, nome) {
   return { asked: true, ok: false, error: 'auth_app_code_failed' };
 }
 
-async function clickTrustThisDevice(page, nome) {
-  const seen = await page.evaluate(() => {
-    function n(s) {
-      try { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
-      catch { return String(s || '').toLowerCase(); }
-    }
-    const url = String(location.href || '');
-    const txt = n((document.body && (document.body.innerText || '')) || '');
-    return url.indexOf('remember_browser') >= 0 || txt.indexOf('confiar neste dispositivo') >= 0 || txt.indexOf('trust this device') >= 0;
-  }).catch(() => false);
-  if (!seen) return { seen: false, clicked: false };
-  const clicked = await page.evaluate(() => {
+async function isTrustScreen(page) {
+  return page.evaluate(() => {
     function n(s) {
       try { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase(); }
       catch { return String(s || '').toLowerCase(); }
     }
+    const url = String(location.href || '');
+    const txt = n((document.body && (document.body.innerText || document.body.textContent)) || '');
+    return url.indexOf('remember_browser') >= 0
+      || txt.indexOf('confiar neste dispositivo') >= 0
+      || txt.indexOf('trust this device') >= 0;
+  }).catch(() => false);
+}
+
+async function clickTrustButton(page) {
+  return page.evaluate(() => {
+    function n(s) {
+      try { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase(); }
+      catch { return String(s || '').toLowerCase().trim(); }
+    }
+    function pressable(el) {
+      let cur = el;
+      while (cur && cur !== document.body) {
+        const role = (cur.getAttribute && cur.getAttribute('role')) || '';
+        const tag = (cur.tagName || '').toLowerCase();
+        const text = n(cur.innerText || cur.getAttribute('aria-label') || '');
+        if (text.indexOf('sempre confirmar') >= 0 || text.indexOf('always confirm') >= 0) break;
+        if (tag === 'button' || tag === 'a' || role === 'button') return cur;
+        cur = cur.parentElement;
+      }
+      return null;
+    }
     const wanted = ['confiar neste dispositivo', 'trust this device'];
-    const nodes = Array.from(document.querySelectorAll('button, [role="button"], div, span, [tabindex="0"]'));
+    const nodes = Array.from(document.querySelectorAll('button, [role="button"], a, div, span'));
     const hits = [];
     for (const el of nodes) {
       if (el.disabled) continue;
-      const text = n(el.innerText || el.getAttribute('aria-label') || '');
-      if (!text || text.indexOf('sempre confirmar') >= 0 || text.indexOf('always confirm') >= 0) continue;
-      const exact = wanted.some((w) => text === w);
-      if (!exact && !wanted.some((w) => text.indexOf(w) >= 0)) continue;
-      const r = el.getBoundingClientRect();
-      if (r.width < 40 || r.height < 16) continue;
-      hits.push({ el, area: r.width * r.height, exact });
+      const text = n(el.getAttribute('aria-label') || el.innerText || '');
+      if (!wanted.includes(text)) continue;
+      const target = pressable(el);
+      if (!target || target.disabled) continue;
+      const targetText = n(target.getAttribute('aria-label') || target.innerText || '');
+      if (!targetText || targetText.indexOf('sempre confirmar') >= 0 || targetText.indexOf('always confirm') >= 0) continue;
+      if (!wanted.some((w) => targetText === w || targetText.indexOf(w) >= 0)) continue;
+      const r = target.getBoundingClientRect();
+      if (r.width < 48 || r.height < 18) continue;
+      const role = (target.getAttribute && target.getAttribute('role')) || '';
+      hits.push({ el: target, button: role === 'button' || (target.tagName || '').toLowerCase() === 'button' });
     }
     if (!hits.length) return false;
-    hits.sort((a, b) => (a.exact === b.exact ? a.area - b.area : (a.exact ? -1 : 1)));
-    try { hits[0].el.click(); return true; } catch { return false; }
+    hits.sort((a, b) => (a.button === b.button ? 0 : (a.button ? -1 : 1)));
+    try { hits[0].el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch (e) {}
+    try { hits[0].el.click(); return true; } catch (e) { return false; }
   }).catch(() => false);
-  if (!clicked) return { seen: true, clicked: false };
-  const until = Date.now() + 8000;
+}
+
+async function clickTrustThisDevice(page, nome) {
+  const until = Date.now() + 15000;
+  let seen = false;
   while (Date.now() < until) {
-    if (!/remember_browser/i.test(pageUrl(page))) break;
+    if (await isTrustScreen(page)) { seen = true; break; }
+    const url = pageUrl(page);
+    const pastGate = /facebook\.com|messenger\.com/i.test(url)
+      && !/two_step_verification|remember_browser|\/two_factor\/|\/login|checkpoint/i.test(url);
+    if (pastGate) return { seen: false, clicked: false, left: true };
     await sleep(400);
   }
+  if (!seen) return { seen: false, clicked: false };
+
+  let clicked = false;
+  for (let i = 0; i < 4; i++) {
+    const hit = await clickTrustButton(page);
+    if (hit) clicked = true;
+    const leftUntil = Date.now() + (hit ? 8000 : 600);
+    while (Date.now() < leftUntil) {
+      const url = pageUrl(page);
+      if (url && !/remember_browser/i.test(url) && !(await isTrustScreen(page))) {
+        logger.info('[LOGIN][pc] confiei neste dispositivo', { nome });
+        return { seen: true, clicked: true, left: true };
+      }
+      if (!hit) break;
+      await sleep(400);
+    }
+    if (!hit) await sleep(400);
+  }
+  if (!clicked) {
+    logger.warn('[LOGIN][pc] tela de confiar no dispositivo sem o botão azul', { nome });
+    return { seen: true, clicked: false };
+  }
+  logger.info('[LOGIN][pc] confiei neste dispositivo', { nome });
   return { seen: true, clicked: true, left: !/remember_browser/i.test(pageUrl(page)) };
 }
 
@@ -1067,8 +1125,11 @@ async function attemptCredentialRelogin(page, nome, { login, password } = {}) {
   const switched = await leaveOtherDeviceApproval(page, nome);
   if (switched && switched.ok === false) return { ok: false, error: switched.error || 'other_device_switch_failed' };
   const auth = await passAuthenticatorCode(page, nome);
-  if (auth && auth.asked && !auth.ok) return { ok: false, error: auth.error || 'auth_app_code_failed' };
-  await clickTrustThisDevice(page, nome);
+  if (auth && auth.error === 'auth_app_no_secret') return { ok: false, error: 'auth_app_no_secret' };
+  const trust = await clickTrustThisDevice(page, nome);
+  if (auth && auth.asked && !auth.ok && !(trust && trust.clicked)) {
+    return { ok: false, error: auth.error || 'auth_app_code_failed' };
+  }
 
   if (await whatsappScreen(page)) {
     await markWhatsappConfirm(nome);
