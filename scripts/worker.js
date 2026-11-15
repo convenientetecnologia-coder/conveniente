@@ -4641,7 +4641,8 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           } else {
             await virtusHelper.garantirMarketplace(pg, { timeoutMs: 45000 });
             const landed = (() => { try { return String(pg.url() || ''); } catch { return ''; } })();
-            if (landed && !isFacebookMessagesUrl(landed) && /checkpoint/i.test(landed)) {
+            const landedBare = String(landed || '').replace(/([?&])checkpoint_src=[^&#]*/ig, '');
+            if (landed && !isFacebookMessagesUrl(landed) && /\/checkpoint/i.test(landedBare)) {
               okMsg = false;
               errMsg = 'not_on_messages';
             } else {
@@ -4667,7 +4668,8 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
         } catch {}
         try {
           const landedNow = (() => { try { return String(pg.url() || ''); } catch { return ''; } })();
-          if (!okMsg || /checkpoint/i.test(landedNow)) {
+          const landedNowBare = String(landedNow || '').replace(/([?&])checkpoint_src=[^&#]*/ig, '');
+          if (!okMsg || /\/checkpoint/i.test(landedNowBare)) {
             const bdReady = await browserHelper.detectAccountSuspended(pg).catch(()=>({ banned:false }));
             if (bdReady && bdReady.banned) {
               const banReason = String(bdReady.reason || 'banned');
@@ -5147,7 +5149,8 @@ async function appealMonitorCheckNow(nome, ctrl) {
       for (const pg of (pages || []).slice(0, APPEAL_CFG.maxPagesScan)) {
         const u = safeUrl(pg);
         if (!/facebook\.com/i.test(u)) continue;
-        if (/checkpoint|appeal|help\/contact|recover/i.test(u)) return pg;
+        const bare = String(u || '').replace(/([?&])checkpoint_src=[^&#]*/ig, '');
+        if (/\/checkpoint|appeal|help\/contact|recover/i.test(bare)) return pg;
       }
       // Fallback: primeira aba facebook.com
       for (const pg of (pages || []).slice(0, APPEAL_CFG.maxPagesScan)) {

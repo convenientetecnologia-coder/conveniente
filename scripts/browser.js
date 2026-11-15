@@ -8488,7 +8488,8 @@ async function detectAccountSuspended(page) {
     };
 
     let v = await scan();
-    if ((!v || !v.hit) && /\/checkpoint\b/i.test(String(href || ''))) {
+    const hrefBare = String(href || '').replace(/([?&])checkpoint_src=[^&#]*/ig, '$1');
+    if ((!v || !v.hit) && /\/checkpoint\b/i.test(hrefBare)) {
       await new Promise((r) => setTimeout(r, 2000));
       v = await scan();
     }

@@ -23,6 +23,10 @@ function blockedSaveUrl(url) {
   return /facebook\.com\/login|messenger\.com\/login|remember_browser|two_step_verification|\/two_factor\/|\/checkpoint\//i.test(String(url || ''));
 }
 
+function stripCheckpointSrc(url) {
+  return String(url || '').replace(/([?&])checkpoint_src=[^&#]*/ig, '$1');
+}
+
 function cookiesHaveSession(cookies) {
   const arr = Array.isArray(cookies) ? cookies : [];
   const has = (name) => arr.some((c) => c && c.name === name && String(c.value || '').trim());
@@ -1020,9 +1024,9 @@ async function clickTrustThisDevice(page, nome) {
   let seen = false;
   while (Date.now() < until) {
     if (await isTrustScreen(page)) { seen = true; break; }
-    const url = pageUrl(page);
+    const url = stripCheckpointSrc(pageUrl(page));
     const pastGate = /facebook\.com|messenger\.com/i.test(url)
-      && !/two_step_verification|remember_browser|\/two_factor\/|\/login|checkpoint/i.test(url);
+      && !/two_step_verification|remember_browser|\/two_factor\/|\/login|\/checkpoint/i.test(url);
     if (pastGate) return { seen: false, clicked: false, left: true };
     await sleep(400);
   }
@@ -1058,7 +1062,7 @@ async function waitForLoginImageCaptcha(page) {
     const image = await page.$('img[src*="/captcha/tfbimage/"]').catch(() => null);
     if (image) return image;
     const url = pageUrl(page);
-    if (!onLoginOrTwoStep(url) && !/checkpoint/i.test(url)) return null;
+    if (!onLoginOrTwoStep(url) && !/\/checkpoint/i.test(stripCheckpointSrc(url))) return null;
     await sleep(1000);
   }
   return page.$('img[src*="/captcha/tfbimage/"]').catch(() => null);
