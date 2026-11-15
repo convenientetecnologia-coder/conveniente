@@ -116,7 +116,9 @@ async function readWidget(page) {
   const widget = fromDom || { sitekey: '', s: '', size: '', url: '', source: 'missing', anchorPath: '', enterprise: false };
   widget.frames = framePaths.slice(0, 12);
   widget.coOrigin = anchorOrigin || '';
-  widget.websiteURL = 'https://www.fbsbx.com/';
+  // www.facebook.com e m.facebook.com voltam domínio inválido se a compra for em fbsbx.
+  // O domínio que a API aceita é o do quadro, gravado no parâmetro co.
+  widget.websiteURL = anchorOrigin || 'https://www.fbsbx.com/';
   if (!widget.s) {
     const fromFrame = await readEnterpriseS(page);
     if (fromFrame) widget.s = fromFrame;
@@ -220,7 +222,7 @@ async function solveOnce(page, { nome, timeoutMs = 90_000, attempt } = {}) {
   let userAgent = '';
   try { userAgent = await page.evaluate(() => navigator.userAgent); } catch {}
   const solved = await anti.solveRecaptchaEnterprise({
-    websiteURL: FBSBX(),
+    websiteURL: widget.websiteURL || 'https://www.facebook.com/',
     websiteKey: widget.sitekey,
     enterpriseS: widget.s,
     isInvisible: widget.size === 'invisible',
@@ -233,10 +235,6 @@ async function solveOnce(page, { nome, timeoutMs = 90_000, attempt } = {}) {
     return { ok: false, error: 'token_not_applied', taskId: solved.taskId, widget };
   }
   return { ok: true, taskId: solved.taskId, cost: solved.cost, applied, widget };
-}
-
-function FBSBX() {
-  return 'https://www.fbsbx.com/';
 }
 
 module.exports = { readWidget, applyToken, solveOnce };
