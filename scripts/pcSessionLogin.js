@@ -504,6 +504,12 @@ function onAuthentication(url) {
   return /\/authentication\//i.test(String(url || ''));
 }
 
+function onAuthCodeUrl(url) {
+  const u = String(url || '');
+  if (/remember_browser/i.test(u)) return false;
+  return /two_step_verification\/two_factor/i.test(u) || /\/two_factor\//i.test(u);
+}
+
 function captchaBuyStop(error) {
   return error === 'aborted'
     || error === 'anticaptcha_key_missing'
@@ -965,14 +971,13 @@ async function leaveOtherDeviceApproval(page, nome) {
 
 async function passAuthenticatorCode(page, nome) {
   for (let attempt = 1; attempt <= 2; attempt++) {
-    if (await isTrustScreen(page)) {
+    const url = pageUrl(page);
+    const onCodeUrl = onAuthCodeUrl(url);
+    if (!onCodeUrl && await isTrustScreen(page)) {
       await clickTrustThisDevice(page, nome);
       return { asked: true, ok: true };
     }
-    const url = pageUrl(page);
     const text = await pageText(page);
-    const onCodeUrl = /two_step_verification\/two_factor/i.test(url)
-      || (/\/two_factor\//i.test(url) && !/remember_browser/i.test(url));
     const asked = onCodeUrl
       || text.includes('ir para o app de autenticacao')
       || text.includes('app de autenticacao')
@@ -999,10 +1004,15 @@ async function isTrustScreen(page) {
       catch { return String(s || '').toLowerCase(); }
     }
     const url = String(location.href || '');
-    const txt = n((document.body && (document.body.innerText || document.body.textContent)) || '');
-    return url.indexOf('remember_browser') >= 0
-      || txt.indexOf('confiar neste dispositivo') >= 0
-      || txt.indexOf('trust this device') >= 0;
+    if (/remember_browser/i.test(url)) return true;
+    if ((/two_step_verification\/two_factor/i.test(url) || /\/two_factor\//i.test(url)) && !/remember_browser/i.test(url)) return false;
+    const wanted = ['confiar neste dispositivo', 'trust this device'];
+    const nodes = Array.from(document.querySelectorAll('button, [role="button"], a, div, span'));
+    for (const el of nodes) {
+      const text = n(el.getAttribute('aria-label') || el.innerText || '');
+      if (wanted.includes(text)) return true;
+    }
+    return false;
   }).catch(() => false);
 }
 
@@ -1019,6 +1029,7 @@ async function clickTrustButton(page) {
         const tag = (cur.tagName || '').toLowerCase();
         const text = n(cur.innerText || cur.getAttribute('aria-label') || '');
         if (text.indexOf('sempre confirmar') >= 0 || text.indexOf('always confirm') >= 0) break;
+        if (text.indexOf('pular esta etapa') >= 0 || text.indexOf('skip this step') >= 0) break;
         if (tag === 'button' || tag === 'a' || role === 'button') return cur;
         cur = cur.parentElement;
       }
@@ -1034,8 +1045,9 @@ async function clickTrustButton(page) {
       const target = pressable(el);
       if (!target || target.disabled) continue;
       const targetText = n(target.getAttribute('aria-label') || target.innerText || '');
-      if (!targetText || targetText.indexOf('sempre confirmar') >= 0 || targetText.indexOf('always confirm') >= 0) continue;
-      if (!wanted.some((w) => targetText === w || targetText.indexOf(w) >= 0)) continue;
+      if (!targetText || !wanted.includes(targetText)) continue;
+      if (targetText.indexOf('sempre confirmar') >= 0 || targetText.indexOf('always confirm') >= 0) continue;
+      if (targetText.indexOf('pular esta etapa') >= 0 || targetText.indexOf('skip this step') >= 0) continue;
       const r = target.getBoundingClientRect();
       if (r.width < 48 || r.height < 18) continue;
       const role = (target.getAttribute && target.getAttribute('role')) || '';
@@ -1088,12 +1100,14 @@ async function clickTrustThisDevice(page, nome) {
 async function waitForLoginImageCaptcha(page) {
   const until = Date.now() + 12000;
   while (Date.now() < until) {
+    const url = pageUrl(page);
+    if (onAuthCodeUrl(url)) return null;
     const image = await page.$('img[src*="/captcha/tfbimage/"]').catch(() => null);
     if (image) return image;
-    const url = pageUrl(page);
     if (!onLoginOrTwoStep(url) && !/\/checkpoint/i.test(stripCheckpointSrc(url))) return null;
     await sleep(1000);
   }
+  if (onAuthCodeUrl(pageUrl(page))) return null;
   return page.$('img[src*="/captcha/tfbimage/"]').catch(() => null);
 }
 
