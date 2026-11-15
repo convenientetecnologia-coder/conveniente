@@ -646,19 +646,32 @@ async function clickContinue(page) {
       try { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase(); }
       catch { return String(s || '').toLowerCase().trim(); }
     }
+    function pressable(el) {
+      let cur = el;
+      while (cur && cur !== document.body) {
+        const role = (cur.getAttribute && cur.getAttribute('role')) || '';
+        const tag = (cur.tagName || '').toLowerCase();
+        if (tag === 'button' || tag === 'a' || role === 'button') return cur;
+        cur = cur.parentElement;
+      }
+      return el;
+    }
     const wanted = ['continuar', 'continue', 'confirmar', 'avancar'];
     const nodes = Array.from(document.querySelectorAll('button, [role="button"], input[type="submit"], a, div, span'));
-    for (const label of wanted) {
-      for (const el of nodes) {
-        if (el.disabled) continue;
-        const text = n(el.getAttribute('aria-label') || el.innerText || el.value || '');
-        if (text !== label) continue;
-        const r = el.getBoundingClientRect();
-        if (r.width < 48 || r.height < 18) continue;
-        try { el.click(); return true; } catch {}
-      }
+    const hits = [];
+    for (const el of nodes) {
+      if (el.disabled) continue;
+      const text = n(el.getAttribute('aria-label') || el.innerText || el.value || '');
+      if (!wanted.includes(text)) continue;
+      const target = pressable(el);
+      const r = target.getBoundingClientRect();
+      if (r.width < 48 || r.height < 18) continue;
+      const role = (target.getAttribute && target.getAttribute('role')) || '';
+      hits.push({ el: target, button: role === 'button' || (target.tagName || '').toLowerCase() === 'button' });
     }
-    return false;
+    if (!hits.length) return false;
+    hits.sort((a, b) => (a.button === b.button ? 0 : (a.button ? -1 : 1)));
+    try { hits[0].el.click(); return true; } catch { return false; }
   }).catch(() => false);
 }
 
@@ -736,6 +749,18 @@ async function clickLabeled(page, labels, { forbid = [] } = {}) {
       try { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, ' ').trim().toLowerCase(); }
       catch { return String(s || '').toLowerCase().trim(); }
     }
+    function pressable(el) {
+      let cur = el;
+      while (cur && cur !== document.body) {
+        const role = (cur.getAttribute && cur.getAttribute('role')) || '';
+        const tag = (cur.tagName || '').toLowerCase();
+        const text = n(cur.innerText || cur.getAttribute('aria-label') || '');
+        if (blocked.some((b) => text.includes(b))) break;
+        if (tag === 'button' || tag === 'a' || role === 'button' || role === 'radio' || tag === 'label') return cur;
+        cur = cur.parentElement;
+      }
+      return el;
+    }
     const nodes = Array.from(document.querySelectorAll('button, [role="button"], [role="radio"], label, div, span, a'));
     const hits = [];
     for (const el of nodes) {
@@ -746,12 +771,14 @@ async function clickLabeled(page, labels, { forbid = [] } = {}) {
       const exact = wanted.some((w) => text === w);
       const partial = wanted.some((w) => text.includes(w));
       if (!exact && !partial) continue;
-      const r = el.getBoundingClientRect();
+      const target = pressable(el);
+      const r = target.getBoundingClientRect();
       if (r.width < 20 || r.height < 12) continue;
-      hits.push({ el, area: r.width * r.height, exact });
+      const role = (target.getAttribute && target.getAttribute('role')) || '';
+      hits.push({ el: target, area: r.width * r.height, exact, choice: role === 'radio' || role === 'button' });
     }
     if (!hits.length) return false;
-    hits.sort((a, b) => (a.exact === b.exact ? a.area - b.area : (a.exact ? -1 : 1)));
+    hits.sort((a, b) => (a.choice === b.choice ? a.area - b.area : (a.choice ? -1 : 1)));
     try { hits[0].el.click(); return true; } catch { return false; }
   }, labels, forbid).catch(() => false);
 }
