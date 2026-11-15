@@ -64,6 +64,78 @@ async function freshTotp(secret) {
   return generateTotp(secret);
 }
 
+function formatSecretGrouped(secret) {
+  return normalizeSecret(secret).replace(/(.{4})/g, '$1 ').trim();
+}
+
+function extractSixDigitsAfterPipe(raw) {
+  const s = String(raw || '').trim();
+  const pipe = s.lastIndexOf('|');
+  if (pipe < 0) return '';
+  const m = s.slice(pipe + 1).replace(/\s+/g, '').match(/(\d{6})/);
+  return m ? m[1] : '';
+}
+
+async function codeFrom2faLive(page, secret, nome) {
+  let browser = null;
+  try { browser = typeof page.browser === 'function' ? page.browser() : null; } catch {}
+  if (!browser || typeof browser.newPage !== 'function') return '';
+  if (totpRemainingSec() < 8) await sleep((totpRemainingSec() + 1) * 1000);
+  let extra = null;
+  try {
+    extra = await browser.newPage();
+    try { await extra.bringToFront(); } catch {}
+    await extra.goto('https://2fa.live/', { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await sleep(1600);
+    const pasted = await extra.evaluate((val) => {
+      const box = document.querySelector('#listToken, textarea.form-control');
+      if (!box) return false;
+      box.focus();
+      const proto = window.HTMLTextAreaElement.prototype;
+      const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+      if (desc && desc.set) desc.set.call(box, val);
+      else box.value = val;
+      box.dispatchEvent(new Event('input', { bubbles: true }));
+      box.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    }, formatSecretGrouped(secret));
+    if (!pasted) {
+      logger.warn('[LOGIN][pc] 2fa.live: campo do segredo não apareceu', { nome });
+      return '';
+    }
+    await sleep(700);
+    const submitted = await extra.evaluate(() => {
+      const btn = document.querySelector('#submit, a[aria-label="Submit Form"]');
+      if (!btn) return false;
+      try { btn.click(); return true; } catch { return false; }
+    });
+    if (!submitted) {
+      logger.warn('[LOGIN][pc] 2fa.live: botão Submit não apareceu', { nome });
+      return '';
+    }
+    const end = Date.now() + 20000;
+    let code = '';
+    while (Date.now() < end) {
+      const raw = await extra.evaluate(() => {
+        const out = document.querySelector('#output');
+        return out ? String(out.value || out.textContent || '') : '';
+      }).catch(() => '');
+      if (String(raw || '').indexOf('|') >= 0) code = extractSixDigitsAfterPipe(raw);
+      if (code) break;
+      await sleep(400);
+    }
+    if (code) logger.info('[LOGIN][pc] 2fa.live devolveu o código', { nome });
+    else logger.warn('[LOGIN][pc] 2fa.live não devolveu os 6 dígitos', { nome });
+    return code;
+  } catch (e) {
+    logger.warn('[LOGIN][pc] 2fa.live falhou', { nome, error: (e && e.message) || String(e) });
+    return '';
+  } finally {
+    try { if (extra && !extra.isClosed()) await extra.close(); } catch {}
+    try { await page.bringToFront(); } catch {}
+  }
+}
+
 function readTotpSecret(man) {
   const raw = man && (man.totpSecret || man.twoFa || man.two_fa);
   const secret = normalizeSecret(raw);
@@ -638,11 +710,18 @@ async function markAuthField(page) {
     }
     const one = inputs.find((input) => {
       if (!vis(input)) return false;
+      const max = Number(input.getAttribute('maxlength') || 0);
+      if (max === 6 || max === 8) return true;
       const hint = `${input.getAttribute('aria-label') || ''} ${input.getAttribute('name') || ''} ${input.getAttribute('placeholder') || ''}`.toLowerCase();
       return hint.includes('code') || hint.includes('codigo') || hint.includes('código') || input.type === 'tel' || input.inputMode === 'numeric';
     });
     if (one) {
       one.setAttribute('data-cc-auth-code', 'one');
+      return 'one';
+    }
+    const texts = inputs.filter((input) => vis(input) && (input.type === 'text' || input.type === 'tel' || input.type === '' || !input.type));
+    if (texts.length === 1) {
+      texts[0].setAttribute('data-cc-auth-code', 'one');
       return 'one';
     }
     return '';
@@ -665,7 +744,7 @@ async function clickContinue(page) {
       }
       return el;
     }
-    const wanted = ['continuar', 'continue', 'confirmar', 'avancar'];
+    const wanted = ['continuar', 'continue', 'confirmar', 'confirm', 'avancar'];
     const nodes = Array.from(document.querySelectorAll('button, [role="button"], input[type="submit"], a, div, span'));
     const hits = [];
     for (const el of nodes) {
@@ -722,15 +801,17 @@ async function confirmAuthApp(page, nome) {
     logger.warn('[LOGIN][pc] pediu o app de autenticação e a conta não tem a chave. Paro. Não excluo.', { nome });
     return { ok: false, outcome: 'skipped', error: 'auth_app_no_secret' };
   }
+  let code = await codeFrom2faLive(page, secret, nome);
+  if (!/^\d{6}$/.test(code)) {
+    try { code = await freshTotp(secret); } catch { code = ''; }
+  }
+  if (!/^\d{6}$/.test(code)) return { ok: false, outcome: 'failed', error: 'auth_app_code_failed' };
   let kind = await markAuthField(page);
   if (!kind) {
     await sleep(800);
     kind = await markAuthField(page);
   }
   if (!kind) return { ok: false, outcome: 'failed', error: 'auth_app_code_failed' };
-  let code = '';
-  try { code = await freshTotp(secret); } catch { code = ''; }
-  if (!/^\d{6}$/.test(code)) return { ok: false, outcome: 'failed', error: 'auth_app_code_failed' };
   const typed = await fillAuthCode(page, code, kind);
   if (!typed) return { ok: false, outcome: 'failed', error: 'auth_app_code_failed' };
   try { await page.keyboard.press('Enter'); } catch {}
@@ -849,19 +930,26 @@ async function leaveOtherDeviceApproval(page, nome) {
 }
 
 async function passAuthenticatorCode(page, nome) {
-  const url = pageUrl(page);
-  const text = await pageText(page);
-  const asked = /\/two_factor\/|two_step_verification\/two_factor/i.test(url)
-    || text.includes('app de autenticacao')
-    || text.includes('authentication app')
-    || text.includes('aplicativo de autenticacao')
-    || text.includes('codigo de autenticacao');
-  if (!asked) return { asked: false, ok: true };
-  const auth = await confirmAuthApp(page, nome);
-  if (!auth || auth.ok === false) {
-    return { asked: true, ok: false, error: (auth && auth.error) || 'auth_app_code_failed' };
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const url = pageUrl(page);
+    const text = await pageText(page);
+    const asked = /\/two_factor\/|two_step_verification\/two_factor/i.test(url)
+      || text.includes('ir para o app de autenticacao')
+      || text.includes('app de autenticacao')
+      || text.includes('authentication app')
+      || text.includes('aplicativo de autenticacao')
+      || text.includes('codigo de autenticacao');
+    if (!asked) return { asked: attempt > 1, ok: true };
+    const auth = await confirmAuthApp(page, nome);
+    if (auth && auth.error === 'auth_app_no_secret') {
+      return { asked: true, ok: false, error: 'auth_app_no_secret' };
+    }
+    if (auth && auth.ok !== false) return { asked: true, ok: true };
+    if (attempt === 2 && await markAuthField(page)) {
+      return { asked: true, ok: false, error: (auth && auth.error) || 'auth_app_code_failed' };
+    }
   }
-  return { asked: true, ok: true };
+  return { asked: true, ok: false, error: 'auth_app_code_failed' };
 }
 
 async function clickTrustThisDevice(page, nome) {
