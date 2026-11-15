@@ -574,6 +574,15 @@ async function watchAndSolveLoginCheckbox(page, nome, user, pass) {
     nextIsV2 = false;
     purchases += 1;
     if (captchaBuyStop(solved && solved.error)) return { ok: false, reason: solved.error };
+    if (solved && solved.error === 'anticaptcha_timeout') {
+      if (reloaded || purchases >= 2) return { ok: false, reason: 'anticaptcha_timeout' };
+      reloaded = true;
+      require('./recaptchaEnterprisePage.js').recaptchaLog('warn', '[RECAPTCHA] tempo esgotado. Volto ao login e tento outra vez.', { nome: nome || '' });
+      const again = await typeAndSubmit();
+      if (!again.ok) return { ok: false, reason: again.error || 'login_submit_failed' };
+      if (await badLoginText(page)) return { ok: false, reason: 'login_not_accepted' };
+      continue;
+    }
     const landed = tokenLanded(solved);
     if (!landed) {
       if (!onAuthentication(pageUrl(page)) && !(await loginFormStillVisible(page))) {
