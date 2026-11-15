@@ -4163,6 +4163,153 @@ async function __deltaEnforceSidebarResetToTop(page, { threadKey = null, forensi
   return out;
 }
 
+function parseMessengerAgeLabel(label, nowMs = Date.now()) {
+  const raw = String(label || "").replace(/\s+/g, " ").trim();
+  if (!raw) return null;
+  let t = raw.toLowerCase();
+  try { t = raw.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase(); } catch (_) {}
+  t = t.replace(/^ha\s+/, "").trim();
+  const twelveMs = 12 * 60 * 60 * 1000;
+  const pack = (ageMs) => {
+    const age = Math.max(0, Number(ageMs) || 0);
+    const now = Number(nowMs) || Date.now();
+    return { ageMs: age, within12h: age <= twelveMs, messageAt: now - age };
+  };
+  if (t === "agora" || t === "now" || t === "hoje" || t === "today") return pack(0);
+  let m = t.match(/^(\d+)\s*min(utos?)?$/);
+  if (m) return pack(Number(m[1]) * 60 * 1000);
+  m = t.match(/^(\d+)\s*h(oras?)?$/);
+  if (m) return pack(Number(m[1]) * 60 * 60 * 1000);
+  m = t.match(/^(\d+)\s*d(ias?)?$/);
+  if (m) return pack(Number(m[1]) * 24 * 60 * 60 * 1000);
+  if (/^(\d+\s+)?(sem|semana|semanas|week|weeks|mes|meses|ano|anos|year|years)$/.test(t)) {
+    return pack(14 * 24 * 60 * 60 * 1000);
+  }
+  if (t === "ontem" || t === "yesterday") return pack(20 * 60 * 60 * 1000);
+  m = t.match(/^(\d{1,2}):(\d{2})$/);
+  if (m) {
+    const d = new Date(Number(nowMs) || Date.now());
+    d.setHours(Number(m[1]), Number(m[2]), 0, 0);
+    let at = d.getTime();
+    const now = Number(nowMs) || Date.now();
+    if (at > now + 2 * 60 * 1000) at -= 24 * 60 * 60 * 1000;
+    return pack(Math.max(0, now - at));
+  }
+  return null;
+}
+
+function pickMessengerAgeToken(blob) {
+  const lines = String(blob || "").split(/\n/).map((s) => s.replace(/\s+/g, " ").trim()).filter(Boolean);
+  const exact = /^(agora|now|hoje|today|ontem|yesterday|\d{1,2}:\d{2}|\d+\s*min|\d+\s*h|\d+\s*d|\d+\s*sem|\d+\s*semana|\d+\s*semanas)$/i;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (exact.test(lines[i])) return lines[i];
+  }
+  const m = String(blob || "").match(/(?:^|\s)(\d+\s*h|\d+\s*min|\d+\s*sem|\d+\s*d|ontem|agora)(?:\s|$)/i);
+  return m ? m[1] : "";
+}
+
+async function readLastConversationMessage(page, threadKey) {
+  const raw = await page.evaluate((tk) => {
+    function norm(s) {
+      try {
+        return String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+      } catch (_) {
+        return String(s || "").toLowerCase();
+      }
+    }
+    function isSystemLine(text) {
+      const t = norm(text).replace(/\s+/g, " ").trim();
+      if (!t) return true;
+      if (/\besta\s+aguardando\s+a\s+sua\s+resposta\b/.test(t)) return true;
+      if (/\bis\s+waiting\s+for\s+your\s+response\b/.test(t)) return true;
+      if (/\biniciou esta conversa\b/.test(t) || /\bstarted this conversation\b/.test(t)) return true;
+      if (/\bmudou a foto do grupo\b/.test(t) || /\bdeu o nome\b/.test(t)) return true;
+      if (t === "nenhuma conversa selecionada" || t === "no conversation selected") return true;
+      return false;
+    }
+    function isTimeLine(text) {
+      const t = String(text || "").replace(/\s+/g, " ").trim();
+      return /^(agora|now|hoje|today|ontem|yesterday|\d{1,2}:\d{2}|\d+\s*min|\d+\s*h|\d+\s*d|\d+\s*sem|\d+\s*semana|\d+\s*semanas)$/i.test(t);
+    }
+    const id = String(tk || "").trim();
+    const link = id
+      ? document.querySelector(`a[href*="/messages/t/${id}"], a[href*="/messages/e2ee/t/${id}"]`)
+      : null;
+    const current = document.querySelector('[aria-current="page"]');
+    const selectedRow = (link && link.closest && link.closest("[role='row']"))
+      || (current && current.closest ? current.closest("[role='row']") : null);
+    const ageBlob = selectedRow
+      ? `${selectedRow.innerText || ""}\n${selectedRow.getAttribute("aria-label") || ""}`
+      : "";
+
+    const grids = Array.from(document.querySelectorAll('[role="grid"]'));
+    let convo = null;
+    for (const g of grids) {
+      const links = g.querySelectorAll('a[href*="/messages/t/"],a[href*="/messages/e2ee/t/"]').length;
+      if (links >= 3) continue;
+      convo = g;
+    }
+    const root = convo || document.querySelector('[role="main"]') || document.body;
+    const rootRect = root.getBoundingClientRect();
+    const rows = Array.from(root.querySelectorAll('[role="row"]'));
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      const row = rows[i];
+      if (row.querySelector('a[href*="/messages/t/"],a[href*="/messages/e2ee/t/"]')) continue;
+      if (row.querySelector('[contenteditable="true"], [data-lexical-editor="true"]')) continue;
+      const bits = Array.from(row.querySelectorAll('[dir="auto"]'));
+      const text = (bits.length ? bits.map((el) => String(el.innerText || "").trim()).filter(Boolean).join(" ") : String(row.innerText || ""))
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!text || text.length > 1500) continue;
+      if (isSystemLine(text) || isTimeLine(text)) continue;
+      if (/^(aa|mensagem|message)$/i.test(norm(text))) continue;
+      const boxEl = bits.length ? bits[bits.length - 1] : row;
+      const box = boxEl.getBoundingClientRect();
+      const nearRight = rootRect.width > 80 && (rootRect.right - box.right) < 72 && box.width < rootRect.width * 0.92;
+      let aria = "";
+      let el = boxEl;
+      for (let up = 0; up < 6 && el; up += 1) {
+        aria += ` ${el.getAttribute ? (el.getAttribute("aria-label") || "") : ""}`;
+        el = el.parentElement;
+      }
+      const ariaN = norm(aria);
+      const prefixedMine = /^(voce|you)\s*:/i.test(norm(text));
+      const mine = prefixedMine || nearRight || ariaN.includes("voce enviou") || ariaN.includes("you sent");
+      return { text: text.slice(0, 1500), mine: !!mine, ageBlob };
+    }
+    const autos = Array.from(root.querySelectorAll('[dir="auto"]'));
+    const sideCut = Math.max(280, window.innerWidth * 0.34);
+    for (let i = autos.length - 1; i >= 0; i -= 1) {
+      const el = autos[i];
+      if (el.closest && el.closest('a[href*="/messages/t/"], a[href*="/messages/e2ee/t/"], [contenteditable="true"], [data-lexical-editor="true"]')) continue;
+      const text = String(el.innerText || "").replace(/\s+/g, " ").trim();
+      if (!text || text.length > 1500 || isSystemLine(text) || isTimeLine(text)) continue;
+      if (/^(aa|mensagem|message)$/i.test(norm(text))) continue;
+      const box = el.getBoundingClientRect();
+      if (box.width < 2 || box.height < 2 || box.left < sideCut) continue;
+      const nearRight = rootRect.width > 80 && (rootRect.right - box.right) < 72 && box.width < rootRect.width * 0.92;
+      const mine = /^(voce|you)\s*:/i.test(norm(text)) || nearRight;
+      return { text: text.slice(0, 1500), mine: !!mine, ageBlob };
+    }
+    return { text: "", mine: false, ageBlob };
+  }, String(threadKey || "")).catch(() => null);
+  if (!raw || typeof raw !== "object") return { ok: false, error: "read_failed" };
+  const text = String(raw.text || "").replace(/\s+/g, " ").trim();
+  const age = parseMessengerAgeLabel(pickMessengerAgeToken(raw.ageBlob));
+  if (!text) return { ok: true, empty: true, text: "", mine: false, within12h: false, messageAt: null };
+  // Hora lida e maior que 12h: não responde. Hora ilegível: a conversa já está aberta, responde.
+  const ageKnown = !!(age && Number.isFinite(age.ageMs));
+  return {
+    ok: true,
+    empty: false,
+    text,
+    mine: !!raw.mine,
+    within12h: ageKnown ? !!age.within12h : true,
+    messageAt: age ? age.messageAt : null,
+    ageMs: age ? age.ageMs : null,
+  };
+}
+
 async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSteps = 16, forensicAccountLogin = null } = {}) {
   const t = String(threadKey || "").trim();
   if (!t) throw new Error("thread_key_empty");
@@ -8374,6 +8521,40 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       return true;
     },
     enqueueDeltaReply,
+    enqueueReadWaitingThread: ({ thread_key } = {}) => {
+      return enqueue(async () => {
+        const tk = String(thread_key || "").trim();
+        if (!tk) return { ok: false, error: "thread_key_empty" };
+        if (!running) return { ok: false, error: "runtime_stopped" };
+        let opened = null;
+        try {
+          opened = await openThreadByClick(page, tk, { forensicAccountLogin: ACCOUNT_LOGIN });
+        } catch (e) {
+          return { ok: false, error: (e && e.message) ? String(e.message).slice(0, 180) : "open_failed" };
+        }
+        if (!opened || opened.ok !== true) {
+          return { ok: false, error: String((opened && opened.error) || "open_failed").slice(0, 180) };
+        }
+        try { await humanPause("domSettle", "waiting_read_after_open"); } catch (_) {}
+        const read = await readLastConversationMessage(page, tk);
+        if (!read || read.ok !== true) {
+          return { ok: false, error: String((read && read.error) || "read_failed").slice(0, 180) };
+        }
+        try {
+          logInfo(
+            `[virtusDelta][waiting_read] thread_key=${tk} empty=${read.empty ? "sim" : "nao"} mine=${read.mine ? "sim" : "nao"} within12h=${read.within12h ? "sim" : "nao"} chars=${String(read.text || "").length}`
+          );
+        } catch (_) {}
+        return {
+          ok: true,
+          empty: !!read.empty,
+          text: read.empty ? "" : String(read.text || ""),
+          mine: !!read.mine,
+          within12h: !!read.within12h,
+          message_at: read.messageAt || null,
+        };
+      });
+    },
     enqueueDeltaGreetingFlow,
     enqueueForceCollectLinkAndCity,
     stop: async () => {

@@ -28310,6 +28310,140 @@ function __deltaExtractWsMessageEvents(input, accountUserId = '') {
   walk(root, 'message');
   return out;
 }
+const __deltaWaitingReadQueue = new Map();
+const __deltaWaitingReadCooldown = new Map();
+const __deltaWaitingReadInject = new Map();
+const DELTA_WAITING_READ_OK_MS = 10 * 60 * 1000;
+const DELTA_WAITING_READ_FAIL_MS = 2 * 60 * 1000;
+
+function __deltaIsWaitingForReplyLine(line) {
+  const t = String(line || '').replace(/\s+/g, ' ').trim();
+  if (!t || t.length > 220) return false;
+  if (/\best[aá]\s+aguardando\s+a\s+sua\s+resposta\b/i.test(t)) return true;
+  if (/\bis\s+waiting\s+for\s+your\s+response\b/i.test(t)) return true;
+  return false;
+}
+
+function __deltaTextIsOnlyWaitingPrompt(texto) {
+  const lines = String(texto || '').split('\n').map((s) => s.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  if (!lines.length) return false;
+  return lines.every((line) => __deltaIsWaitingForReplyLine(line));
+}
+
+function __deltaWaitingReadCooldownOk(nome, threadKey) {
+  const key = `${nome}|${threadKey}`;
+  const prev = __deltaWaitingReadCooldown.get(key);
+  if (!prev) return true;
+  const wait = prev.fail ? DELTA_WAITING_READ_FAIL_MS : DELTA_WAITING_READ_OK_MS;
+  return (Date.now() - Number(prev.at || 0)) >= wait;
+}
+
+function __deltaMarkWaitingReadCooldown(nome, threadKey, fail) {
+  const key = `${nome}|${threadKey}`;
+  __deltaWaitingReadCooldown.set(key, { at: Date.now(), fail: !!fail });
+  if (__deltaWaitingReadCooldown.size > 500) {
+    const oldest = __deltaWaitingReadCooldown.keys().next().value;
+    if (oldest) __deltaWaitingReadCooldown.delete(oldest);
+  }
+}
+
+function __deltaScheduleWaitingThreadRead(nome, threadKey) {
+  const n = String(nome || '').trim();
+  const tk = String(threadKey || '').trim();
+  if (!n || !/^\d{12,20}$/.test(tk)) return;
+  if (isProfileHumanHeld(n)) return;
+  let q = __deltaWaitingReadQueue.get(n);
+  if (!q) {
+    q = { running: false, threads: [] };
+    __deltaWaitingReadQueue.set(n, q);
+  }
+  if (!q.threads.includes(tk)) q.threads.push(tk);
+  if (q.threads.length > 12) q.threads.splice(0, q.threads.length - 12);
+  if (q.running) return;
+  q.running = true;
+  setTimeout(() => { __deltaPumpWaitingRead(n).catch(() => {}); }, 0).unref?.();
+}
+
+async function __deltaPumpWaitingRead(nome) {
+  const n = String(nome || '').trim();
+  const q = __deltaWaitingReadQueue.get(n);
+  if (!q) return;
+  try {
+    while (q.threads.length) {
+      const tk = q.threads.shift();
+      if (!__deltaWaitingReadCooldownOk(n, tk)) continue;
+      if (isProfileHumanHeld(n)) {
+        __deltaMarkWaitingReadCooldown(n, tk, true);
+        continue;
+      }
+      const runner = await __deltaResolveVirtusRunner(n, { need: 'reply' });
+      if (!runner || typeof runner.enqueueReadWaitingThread !== 'function') {
+        __deltaMarkWaitingReadCooldown(n, tk, true);
+        continue;
+      }
+      const depth = Number(typeof runner.getQueueDepth === 'function' ? runner.getQueueDepth() : 0) || 0;
+      if (depth > 0) {
+        q.threads.unshift(tk);
+        await sleep(15000);
+        continue;
+      }
+      let out = null;
+      try {
+        out = await runner.enqueueReadWaitingThread({ thread_key: tk });
+      } catch (e) {
+        out = { ok: false, error: e && e.message ? String(e.message) : 'read_exception' };
+      }
+      if (!out || out.ok !== true) {
+        __deltaMarkWaitingReadCooldown(n, tk, true);
+        try {
+          logger.info('[DELTA][WAITING_READ] abertura falhou', {
+            nome: n,
+            thread_key: tk,
+            error: String((out && out.error) || 'read_failed').slice(0, 160)
+          });
+        } catch {}
+        continue;
+      }
+      __deltaMarkWaitingReadCooldown(n, tk, false);
+      if (out.empty || out.mine === true || out.within12h !== true || !String(out.text || '').trim()) {
+        try {
+          logger.info('[DELTA][WAITING_READ] sem resposta', {
+            nome: n,
+            thread_key: tk,
+            empty: !!out.empty,
+            mine: !!out.mine,
+            within12h: !!out.within12h,
+            chars: String(out.text || '').length
+          });
+        } catch {}
+        continue;
+      }
+      const inject = __deltaWaitingReadInject.get(n);
+      if (typeof inject !== 'function') continue;
+      try {
+        logger.info('[DELTA][WAITING_READ] ultima mensagem do cliente', {
+          nome: n,
+          thread_key: tk,
+          chars: String(out.text || '').length
+        });
+      } catch {}
+      try {
+        inject({
+          thread_key: tk,
+          message_text: String(out.text || '').trim(),
+          server_timestamp_ms: Date.now() + 1500
+        });
+      } catch {}
+    }
+  } finally {
+    q.running = false;
+    if (q.threads.length) {
+      q.running = true;
+      setTimeout(() => { __deltaPumpWaitingRead(n).catch(() => {}); }, 0).unref?.();
+    }
+  }
+}
+
 function __deltaIsFacebookSystemPromptLine(line) {
   const t = String(line || '').trim();
   if (!t) return false;
@@ -28862,6 +28996,9 @@ async function __deltaAttachCdpEar(nome, page) {
         const op = String(ev && (ev.operacao_meta || ev.operation) || '').trim();
         // let: precisa mutar após StripFacebookSystemPrompt (const quebrava com TypeError).
         let texto = String(__deltaDecodeEscapedText(String(ev && ev.message_text || '')) || '').trim();
+        if (threadKey && __deltaTextIsOnlyWaitingPrompt(texto)) {
+          try { __deltaScheduleWaitingThreadRead(nome, threadKey); } catch {}
+        }
         // Sensor forense 3: triagem final ingest → forensic_triagem.log (teto 10MB)
         try {
           if (DELTA_FORENSIC_FRAME) {
@@ -29073,6 +29210,7 @@ async function __deltaAttachCdpEar(nome, page) {
         const nowWindowRef = Date.now();
         const lookbackCutoffMs = nowWindowRef - DELTA_HISTORY_LOOKBACK_MS;
         const initAtMs = Number(accountHistState && accountHistState.initializedAtMs || 0) || 0;
+        const fromWaitingRead = String(transport || '') === 'waiting_read';
         const shouldSkipOutsideLookback = tsForWindow < lookbackCutoffMs;
         const shouldSkipFirstBootSeed = !!(
           accountHistState &&
@@ -29080,7 +29218,7 @@ async function __deltaAttachCdpEar(nome, page) {
           initAtMs > 0 &&
           tsForWindow <= (initAtMs + DELTA_FIRST_BOOT_BASELINE_GRACE_MS)
         );
-        if (shouldSkipOutsideLookback || shouldSkipFirstBootSeed) {
+        if (!fromWaitingRead && (shouldSkipOutsideLookback || shouldSkipFirstBootSeed)) {
           const skipReason = shouldSkipOutsideLookback
             ? 'outside_12h_lookback_window'
             : 'first_boot_seed_without_delta_history';
@@ -29134,6 +29272,9 @@ async function __deltaAttachCdpEar(nome, page) {
           continue;
         }
 
+        if (fromWaitingRead) {
+          try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey, { ensureHandsCompleted: true }); } catch {}
+        }
         const diskRow = __deltaReadThreadStateRowFromDiskSync(nome, threadKey);
         const diskCityRaw = String(diskRow && diskRow.city || '').trim();
         const diskCity = diskCityRaw || null;
@@ -29527,6 +29668,22 @@ async function __deltaAttachCdpEar(nome, page) {
       }
       return hadLead;
     };
+    __deltaWaitingReadInject.set(String(nome || ''), (ev) => {
+      try {
+        const tk = String(ev && ev.thread_key || '').trim();
+        const text = String(ev && ev.message_text || '').trim();
+        if (!tk || !text) return;
+        const messageId = `waiting_read_${crypto.createHash('sha1').update(`${nome}|${tk}|${text}`).digest('hex')}`;
+        ingestLeadEvents([{
+          operation: 'insertMessage',
+          operacao_meta: 'insertMessage',
+          thread_key: tk,
+          message_text: text,
+          message_id: messageId,
+          server_timestamp_ms: Number(ev && ev.server_timestamp_ms || 0) || (Date.now() + 1500)
+        }], { transport: 'waiting_read', sourceHint: 'waiting_for_reply_open' });
+      } catch {}
+    });
 
     const onWsCreated = (event) => {
       try {

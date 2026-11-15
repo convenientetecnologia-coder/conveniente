@@ -6434,17 +6434,20 @@ async function detectLoginRequired(page) {
         hasContinuarChooserBtn;
       const hasHumanConfirmText =
         bodyTxt.includes('confirme que voce e humano para usar sua conta') ||
-        bodyTxt.includes('confirme que voce e humano') && bodyTxt.includes('para usar sua conta') ||
+        bodyTxt.includes('confirme que voce e humano para usar seu perfil') ||
+        (bodyTxt.includes('confirme que voce e humano') && (bodyTxt.includes('para usar sua conta') || bodyTxt.includes('para usar seu perfil'))) ||
         bodyTxt.includes('confirm that you are human') ||
-        bodyTxt.includes('confirm you are human');
-      // Pre-screen: "confirme que você é humano para usar sua conta" + botão Continuar,
-      // mas ainda NÃO é o captcha (sem imagem/input/prompt).
+        bodyTxt.includes('confirm you are human') ||
+        bodyTxt.includes('confirm you are human to use your profile');
+      // Pre-screen: "confirme que você é humano para usar sua conta/seu perfil" + Continuar.
+      // Ainda não é o captcha de imagem. No /checkpoint/ um input solto não esconde a tela.
+      const onCheckpointUrl = /\/checkpoint\//i.test(path0);
       const hasHumanConfirmPreScreen =
         hasHumanConfirmText &&
         hasContinueBtn &&
         !hasCaptchaPromptText &&
         !hasCaptchaImg &&
-        !hasCaptchaInput;
+        (!hasCaptchaInput || onCheckpointUrl);
       const hasPersonaTextRaw =
         h1.some(t => t.includes('confirme que voce e uma pessoa') || t.includes('confirm that you are a person')) ||
         bodyTxt.includes('confirme que voce e uma pessoa') ||

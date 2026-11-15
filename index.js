@@ -2362,8 +2362,12 @@ function __edgeIsStaleDeltaReplyJunkSync(rec) {
   const isLocal = id.startsWith('local:') || cmid.startsWith('local:');
   if (isLocal) return { junk: true, reason: 'stale_local_cmd' };
   if (ts > 0 && ageMs > __EDGE_DELTA_REPLY_MAX_AGE_MS) {
-    // Servidor/navegador/mãos fora: espera até 24h. Não joga fora às 6h.
-    if (__edgeIsInfraWaitDeltaSendError(rec && rec.last_retry_error) && ageMs < 24 * 3600 * 1000) {
+    // Servidor fora, navegador fechado ou conta invocada: espera até 24h. Não joga fora às 6h.
+    const holdErr = String((rec && rec.last_retry_error) || '').trim().toLowerCase();
+    const waitingOnUs = __edgeIsInfraWaitDeltaSendError(holdErr)
+      || holdErr === 'human_control'
+      || holdErr === 'human_hold';
+    if (waitingOnUs && ageMs < 24 * 3600 * 1000) {
       return { junk: false, reason: '' };
     }
     return { junk: true, reason: 'stale_age_exceeded' };
