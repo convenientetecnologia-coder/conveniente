@@ -218,6 +218,49 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
+  app.get('/api/proxy-central/status', async (req, res) => {
+    const mode = require('./proxyMode').read();
+    const fail = (error) => res.json({
+      ok: mode !== 'gen',
+      mode,
+      configured: false,
+      proxies: [],
+      error
+    });
+    try {
+      const { readCtConfig, normalizeCtBaseUrl } = require('./ctConfig');
+      const cfg = readCtConfig();
+      let base = normalizeCtBaseUrl((cfg && cfg.ctBaseUrl) || process.env.CT_BASE_URL || process.env.CT_URL || '');
+      if (!base) base = 'https://painel.convenientetecnologia.com';
+      const secret = String((cfg && cfg.logIngestSecret) || process.env.LOG_INGEST_SECRET || '').trim();
+      let hostId = '';
+      try {
+        hostId = String(fs.readFileSync(path.join(__dirname, '..', 'dados', '.telemetry_hostid'), 'utf8') || '').trim();
+      } catch {}
+      if (!secret || !hostId) return fail('ct_config_missing');
+      const ac = new AbortController();
+      const timer = setTimeout(() => { try { ac.abort(); } catch {} }, 8000);
+      const resp = await fetch(String(base).replace(/\/+$/, '') + '/api/proxy-central/summary', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-log-secret': secret },
+        body: JSON.stringify({ hostId }),
+        signal: ac.signal
+      });
+      clearTimeout(timer);
+      const j = await resp.json().catch(() => null);
+      if (!resp.ok || !j || j.ok !== true) return fail('ct_unreachable');
+      const proxies = (Array.isArray(j.proxies) ? j.proxies : []).map((row) => ({
+        name: String(row && row.name || ''),
+        kind: String(row && row.kind || ''),
+        host: String(row && row.host || ''),
+        port: Number(row && row.port || 0) || 0
+      }));
+      return res.json({ ok: true, mode, configured: proxies.length > 0, proxies });
+    } catch {
+      return fail('ct_unreachable');
+    }
+  });
+
   app.get('/api/server-config', (req, res) => {
     try {
       const totalMemMB = serverConfig.getTotalMemMB();

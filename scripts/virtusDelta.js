@@ -337,7 +337,7 @@ function __deltaIsAllowedNavigationUrl(rawUrl) {
 
 function __deltaShouldDropHeavyChatAsset(page, request) {
   try {
-    if (!require("./phoneProxyMode").isEnabled()) return false;
+    if (require("./proxyMode").read() !== "phone") return false;
     const pageUrl = String(page && typeof page.url === "function" ? page.url() : "");
     if (!facebookNavHosts.isMessengerHeavyAssetSurface(pageUrl)) return false;
     const type = String(request && typeof request.resourceType === "function" ? request.resourceType() : "").toLowerCase();
@@ -509,7 +509,7 @@ async function __gotoWithBootInterlock(page, targetUrl, {
       requestHeld: false,
       holdMs,
       isEarReady: (typeof bootInterlockIsEarReady === "function") ? bootInterlockIsEarReady : null,
-      disableInterceptionAfterRelease: require("./phoneProxyMode").isEnabled() ? false : true,
+      disableInterceptionAfterRelease: require("./proxyMode").read() === "phone" ? false : true,
       matches: (requestUrl) => {
         try {
           if (!__isLikelyMessagesBootUrl(requestUrl)) return false;

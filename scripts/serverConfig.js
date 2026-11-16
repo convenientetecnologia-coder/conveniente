@@ -160,6 +160,7 @@ const DEFAULTS = Object.freeze({
   version: CONFIG_VERSION,
   updatedAt: 0,
   updatedBy: "default",
+  proxyMode: "",
   country: {
     id: COUNTRY_ID_DEFAULT
   },
@@ -848,6 +849,9 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
     logging: {
       silentConsole: logRaw.silentConsole !== false
     },
+    proxyMode: (String(r.proxyMode || "").trim() === "gen" || String(r.proxyMode || "").trim() === "phone")
+      ? String(r.proxyMode || "").trim()
+      : "",
     country: {
       id: countryPack.id,
       label: countryPack.label,
@@ -890,7 +894,7 @@ function validateServerConfigPayload(payload) {
     if (typeof p.pais === "string") return { id: p.pais };
     return null;
   })();
-  if (!cap && !robe && !mem && !net && !daily && !renew && !anuncio && !termClean && !log && !countryIn) {
+  if (!cap && !robe && !mem && !net && !daily && !renew && !anuncio && !termClean && !log && !countryIn && p.proxyMode === undefined) {
     return { ok: false, error: "payload_sem_campos_reconhecidos" };
   }
 
@@ -901,6 +905,10 @@ function validateServerConfigPayload(payload) {
   const existingRaw = (existingProbe.raw && typeof existingProbe.raw === "object") ? existingProbe.raw : {};
 
   const errors = [];
+  if (p.proxyMode !== undefined) {
+    const mode = String(p.proxyMode || "").trim();
+    if (mode && mode !== "gen" && mode !== "phone") errors.push("proxyMode_invalido");
+  }
   if (cap) {
     if (cap.mode !== undefined) {
       const mode = String(cap.mode || "").trim().toLowerCase();
@@ -1173,7 +1181,10 @@ function validateServerConfigPayload(payload) {
       ...DEFAULTS.country,
       ...(existingRaw.country && typeof existingRaw.country === "object" ? existingRaw.country : {}),
       ...(countryIn || {})
-    }
+    },
+    proxyMode: p.proxyMode !== undefined
+      ? String(p.proxyMode || "").trim()
+      : String(existingRaw.proxyMode || "").trim()
   };
   const normalized = buildNormalizedConfig(merged, {
     source: existingProbe.persisted ? "file" : "default"
@@ -1328,7 +1339,10 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
     },
     country: {
       id: v.normalized.country.id
-    }
+    },
+    proxyMode: v.normalized.proxyMode === "gen" || v.normalized.proxyMode === "phone"
+      ? v.normalized.proxyMode
+      : ""
   };
   try {
     writeJsonAtomic(CONFIG_PATH, next);

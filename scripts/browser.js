@@ -1288,17 +1288,32 @@ function _auditBlindar(event, extra) {
 }
 
 async function applyProxyAuthIfEnabled(page, nome) {
+  const mode = require('./proxyMode').read();
   try {
-    const held = require('./phoneProxyMode').heldAuth(nome);
-    if (held && held.username && held.password && typeof page.authenticate === 'function') {
-      await page.authenticate({
-        username: String(held.username),
-        password: String(held.password)
-      });
+    if (mode === 'phone') {
+      const held = require('./phoneProxyMode').heldAuth(nome);
+      if (held && held.username && held.password && typeof page.authenticate === 'function') {
+        await page.authenticate({
+          username: String(held.username),
+          password: String(held.password)
+        });
+        return { enabled: true };
+      }
+    }
+    if (mode === 'gen') {
+      let genHeld = require('./proxyGen').auth(nome);
+      if (!genHeld) genHeld = await require('./proxyGen').takeForLaunch(nome);
+      if (genHeld && genHeld.username && genHeld.password && typeof page.authenticate === 'function') {
+        await page.authenticate({
+          username: String(genHeld.username),
+          password: String(genHeld.password)
+        });
+      }
       return { enabled: true };
     }
   } catch (e) {
     if (String(e && e.message || '').indexOf('phone_proxy_required:') === 0) throw e;
+    if (mode === 'gen') throw e;
   }
   const manifest = await manifestStore.read(nome).catch(() => null);
   const resolved = gatewayProxy.resolveProxyForProfile({ profileName: nome, manifest: manifest || {} });
@@ -2591,23 +2606,26 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
   let browser = null;
   let pruneTimer = null;
   try {
-    let phoneBlock = '';
-    try { phoneBlock = require('./phoneProxyMode').blockReason(); } catch { phoneBlock = ''; }
-    if (phoneBlock) throw new Error(`phone_proxy_required:${phoneBlock}`);
+    const proxyMode = require('./proxyMode').read();
     let phoneLaunch = null;
-    try {
-      phoneLaunch = await require('./phoneProxyMode').takeForLaunch(nome, 'visit');
-    } catch (e) {
-      if (String(e && e.message || '').indexOf('phone_proxy_required:') === 0) throw e;
-      throw new Error('phone_proxy_required:lease_failed');
+    let genLaunch = null;
+    if (proxyMode === 'phone') {
+      try {
+        phoneLaunch = await require('./phoneProxyMode').resolveLaunch(nome, 'visit');
+      } catch (e) {
+        if (String(e && e.message || '').indexOf('phone_proxy_required:') === 0) throw e;
+        throw new Error('phone_proxy_required:lease_failed');
+      }
+    } else if (proxyMode === 'gen') {
+      genLaunch = await require('./proxyGen').takeForLaunch(nome);
     }
     const coords = resolvePatchCoordsForProfile(manifest && manifest.nome ? manifest.nome : nome, manifest);
-    const gatewayResolved = phoneLaunch ? null : gatewayProxy.resolveProxyForProfile({
+    const gatewayResolved = (phoneLaunch || genLaunch) ? null : gatewayProxy.resolveProxyForProfile({
       profileName: manifest && manifest.nome ? manifest.nome : nome,
       manifest
     });
     const strictGateway = gatewayProxy.isStrictProxyRequired();
-    if (!phoneLaunch && strictGateway && (!gatewayResolved || gatewayResolved.enabled !== true)) {
+    if (!phoneLaunch && !genLaunch && strictGateway && (!gatewayResolved || gatewayResolved.enabled !== true)) {
       const reason = String(gatewayResolved && gatewayResolved.reason || "proxy_unresolved").trim() || "proxy_unresolved";
       throw new Error(`gateway_proxy_required:${reason}`);
     }
@@ -2649,14 +2667,16 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     // FLAGS “OURO” ONLY! A lista mora em buildAccountChromeLaunchArgs (Virtus e Robe).
     const proxyServer = phoneLaunch
       ? String(phoneLaunch.proxyServer || '')
-      : ((gatewayResolved && gatewayResolved.enabled && gatewayResolved.proxyServer)
-        ? String(gatewayResolved.proxyServer)
-        : '');
+      : (genLaunch
+        ? String(genLaunch.proxyServer || '')
+        : ((gatewayResolved && gatewayResolved.enabled && gatewayResolved.proxyServer)
+          ? String(gatewayResolved.proxyServer)
+          : ''));
     try {
       require('./phoneProxyMode').note('phone_proxy_chrome', {
         nome: String(nome || ''),
-        via: phoneLaunch ? 'phone' : 'direct',
-        port: phoneLaunch ? Number(phoneLaunch.port || 0) : 0,
+        via: genLaunch ? 'gen' : (phoneLaunch && phoneLaunch.external ? 'static' : (phoneLaunch ? 'phone' : 'direct')),
+        port: genLaunch ? Number(genLaunch.port || 0) : (phoneLaunch ? Number(phoneLaunch.port || 0) : 0),
         proxyServer
       });
     } catch {}

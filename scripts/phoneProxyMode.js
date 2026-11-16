@@ -191,6 +191,55 @@ function startHold(cfg, session) {
   return req;
 }
 
+async function resolveLaunch(nome, purpose) {
+  const cfg = readConfig();
+  if (!cfg) return null;
+  const who = String(nome || '').trim();
+  if (!who) throw new Error('phone_proxy_required:missing_profile');
+  const prev = holds.get(who);
+  if (prev && !prev.external && prev.port) return takeForLaunch(nome, purpose);
+  if (prev && prev.external && prev.proxyServer) {
+    prev.refs += 1;
+    return {
+      proxyServer: prev.proxyServer,
+      host: prev.host,
+      port: prev.port,
+      username: prev.username,
+      password: prev.password,
+      external: true
+    };
+  }
+  let route = null;
+  try {
+    route = await postJson(httpBase(cfg.wsUrl) + '/api/phone-proxy/route', cfg.secret, { hostId: hostId() });
+  } catch {
+    route = null;
+  }
+  if (route && route.kind === 'static' && route.proxyServer) {
+    holds.set(who, {
+      host: String(route.host || ''),
+      port: Number(route.port) || 0,
+      username: String(route.username || ''),
+      password: String(route.password || ''),
+      refs: 1,
+      session: '',
+      holdReq: null,
+      external: true,
+      proxyServer: String(route.proxyServer)
+    });
+    note('proxy_static', { nome: who, via: 'static', id: String(route.id || ''), port: Number(route.port) || 0 });
+    return {
+      proxyServer: String(route.proxyServer),
+      host: String(route.host || ''),
+      port: Number(route.port) || 0,
+      username: String(route.username || ''),
+      password: String(route.password || ''),
+      external: true
+    };
+  }
+  return takeForLaunch(nome, purpose);
+}
+
 async function takeForLaunch(nome, purpose) {
   const cfg = readConfig();
   if (!cfg) return null;
@@ -273,8 +322,8 @@ async function takeForLaunch(nome, purpose) {
 
 function heldAuth(nome) {
   const row = holds.get(String(nome || '').trim());
-  if (!row || !row.username || !row.password) return null;
-  return { username: row.username, password: row.password, port: row.port };
+  if (!row || (!row.username && !row.password)) return null;
+  return { username: row.username || '', password: row.password || '', port: row.port };
 }
 
 async function release(nome) {
@@ -284,6 +333,10 @@ async function release(nome) {
   row.refs -= 1;
   if (row.refs > 0) return;
   holds.delete(who);
+  if (row.external) {
+    note('proxy_static_release', { nome: who });
+    return;
+  }
   try { if (row.holdReq) row.holdReq.destroy(); } catch {}
   note('phone_proxy_release', { nome: who, port: row.port });
   const cfg = readConfig();
@@ -304,6 +357,7 @@ module.exports = {
   note,
   writeEdgeState,
   blockReason,
+  resolveLaunch,
   takeForLaunch,
   heldAuth,
   release

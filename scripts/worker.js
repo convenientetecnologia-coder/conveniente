@@ -9038,7 +9038,7 @@ async function activateOnce(nome, source = '', operator = '') {
         return { ok: true };
       } catch (e) {
         const openErr = String((e && e.message) || e || '');
-        if (openErr.indexOf('phone_proxy_required:no_chair') === 0) {
+        if (openErr.indexOf('phone_proxy_required:no_chair') === 0 && require('./proxyMode').read() === 'phone') {
           try { await reportAction(nome, 'phone_queue', 'Sem cadeira agora. A abertura ficou na fila do painel e o Chrome não abriu.'); } catch {}
           logger.info('[WORKER][activateOnce] sem cadeira, ficou na fila', { nome, source });
           await _releaseOpenGrant('err');

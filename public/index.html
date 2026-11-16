@@ -512,6 +512,10 @@
         <div class="form-row">
           <label>Cidade</label>
           <select id="cidadeSel"></select>
+          <div class="pill" style="margin-top:8px; opacity:.9">
+            <span class="dot"></span>
+            <span>Isto é um pedido. O servidor abre na cidade da lista de trabalho dele. O Estoque fica com a cidade que nasceu.</span>
+          </div>
         </div>
         <div class="form-row">
           <label>Categoria</label>
@@ -685,12 +689,12 @@
             return;
           }
           msgEl.className = 'pill good';
-          msgEl.textContent = `Provisionamento enviado. Job=${res.jobId || '—'} Cmd=${res.commandId || '—'}`;
+          msgEl.textContent = 'Pedido enviado. A conta entra aqui quando o servidor terminar. Se o perfil não nascer, ela volta para o Estoque.';
           msgEl.style.display = 'inline-flex';
-          setTimeout(() => {
-            overlay.remove();
-            try { reloadPerfis(); } catch {}
-          }, 600);
+          setBtnLoading(confirmarBtn, false);
+          setDisabled(false);
+          confirmarBtn.disabled = true;
+          confirmarBtn.textContent = 'Enviado';
         } catch (e) {
           msgEl.className = 'pill bad';
           msgEl.textContent = 'Erro: ' + (e && e.message || e);
@@ -1350,6 +1354,7 @@
           <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="robe">Robe</button>
           <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="virtus">Virtus</button>
           <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="localizacao">Localização</button>
+          <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="proxy">Proxy</button>
         </div>
 
         <div class="srv-cfg-panel active" data-srv-cfg-panel="servidor">
@@ -1605,6 +1610,22 @@
           </div>
         </div>
 
+        <div class="srv-cfg-panel" data-srv-cfg-panel="proxy">
+          <div class="form-row">
+            <label>Modo do proxy</label>
+            <select id="srvProxyMode">
+              <option value="">Sem opção</option>
+              <option value="gen">Proxy gen</option>
+              <option value="phone">Convenienteproxy</option>
+            </select>
+            <div class="muted" style="margin-top:6px;">Sem opção, a conta abre como antes. Proxy gen usa os proxies marcados na central e a conta fica no mesmo. Convenienteproxy usa o celular e as cadeiras.</div>
+          </div>
+          <div class="form-row">
+            <div id="srvProxyState" class="pill info"><span class="dot"></span>Consultando o CT...</div>
+            <div id="srvProxyInfo" class="muted" style="margin-top:8px"></div>
+          </div>
+        </div>
+
         <div class="modal-actions">
           <button class="btn" id="srvCfgClose">Fechar</button>
           <button class="btn primary" id="srvCfgSave">Salvar</button>
@@ -1612,6 +1633,7 @@
       `;
       overlay.append(box);
       document.body.append(overlay);
+      let loadSrvProxyStatus = async function () {};
       (() => {
         const tabs = Array.from(box.querySelectorAll('[data-srv-cfg-tab]'));
         const panels = Array.from(box.querySelectorAll('[data-srv-cfg-panel]'));
@@ -1624,6 +1646,37 @@
           t.onclick = () => activateTab(t.getAttribute('data-srv-cfg-tab'));
         });
         activateTab('servidor');
+        const proxyState = box.querySelector('#srvProxyState');
+        const proxyInfo = box.querySelector('#srvProxyInfo');
+        loadSrvProxyStatus = async function () {
+          try {
+            const r = await fetch('/api/proxy-central/status');
+            const j = await r.json();
+            if (!proxyState) return;
+            const mode = String(j && j.mode || '');
+            if (mode !== 'gen') {
+              proxyState.innerHTML = '<span class="dot"></span>' + (mode === 'phone' ? 'convenienteproxy' : 'sem opção');
+              if (proxyInfo) proxyInfo.textContent = '';
+              return;
+            }
+            if (!j || j.ok !== true) {
+              proxyState.innerHTML = '<span class="dot"></span>Não consegui consultar o CT.';
+              if (proxyInfo) proxyInfo.textContent = '';
+              return;
+            }
+            if (j.configured !== true) {
+              proxyState.innerHTML = '<span class="dot"></span>desconectado';
+              if (proxyInfo) proxyInfo.textContent = '';
+              return;
+            }
+            proxyState.innerHTML = '<span class="dot"></span>conectado';
+            const names = (Array.isArray(j.proxies) ? j.proxies : []).map((p) => String(p && p.name || 'sem nome'));
+            if (proxyInfo) proxyInfo.textContent = names.join(', ');
+          } catch {
+            if (proxyState) proxyState.innerHTML = '<span class="dot"></span>Não consegui consultar o CT.';
+          }
+        };
+        loadSrvProxyStatus();
       })();
       const infoEl = box.querySelector('#serverCfgInfo');
       const cdMinEl = box.querySelector('#srvCooldownMin');
@@ -1835,6 +1888,11 @@
         if (netRotateMinEl) netRotateMinEl.value = Number(net.intervalMinMinutes || 300);
         if (netRotateMaxEl) netRotateMaxEl.value = Number(net.intervalMaxMinutes || 420);
         if (netRotateAttemptsEl) netRotateAttemptsEl.value = Number(net.maxAttemptsPerCycle || 5);
+        const proxyModeEl = box.querySelector('#srvProxyMode');
+        if (proxyModeEl) {
+          const savedMode = String(cfg && cfg.proxyMode || '').trim();
+          proxyModeEl.value = (savedMode === 'gen' || savedMode === 'phone') ? savedMode : '';
+        }
         if (dailyModeEl) {
           const mode = String(daily.executionMode || '').trim().toLowerCase();
           // renew_window_close_open foi removido: trata como fechar/abrir puro.
@@ -2255,7 +2313,9 @@
             await showSystemMessageModal({ title: 'RAM inválida', message: 'Pico provision: use entre 256 e 8192 MB.', tone: 'bad' });
             return;
           }
+          const proxyModeEl = box.querySelector('#srvProxyMode');
           const payload = {
+            proxyMode: String((proxyModeEl && proxyModeEl.value) || '').trim(),
             memory: {
               ...(workerDivisorSupported ? { workerRamDivisorGb } : {}),
               governorEnterMb,
@@ -2360,6 +2420,7 @@
           const partialFailureMsg = partialFailure
             ? ` Uma etapa secundária falhou depois da persistência (${String(r.error || 'erro desconhecido')}); a configuração acima não foi revertida.`
             : '';
+          try { await loadSrvProxyStatus(); } catch {}
           await showSystemMessageModal({
             title: (renewReplanFailed || partialFailure) ? 'Configuração salva com alerta' : 'Configuração salva',
             message: 'Configuração salva com sucesso. O novo intervalo de rotação passa a valer no próximo ciclo agendado.' + workerRestartMsg + renewReplanMsg + (() => {
