@@ -3819,6 +3819,34 @@ async function execSetCtConfig(cmd) {
 }
 
 // ===== NOVO: Config Groq (API key/model) via comando (persistente) =====
+async function execSetPhoneProxyMode(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const secret = String(payload.secret || '').trim();
+  const phones = (Array.isArray(payload.phones) ? payload.phones : []).map((p) => ({
+    id: String(p && p.id || '').trim(),
+    port: Number(p && p.port || 0) || 0,
+    username: String(p && p.username || '').trim(),
+    password: String(p && p.password || '')
+  })).filter((p) => p.id && p.port > 0 && p.port <= 65535 && p.username && p.password);
+  if (!secret || !phones.length) throw new Error('phone_proxy_mode_invalid');
+  const fs = require('fs');
+  const path = require('path');
+  const file = path.join(__dirname, '..', 'dados', 'phone_proxy_mode.json');
+  const body = JSON.stringify({
+    enabled: payload.enabled !== false,
+    secret,
+    wsUrl: String(payload.wsUrl || 'wss://api.convenientetecnologia.com/ws/phone-proxy').trim(),
+    phones
+  });
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, body, { mode: 0o600 });
+  fs.renameSync(tmp, file);
+  let started = false;
+  try { started = !!(require('./phoneProxyEdge').start() || {}).ok; } catch {}
+  return { ok: true, enabled: payload.enabled !== false, phones: phones.length, started };
+}
+
 async function execSetGroqConfig(cmd) {
   const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
   const groqApiKey = (payload.groqApiKey !== undefined) ? String(payload.groqApiKey || '').trim() : undefined;
@@ -4701,6 +4729,7 @@ const COMMAND_HANDLERS = Object.freeze({
   logs_manifest: execLogsManifest,
   health_bundle: execHealthBundle,
   set_ct_config: execSetCtConfig,
+  set_phone_proxy_mode: execSetPhoneProxyMode,
   set_groq_config: execSetGroqConfig,
   reseed_host_id: execReseedHostId,
   gateway_set_proxies: execGatewaySetProxies,
