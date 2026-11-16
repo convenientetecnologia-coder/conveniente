@@ -8,6 +8,7 @@ const https = require('https');
 // Modo do proxy 4G/5G. Sem o arquivo, o Chrome segue o fluxo atual.
 // Não lê túnel, gateway, ProxyCheap, ASocks nem Bright Data.
 const MODE_PATH = path.join(__dirname, '..', 'dados', 'phone_proxy_mode.json');
+const WAIT_PATH = path.join(__dirname, '..', 'dados', 'phone_proxy_wait.json');
 const EDGE_STATE_PATH = path.join(__dirname, '..', 'dados', 'phone_proxy_edge_state.json');
 const HOSTID_PATH = path.join(__dirname, '..', 'dados', '.telemetry_hostid');
 const DEFAULT_WS = 'wss://api.convenientetecnologia.com/ws/phone-proxy';
@@ -152,6 +153,44 @@ function localPhone(cfg, port) {
   return (cfg.phones || []).find((p) => p.port === Number(port)) || null;
 }
 
+function rememberWait(nome, purpose) {
+  let rows = [];
+  try { rows = JSON.parse(fs.readFileSync(WAIT_PATH, 'utf8')); } catch { rows = []; }
+  if (!Array.isArray(rows)) rows = [];
+  if (!rows.some((row) => row && row.nome === nome && row.purpose === purpose)) {
+    rows.push({ nome, purpose, at: Date.now() });
+  }
+  try { fs.writeFileSync(WAIT_PATH, JSON.stringify(rows)); } catch {}
+}
+
+function forgetWait(nome) {
+  let rows = [];
+  try { rows = JSON.parse(fs.readFileSync(WAIT_PATH, 'utf8')); } catch { return; }
+  if (!Array.isArray(rows)) return;
+  try { fs.writeFileSync(WAIT_PATH, JSON.stringify(rows.filter((row) => row && row.nome !== nome))); } catch {}
+}
+
+function startHold(cfg, session) {
+  const sess = String(session || '').trim();
+  if (!sess) return null;
+  let u;
+  try { u = new URL(httpBase(cfg.wsUrl) + '/api/phone-proxy/session/' + encodeURIComponent(sess) + '/hold'); }
+  catch { return null; }
+  const lib = u.protocol === 'https:' ? https : http;
+  const req = lib.request({
+    protocol: u.protocol,
+    hostname: u.hostname,
+    port: u.port || (u.protocol === 'https:' ? 443 : 80),
+    path: u.pathname,
+    method: 'GET',
+    headers: { 'x-phone-proxy-secret': String(cfg.secret || '') }
+  });
+  req.on('response', (res) => { res.on('data', () => {}); });
+  req.on('error', () => {});
+  req.end();
+  return req;
+}
+
 async function takeForLaunch(nome, purpose) {
   const cfg = readConfig();
   if (!cfg) return null;
@@ -177,26 +216,44 @@ async function takeForLaunch(nome, purpose) {
   }
   const secret = cfg.secret;
   const base = httpBase(cfg.wsUrl);
+  const kind = purpose === 'publish' ? 'publish' : 'visit';
+  const session = hostId() + '::' + who;
   const leased = await postJson(base + '/api/phone-proxy/lease', secret, {
     hostId: hostId(),
     profile: who,
-    purpose: purpose === 'publish' ? 'publish' : 'visit'
+    purpose: kind,
+    session
   });
-  if (!leased || leased.ok !== true || !leased.port) {
-    const why = String(leased && leased.error || 'no_chair');
-    note('phone_proxy_lease', { nome: who, purpose: purpose === 'publish' ? 'publish' : 'visit', via: 'phone', ok: false, error: why });
+  const denied = !leased || leased.ok !== true || !leased.port;
+  const noChair = !!(leased && (leased.status === 'no_chair' || leased.error === 'no_chair'));
+  if (denied) {
+    const why = noChair ? 'no_chair' : String((leased && leased.error) || 'lease_failed');
+    if (noChair) rememberWait(who, kind);
+    note('phone_proxy_lease', {
+      nome: who,
+      purpose: kind,
+      via: 'phone',
+      ok: false,
+      error: why,
+      queued: noChair || (leased && leased.queued === true),
+      position: leased && leased.position ? leased.position : null
+    });
     throw new Error('phone_proxy_required:' + why);
   }
   const phone = localPhone(cfg, leased.port);
   if (!phone) {
-    note('phone_proxy_lease', { nome: who, purpose: purpose === 'publish' ? 'publish' : 'visit', via: 'phone', ok: false, error: 'missing_password', port: Number(leased.port) });
+    note('phone_proxy_lease', { nome: who, purpose: kind, via: 'phone', ok: false, error: 'missing_password', port: Number(leased.port) });
+    try { await postJson(base + '/api/phone-proxy/release', secret, { hostId: hostId(), profile: who, session }); } catch {}
     throw new Error('phone_proxy_required:missing_password');
   }
+  forgetWait(who);
   holds.set(who, {
     port: phone.port,
     username: phone.username,
     password: phone.password,
-    refs: 1
+    refs: 1,
+    session: String(leased.session || session),
+    holdReq: kind === 'visit' ? startHold(cfg, String(leased.session || session)) : null
   });
   note('phone_proxy_lease', {
     nome: who,
@@ -227,13 +284,15 @@ async function release(nome) {
   row.refs -= 1;
   if (row.refs > 0) return;
   holds.delete(who);
+  try { if (row.holdReq) row.holdReq.destroy(); } catch {}
   note('phone_proxy_release', { nome: who, port: row.port });
   const cfg = readConfig();
   if (!cfg) return;
   try {
     await postJson(httpBase(cfg.wsUrl) + '/api/phone-proxy/release', cfg.secret, {
       hostId: hostId(),
-      profile: who
+      profile: who,
+      session: row.session || (hostId() + '::' + who)
     });
   } catch {}
 }

@@ -1,11 +1,9 @@
 'use strict';
 
-const crypto = require('crypto');
 const logger = require('./logger.js');
 const manifestStore = require('./manifestStore.js');
 const utils = require('./utils.js');
 
-const BASE32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 const LOGIN_URL = 'https://mbasic.facebook.com/login/';
 const HOME_URL = 'https://www.facebook.com/';
 const FBSBX = 'https://www.fbsbx.com/';
@@ -20,7 +18,7 @@ function pageUrl(page) {
 }
 
 function blockedSaveUrl(url) {
-  return /facebook\.com\/login|messenger\.com\/login|remember_browser|two_step_verification|\/two_factor\/|\/checkpoint\//i.test(String(url || ''));
+  return /facebook\.com\/login|messenger\.com\/login|remember_browser|two_step_verification|\/two_factor\/|\/checkpoint\/|\/auth_platform\//i.test(String(url || ''));
 }
 
 function stripCheckpointSrc(url) {
@@ -39,33 +37,6 @@ function normalizeSecret(secret) {
 
 function totpRemainingSec(nowMs = Date.now()) {
   return 30 - (Math.floor(Number(nowMs) / 1000) % 30);
-}
-
-function generateTotp(secret, nowMs = Date.now()) {
-  const cleaned = normalizeSecret(secret);
-  let bits = '';
-  for (const c of cleaned) {
-    const val = BASE32.indexOf(c);
-    if (val < 0) continue;
-    bits += val.toString(2).padStart(5, '0');
-  }
-  const bytes = [];
-  for (let i = 0; i + 8 <= bits.length; i += 8) bytes.push(parseInt(bits.slice(i, i + 8), 2));
-  const key = Buffer.from(bytes);
-  if (!key.length) throw new Error('totp_secret_invalid');
-  const counter = Math.floor(Number(nowMs) / 1000 / 30);
-  const buf = Buffer.alloc(8);
-  buf.writeUInt32BE(Math.floor(counter / 0x100000000), 0);
-  buf.writeUInt32BE(counter >>> 0, 4);
-  const hmac = crypto.createHmac('sha1', key).update(buf).digest();
-  const offset = hmac[hmac.length - 1] & 0x0f;
-  const bin = ((hmac[offset] & 0x7f) << 24) | ((hmac[offset + 1] & 0xff) << 16) | ((hmac[offset + 2] & 0xff) << 8) | (hmac[offset + 3] & 0xff);
-  return String(bin % 1000000).padStart(6, '0');
-}
-
-async function freshTotp(secret) {
-  if (totpRemainingSec() < 8) await sleep((totpRemainingSec() + 1) * 1000);
-  return generateTotp(secret);
 }
 
 function formatSecretGrouped(secret) {
@@ -90,7 +61,7 @@ async function codeFrom2faLive(page, secret, nome) {
     extra = await browser.newPage();
     try { await extra.bringToFront(); } catch {}
     await extra.goto('https://2fa.live/', { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await sleep(1600);
+    await extra.waitForSelector('#listToken, textarea.form-control', { timeout: 8000 }).catch(() => {});
     const pasted = await extra.evaluate((val) => {
       const box = document.querySelector('#listToken, textarea.form-control');
       if (!box) return false;
@@ -107,7 +78,7 @@ async function codeFrom2faLive(page, secret, nome) {
       logger.warn('[LOGIN][pc] 2fa.live: campo do segredo não apareceu', { nome });
       return '';
     }
-    await sleep(700);
+    await extra.waitForSelector('#submit, a[aria-label="Submit Form"]', { timeout: 3000 }).catch(() => {});
     const submitted = await extra.evaluate(() => {
       const btn = document.querySelector('#submit, a[aria-label="Submit Form"]');
       if (!btn) return false;
@@ -126,7 +97,7 @@ async function codeFrom2faLive(page, secret, nome) {
       }).catch(() => '');
       if (String(raw || '').indexOf('|') >= 0) code = extractSixDigitsAfterPipe(raw);
       if (code) break;
-      await sleep(400);
+      await sleep(150);
     }
     if (code) logger.info('[LOGIN][pc] 2fa.live devolveu o código', { nome });
     else logger.warn('[LOGIN][pc] 2fa.live não devolveu os 6 dígitos', { nome });
@@ -370,17 +341,22 @@ async function findLoginInputs(page) {
 }
 
 async function waitForLoginForm(page, nome) {
-  const until = Date.now() + 12000;
-  while (Date.now() < until) {
-    const found = await findLoginInputs(page);
-    if (found) return found;
-    if (await savedProfileOnly(page)) {
-      logger.info('[LOGIN][pc] só Continuar e Usar outro perfil. Clico em Usar outro perfil.', { nome });
-      await clickUseOtherProfile(page);
-    }
-    await sleep(400);
+  const emailSel = 'input[name="email"], input#email, input[type="email"], input[autocomplete="username"]';
+  const passSel = 'input[name="pass"], input#pass, input[type="password"]';
+  // Uma espera só. Várias leituras da página, enquanto ela pinta, travavam o Chrome.
+  try {
+    await page.waitForSelector(emailSel, { visible: true, timeout: 45000 });
+    await page.waitForSelector(passSel, { visible: true, timeout: 8000 });
+  } catch {}
+  let found = await findLoginInputs(page);
+  if (found) return found;
+  if (await savedProfileOnly(page)) {
+    logger.info('[LOGIN][pc] só Continuar e Usar outro perfil. Clico em Usar outro perfil.', { nome });
+    await clickUseOtherProfile(page);
+    try { await page.waitForSelector(emailSel, { visible: true, timeout: 20000 }); } catch {}
+    found = await findLoginInputs(page);
   }
-  return findLoginInputs(page);
+  return found || null;
 }
 
 async function feedOpened(page) {
@@ -550,21 +526,25 @@ async function boxIsOnScreen(page) {
 async function readSitekeyWithPatience(page, nome, attempt) {
   const enterprise = require('./recaptchaEnterprisePage.js');
   const fun = require('./funCaptchaPage.js');
+  // Rede do celular: o quadro do captcha chega depois do HTML. 6 segundos desistia cedo.
+  const until = Date.now() + 45000;
   let widget = null;
-  for (let i = 0; i < 4; i++) {
+  let read = 0;
+  while (Date.now() < until) {
     if (fun.captchaAlreadyLeftUrl(pageUrl(page)) && !(await fun.arkoseFramePresent(page))) return { left: true };
     widget = await readWidget(page);
+    read += 1;
     if (widget && widget.sitekey) return widget;
     enterprise.recaptchaLog('warn', '[RECAPTCHA] sem sitekey', {
       nome: nome || '',
       attempt,
-      read: i + 1,
+      read,
       source: (widget && widget.source) || 'missing',
       anchorPath: (widget && widget.anchorPath) || '',
       frames: (widget && widget.frames) || [],
       page: (widget && widget.websiteURL) || ''
     });
-    if (i < 3) await sleep(1500);
+    await sleep(3000);
   }
   if (fun.captchaAlreadyLeftUrl(pageUrl(page)) && !(await fun.arkoseFramePresent(page))) return { left: true };
   return widget;
@@ -694,6 +674,11 @@ async function watchAndSolveLoginCheckbox(page, nome, user, pass) {
         const fun = require('./funCaptchaPage.js');
         if (fun.captchaAlreadyLeftUrl(pageUrl(page)) && !(await fun.arkoseFramePresent(page))) {
           return { ok: true, skipped: true };
+        }
+        const urlNow = pageUrl(page);
+        if (onAuthentication(urlNow) || /two_step_verification/i.test(urlNow)) {
+          if (purchases >= 2) return { ok: false, reason: 'no_sitekey' };
+          continue;
         }
       }
       if (!onAuthentication(pageUrl(page)) && !(await loginFormStillVisible(page))) {
@@ -840,10 +825,7 @@ async function confirmAuthApp(page, nome) {
     logger.warn('[LOGIN][pc] pediu o app de autenticação e a conta não tem a chave. Paro. Não excluo.', { nome });
     return { ok: false, outcome: 'skipped', error: 'auth_app_no_secret' };
   }
-  let code = await codeFrom2faLive(page, secret, nome);
-  if (!/^\d{6}$/.test(code)) {
-    try { code = await freshTotp(secret); } catch { code = ''; }
-  }
+  const code = await codeFrom2faLive(page, secret, nome);
   if (!/^\d{6}$/.test(code)) return { ok: false, outcome: 'failed', error: 'auth_app_code_failed' };
   let kind = await markAuthField(page);
   if (!kind) {
@@ -916,24 +898,39 @@ async function clickLabeled(page, labels, { forbid = [] } = {}) {
 function otherDeviceApprovalText(text) {
   const t = String(text || '');
   return t.includes('verifique suas notificacoes')
+    || t.includes('verifique seu outro dispositivo')
+    || t.includes('abra a notificacao no seu outro dispositivo')
     || t.includes('aguardando aprovacao')
     || t.includes('notificacao em outro dispositivo')
+    || t.includes('notificacao no seu outro dispositivo')
     || t.includes('check your notifications')
+    || t.includes('check your other device')
     || t.includes('waiting for approval');
 }
 
+function verificationHoldUrl(url) {
+  return /two_step_verification|\/two_factor\/|\/auth_platform\//i.test(String(url || ''));
+}
+
 async function leaveOtherDeviceApproval(page, nome) {
-  const until = Date.now() + 8000;
+  const until = Date.now() + 20000;
   let otherDevice = false;
+  let lastUrl = '';
+  let stableSince = 0;
   while (Date.now() < until) {
     if (await markAuthField(page)) return { ok: true, skipped: true };
     const text = await pageText(page);
+    const url = pageUrl(page);
+    if (url !== lastUrl) {
+      lastUrl = url;
+      stableSince = Date.now();
+    }
+    const settled = stableSince && (Date.now() - stableSince) >= 1500;
     if (otherDeviceApprovalText(text)) {
       otherDevice = true;
-      break;
+      if (settled) break;
     }
-    const url = pageUrl(page);
-    if (!/two_factor|two_step_verification/i.test(url)) return { ok: true, skipped: true };
+    if (!verificationHoldUrl(url) && !otherDevice && settled) return { ok: true, skipped: true };
     await sleep(400);
   }
   if (await markAuthField(page)) return { ok: true, skipped: true };
@@ -947,7 +944,7 @@ async function leaveOtherDeviceApproval(page, nome) {
 
   const opened = await clickLabeled(page, ['tentar outra forma', 'try another way']);
   if (!opened) return { ok: false, error: 'other_device_no_switch' };
-  await sleep(800);
+  await sleep(1500);
 
   const picked = await clickLabeled(page, ['app de autenticacao', 'authentication app', 'authenticator app'], {
     forbid: ['notificacao em outro dispositivo', 'notification on another device', 'another device']
@@ -958,7 +955,7 @@ async function leaveOtherDeviceApproval(page, nome) {
   const continued = await clickContinue(page);
   if (!continued) return { ok: false, error: 'other_device_no_continue' };
 
-  const codeUntil = Date.now() + 8000;
+  const codeUntil = Date.now() + 15000;
   while (Date.now() < codeUntil) {
     if (await markAuthField(page)) {
       logger.info('[LOGIN][pc] saí da aprovação em outro aparelho e abri o app de autenticação.', { nome });
@@ -1028,6 +1025,9 @@ async function clickTrustButton(page) {
         const role = (cur.getAttribute && cur.getAttribute('role')) || '';
         const tag = (cur.tagName || '').toLowerCase();
         const text = n(cur.innerText || cur.getAttribute('aria-label') || '');
+        if (text === 'confiar neste dispositivo' || text === 'trust this device') {
+          if (tag === 'button' || tag === 'a' || role === 'button') return cur;
+        }
         if (text.indexOf('sempre confirmar') >= 0 || text.indexOf('always confirm') >= 0) break;
         if (text.indexOf('pular esta etapa') >= 0 || text.indexOf('skip this step') >= 0) break;
         if (tag === 'button' || tag === 'a' || role === 'button') return cur;
@@ -1061,7 +1061,7 @@ async function clickTrustButton(page) {
 }
 
 async function clickTrustThisDevice(page, nome) {
-  const until = Date.now() + 15000;
+  const until = Date.now() + 30000;
   let seen = false;
   while (Date.now() < until) {
     if (await isTrustScreen(page)) { seen = true; break; }

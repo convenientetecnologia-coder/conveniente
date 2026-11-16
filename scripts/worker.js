@@ -2219,6 +2219,64 @@ async function setLoginRemediateFailedFlag(nome, { reason = '', source = '', sta
   } catch {}
 }
 
+const LOGIN_ATTEMPT_MAX = 2;
+
+function loginFailureCanRetry(reason) {
+  const r = String(reason || '').toLowerCase();
+  return r === 'login_already_attempted'
+    || r === 'login_not_accepted'
+    || r === 'auth_app_code_failed'
+    || r === 'no_sitekey'
+    || r === 'recaptcha_failed'
+    || r === 'recaptcha_enterprise_failed'
+    || r === 'captcha_still_there'
+    || r === 'captcha_back_to_login'
+    || r === 'session_not_saved';
+}
+
+async function readLoginAttemptCount(nome) {
+  try {
+    const mem = robeMeta[nome] && robeMeta[nome].loginAttemptCount;
+    if (Number.isFinite(Number(mem))) return Number(mem) || 0;
+  } catch {}
+  const flags = await readAccountFlags(nome).catch(() => ({}));
+  const n = Number(flags && flags.loginAttemptCount || 0) || 0;
+  return n > 0 ? n : 0;
+}
+
+async function bumpLoginAttemptCount(nome) {
+  let next = 1;
+  await manifestStore.update(nome, (man) => {
+    man = man || {};
+    man.accountFlags = man.accountFlags || {};
+    next = (Number(man.accountFlags.loginAttemptCount || 0) || 0) + 1;
+    man.accountFlags.loginAttemptCount = next;
+    return man;
+  });
+  try { invalidateAccountFlagsCache(nome); } catch {}
+  robeMeta[nome] = robeMeta[nome] || {};
+  robeMeta[nome].loginAttemptCount = next;
+  return next;
+}
+
+async function stopLoginAfterBudget(nome, source) {
+  try {
+    await setLoginRequiredFlag(nome, { reason: 'login_attempt_budget', source: String(source || 'login') });
+  } catch {}
+  try {
+    await setLoginRemediateFailedFlag(nome, { reason: 'login_attempt_budget', source: String(source || 'login'), stage: 'budget' });
+  } catch {}
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'login_attempt_budget_stop',
+      nome: String(nome || ''),
+      source: String(source || '').slice(0, 80),
+      max: LOGIN_ATTEMPT_MAX
+    });
+  } catch {}
+}
+
 // ===== Human Overlay (HUD) =====
 // Objetivo: quando entrar em modo humano, mostrar painel fixo no navegador com nome/motivo/login/senha e botões (copiar/retomar).
 const HUMAN_OVERLAY_CFG = {
@@ -5157,6 +5215,11 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
         return { ok: true, state: 'whatsapp_confirm', reason: 'whatsapp_confirm' };
       }
     } catch {}
+    if (rr === 'trust_device' || /remember_browser/i.test(String((lr && lr.url) || ''))) {
+      const pcTrust = require('./pcSessionLogin.js');
+      try { await pcTrust.clickTrustThisDevice(pg, nome); } catch {}
+      return { ok: true, state: 'trust_device', reason: 'trust_device' };
+    }
     if (rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor')) {
       try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_two_factor', nome: String(nome||''), source: String(source||''), reason: rr.slice(0,160) }); } catch {}
       const pc = require('./pcSessionLogin.js');
@@ -6631,7 +6694,8 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
           man.accountFlags.loginRemediateFailedReason ||
           man.accountFlags.loginRemediateFailedSource ||
           man.accountFlags.loginRemediateFailedStage ||
-          man.accountFlags.loginRemediateFailedCount
+          man.accountFlags.loginRemediateFailedCount ||
+          man.accountFlags.loginAttemptCount
         ) {
           delete man.accountFlags.loginRemediateFailed;
           delete man.accountFlags.loginRemediateFailedAt;
@@ -6639,7 +6703,13 @@ async function clearAccountFlags(nome, which = ['loginRequired','banned']) {
           delete man.accountFlags.loginRemediateFailedSource;
           delete man.accountFlags.loginRemediateFailedStage;
           delete man.accountFlags.loginRemediateFailedCount;
+          delete man.accountFlags.loginAttemptCount;
         }
+        try {
+          robeMeta[nome] = robeMeta[nome] || {};
+          delete robeMeta[nome].loginAttemptCount;
+          delete robeMeta[nome].loginAttemptSucceeded;
+        } catch {}
       }
       if (which.includes('banned')) {
         if (man.accountFlags.banned || man.accountFlags.bannedAt || man.accountFlags.bannedReason || man.accountFlags.bannedText) {
@@ -8967,6 +9037,13 @@ async function activateOnce(nome, source = '', operator = '') {
 
         return { ok: true };
       } catch (e) {
+        const openErr = String((e && e.message) || e || '');
+        if (openErr.indexOf('phone_proxy_required:no_chair') === 0) {
+          try { await reportAction(nome, 'phone_queue', 'Sem cadeira agora. A abertura ficou na fila do painel e o Chrome não abriu.'); } catch {}
+          logger.info('[WORKER][activateOnce] sem cadeira, ficou na fila', { nome, source });
+          await _releaseOpenGrant('err');
+          return { ok: false, error: 'no_chair', queued: true };
+        }
         try {
           const st = readJsonFile(statusPath, null) || { perfis: [] };
           let found = false;
@@ -12505,6 +12582,16 @@ async function start_work({ nome, operator }) {
                 return { ok: false, error: 'whatsapp_confirm' };
               }
             } catch {}
+            if (rr === 'trust_device' || /remember_browser/i.test(String((lr && lr.url) || ''))) {
+              const pcTrust = require('./pcSessionLogin.js');
+              try { await pcTrust.clickTrustThisDevice(p0, nome); } catch {}
+              return { ok: false, error: 'trust_device' };
+            }
+            if (rr === 'auth_platform' || rr === 'login_wall' || rr === 'recaptcha_enterprise') {
+              try { await setLoginRequiredFlag(nome, { reason: rr, source: 'start_work_preflight' }); } catch {}
+              try { ctrl.trabalhando = false; } catch {}
+              return { ok: false, error: rr };
+            }
             if (rr.includes('two_factor') || rr.includes('2fa') || rr.includes('two factor')) {
               const pc = require('./pcSessionLogin.js');
               const man = await manifestStore.read(nome).catch(() => null);
@@ -14210,9 +14297,24 @@ const handlers = {
         try {
           await setLoginRequiredFlag(nome, { reason: why, source: 'login_remediate' });
         } catch {}
-        try {
-          await setLoginRemediateFailedFlag(nome, { reason: why, source: 'login_remediate', stage: 'failFast' });
-        } catch {}
+        const usedAttempts = await readLoginAttemptCount(nome);
+        const holdForRetry = loginFailureCanRetry(why) && usedAttempts < LOGIN_ATTEMPT_MAX;
+        if (!holdForRetry) {
+          try {
+            await setLoginRemediateFailedFlag(nome, { reason: why, source: 'login_remediate', stage: 'failFast' });
+          } catch {}
+        } else {
+          try {
+            provisionAudit.append({
+              ts: Date.now(),
+              event: 'login_attempt_retry_open',
+              nome: String(nome || ''),
+              reason: why.slice(0, 120),
+              used: usedAttempts,
+              max: LOGIN_ATTEMPT_MAX
+            });
+          } catch {}
+        }
         const shouldInvoke = /missing_credentials|login_requires_human|captcha|checkpoint|identity|aymh|continuar_failed|comecar_failed|login_failed|image_captcha_failed|login_drive_exhausted|login_screen_unknown/.test(whyLow);
         // Regra do usuário: invocar humano quando falha for certeira (ex.: missing_credentials/captcha).
         try {
@@ -14292,6 +14394,22 @@ const handlers = {
           } catch {}
         } catch {}
       };
+      const beginCredentialAttempt = async () => {
+        robeMeta[nome] = robeMeta[nome] || {};
+        if (robeMeta[nome].loginAttemptSucceeded === true) {
+          pushStep({ step: 'login_attempt_skip_already_in' });
+          return false;
+        }
+        const used = await readLoginAttemptCount(nome);
+        if (used >= LOGIN_ATTEMPT_MAX) {
+          pushStep({ step: 'login_attempt_budget_stop', used, max: LOGIN_ATTEMPT_MAX });
+          await stopLoginAfterBudget(nome, 'login_remediate');
+          return false;
+        }
+        const n = await bumpLoginAttemptCount(nome);
+        pushStep({ step: 'login_attempt_begin', n, max: LOGIN_ATTEMPT_MAX });
+        return true;
+      };
       // Importante: `pausedVirtus` e `prevConfigurando` precisam estar acessíveis no `finally`
       // (const dentro do try → ReferenceError no finally → configurando ficava TRUE para sempre).
       let pausedVirtus = []; // [{ nome, wasWorking }]
@@ -14364,9 +14482,14 @@ const handlers = {
       const passGate = manGate && (manGate.password || manGate.pass);
       const pagesNow = await ctrl.browser.pages().catch(() => []);
       const pSession = pagesNow && pagesNow[0];
-      if (ctrl.trabalhando) {
+      const hasFreshCreds = !!(pSession && String(loginGate || '').trim() && String(passGate || '').trim());
+      // Senha primeiro não pode pular a digitação só porque o arranque já marcou trabalhando.
+      if (ctrl.trabalhando && !(authMode === 'password_first' && hasFreshCreds)) {
         pushStep({ step: 'attempt1_inject_cookies_skipped', reason: 'already_posting' });
-      } else if (pSession && String(loginGate || '').trim() && String(passGate || '').trim()) {
+      } else if (hasFreshCreds) {
+        if (!(await beginCredentialAttempt())) {
+          return { ok: false, error: 'login_attempt_budget', steps, closedForRam, pausedVirtus };
+        }
         credentialAttempted = true;
         try {
           pushStep({ step: 'open_fresh_login' });
@@ -14400,11 +14523,14 @@ const handlers = {
       }
 
       // 5) validar loginRequired em TODAS as abas reais (sem “puxar” tudo para /marketplace)
+      // Senha primeiro: não varre as abas antes de o formulário existir. A digitação já foi a missão.
       let lrMessenger = null;
       let lrFacebook = null;
       let uiMessenger = null;
       let uiFacebook = null;
-      try {
+      if (authMode === 'password_first') {
+        pushStep({ step: 'password_first_skip_precheck', reason: 'wait_form_then_type' });
+      } else try {
         const pages = await ctrl.browser.pages().catch(()=>[]);
         const safeUrl = (pg) => { try { return (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { return ''; } };
         const pick = (pred) => {
@@ -14541,7 +14667,7 @@ const handlers = {
         if (pgLive && typeof browserHelper.classifyFacebookLoginSurface === 'function') {
           const surf = await browserHelper.classifyFacebookLoginSurface(pgLive).catch(() => null);
           const k = surf && surf.kind;
-          if (k === 'image_captcha' || k === 'continuar' || k === 'comecar' || k === 'password' || k === 'login_form' || k === 'auth_app' || k === 'enterprise_box' || k === 'hacked_stop') needsLogin = true;
+          if (!sessionRestored && (k === 'image_captcha' || k === 'continuar' || k === 'comecar' || k === 'password' || k === 'login_form' || k === 'auth_app' || k === 'enterprise_box' || k === 'hacked_stop')) needsLogin = true;
         }
       } catch {}
 
@@ -14606,6 +14732,9 @@ const handlers = {
             pushStep({ step: 'login_drive_skipped', reason: 'already_attemptCredentialRelogin' });
             await failFastToHuman('login_already_attempted');
             return { ok: false, error: 'login_already_attempted', steps, closedForRam, pausedVirtus };
+          }
+          if (!(await beginCredentialAttempt())) {
+            return { ok: false, error: 'login_attempt_budget', steps, closedForRam, pausedVirtus };
           }
           const driven = await withTimeout('loginFb', (async () => {
             const pc = require('./pcSessionLogin.js');
@@ -14794,6 +14923,14 @@ const handlers = {
 
       if (success) {
         pushStep({ step: 'login_remediate_success' });
+        try { await clearAccountFlags(nome, ['loginRemediateFailed', 'loginRequired']); } catch {}
+        try {
+          robeMeta[nome] = robeMeta[nome] || {};
+          delete robeMeta[nome].loginAttemptCount;
+          delete robeMeta[nome].loginRemediateFailed;
+          robeMeta[nome].loginAttemptSucceeded = true;
+          if (robeMeta[nome].autoLoginRemediate) robeMeta[nome].autoLoginRemediate.queued = false;
+        } catch {}
         // Conta nova (stock_provision): garantir Robe pausado 24h SEMPRE (110%).
         try {
           const isStockProvision = String(op || '').toLowerCase().startsWith('stock_provision');
@@ -18965,7 +19102,13 @@ async function autoLoginRemediateTick() {
     try { provisionAudit.append({ ts: Date.now(), event: 'auto_login_remediate_begin', nome, operator, reason: st.reason || null, source: st.source || null }); } catch {}
     try { await issues.append(nome, 'mil_action', `auto_login_remediate_begin reason=${st.reason||''} source=${st.source||''}`); } catch {}
 
-    const resp = await handlers.login_remediate({
+    const resp = await (async () => {
+      const used = await readLoginAttemptCount(nome);
+      if (used >= LOGIN_ATTEMPT_MAX) {
+        await stopLoginAfterBudget(nome, 'auto_login_remediate');
+        return { ok: false, error: 'login_attempt_budget' };
+      }
+      return handlers.login_remediate({
       nome,
       operator,
       options: {
@@ -18984,6 +19127,7 @@ async function autoLoginRemediateTick() {
         waitBusyMs: 120_000
       }
     });
+    })();
 
     st.lastDoneAt = Date.now();
     st.lastOk = !!(resp && resp.ok);
@@ -19483,6 +19627,38 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
     } catch {}
     if (!lr) lr = await browserHelper.detectLoginRequired(pg).catch(()=>({ loginRequired:false }));
     if (!lr || lr.loginRequired !== true) {
+      const hrefNow = String(safeUrl(pg) || '');
+      if (/remember_browser/i.test(hrefNow)) {
+        try {
+          const pcTrust = require('./pcSessionLogin.js');
+          await pcTrust.clickTrustThisDevice(pg, nome);
+        } catch {}
+        try {
+          provisionAudit.append({
+            ts: now,
+            event: 'human_reconcile_trust_device',
+            nome: String(nome || ''),
+            url: hrefNow.slice(0, 180)
+          });
+        } catch {}
+        return { ok: true, state: 'trust_device', reason: 'trust_device' };
+      }
+      if (/\/auth_platform\/|two_step_verification|\/two_factor\/|\/login\.php|\/login\/|\/checkpoint\//i.test(hrefNow) && !/remember_browser/i.test(hrefNow)) {
+        const reason = /auth_platform/i.test(hrefNow)
+          ? 'auth_platform'
+          : (/two_step_verification|\/two_factor\//i.test(hrefNow) ? 'two_factor' : 'login_wall');
+        try { await setLoginRequiredFlag(nome, { reason, source: String(source || 'reconcile_url') }); } catch {}
+        try {
+          provisionAudit.append({
+            ts: now,
+            event: 'human_reconcile_hold_verification',
+            nome: String(nome || ''),
+            reason,
+            url: hrefNow.slice(0, 180)
+          });
+        } catch {}
+        return { ok: true, state: 'login_required', reason };
+      }
       // Estado real mudou: browser está ok, mas flags antigas podem ter ficado presas (ex.: loginRemediateFailed).
       // Regra ultra enterprise: refletir a verdade da UI e destravar o autopiloto sem precisar de clique manual.
       let cleared = [];
@@ -19570,6 +19746,14 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
     // login_form: permitir liberar o sistema (política do cliente) com agendamento controlado
     // Blindagem: nunca agendar se reason carregar aymh (defesa em profundidade).
     if (rr.includes('login_form') && !rr.includes('aymh') && HUMAN_RECONCILE_CFG.allowScheduleLoginRemediate) {
+      const used = await readLoginAttemptCount(nome);
+      const flagsBudget = await readAccountFlags(nome).catch(() => ({}));
+      if (used >= LOGIN_ATTEMPT_MAX || (flagsBudget && flagsBudget.loginRemediateFailed === true)) {
+        if (!(flagsBudget && flagsBudget.loginRemediateFailed === true)) {
+          await stopLoginAfterBudget(nome, 'reconcile');
+        }
+        return { ok: true, state: 'login_attempt_budget', reason: 'login_attempt_budget' };
+      }
       const lastSch = Number(robeMeta[nome].humanReconcileLastScheduleAt || 0) || 0;
       if (!lastSch || (now - lastSch) >= HUMAN_RECONCILE_CFG.minIntervalScheduleMs) {
         robeMeta[nome].humanReconcileLastScheduleAt = now;
@@ -21117,6 +21301,14 @@ async function nurseTick() {
                 continue;
               }
             } catch {}
+            if (rr0 === 'trust_device' || /remember_browser/i.test(String((lr && lr.url) || ''))) {
+              const pcTrust = require('./pcSessionLogin.js');
+              const pgTrust = lrPage || p0;
+              if (pgTrust) {
+                try { await pcTrust.clickTrustThisDevice(pgTrust, nome); } catch {}
+              }
+              continue;
+            }
             if (rr0.includes('two_factor') || rr0.includes('2fa') || rr0.includes('two factor')) {
               try { await issues.append(nome, 'mil_action', `two_factor_detected_continue reason=${rr0}`); } catch {}
               const pc = require('./pcSessionLogin.js');

@@ -1109,25 +1109,27 @@ async function patchPage(nome, page, coords) {
     } catch {}
   });
 
-  // --- INJEÇÃO DO DISMISS AUTOMÁTICO DO OVERLAY "SUSPEITAMOS..." ---
-  try {
-    // Exponha como function para page
-    await page.exposeFunction('__dismissAutomationSuspect', () =>
-      dismissAutomationSuspect(page, nome).catch(()=>false)
-    );
-    // Injeta um scanner após DOMContentLoaded: tenta algumas vezes nas primeiras rodadas
-    await page.evaluateOnNewDocument(() => {
-      let rodadas = 0;
-      function tryDismiss(){
-        if (++rodadas > 8) return;
-        if (window.__dismissAutomationSuspect) {
-          window.__dismissAutomationSuspect().catch(()=>{});
+  // A varredura de "suspeitamos automação" fica desligada na abertura.
+  // Cada page.evaluate segurava o Chrome enquanto o Facebook ainda pintava.
+  const scanAutomationSuspectOnLoad = false;
+  if (scanAutomationSuspectOnLoad) {
+    try {
+      await page.exposeFunction('__dismissAutomationSuspect', () =>
+        dismissAutomationSuspect(page, nome).catch(()=>false)
+      );
+      await page.evaluateOnNewDocument(() => {
+        let rodadas = 0;
+        function tryDismiss(){
+          if (++rodadas > 8) return;
+          if (window.__dismissAutomationSuspect) {
+            window.__dismissAutomationSuspect().catch(()=>{});
+          }
+          setTimeout(tryDismiss, 900 + Math.floor(Math.random()*400));
         }
-        setTimeout(tryDismiss, 900 + Math.floor(Math.random()*400));
-      }
-      window.addEventListener('DOMContentLoaded', tryDismiss);
-    });
-  } catch {} // nunca deixa travar
+        window.addEventListener('DOMContentLoaded', tryDismiss);
+      });
+    } catch {}
+  }
 
   // GUARDA: Virtus Messenger asset interception (apenas Messenger, nunca Marketplace Create)
   const url = typeof page.url === "function" ? page.url() : "";
@@ -2376,6 +2378,10 @@ function installOneTabGuard(browser, nome, {
         let limOpt = (typeof maxPagesWhenAllow === 'function') ? Number(maxPagesWhenAllow()) : Number(maxPagesWhenAllow);
         if (!Number.isFinite(limOpt) || limOpt < 1) limOpt = 1;
         if (!Array.isArray(pages) || pages.length <= 1) return;
+        const readingCode = pages.some((p) => {
+          try { return /2fa\.live/i.test(String(p.url() || '')); } catch { return false; }
+        });
+        if (readingCode) return;
 
         const robeOn = !!(browser && browser._robeActiveFor);
         const coletaOn = !!(browser && browser._anuncioColetaHold);
@@ -6796,6 +6802,18 @@ async function detectLoginRequired(page) {
       };
     }
 
+    const wallEarly = String(path || '') + ' ' + String(hrefNorm || '');
+    if (/remember_browser/i.test(wallEarly)) {
+      return {
+        loginRequired: true,
+        reason: 'trust_device',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { path }
+      };
+    }
+
     // 2FA sempre vence (não dá para “contornar” em outra aba)
     if (hasTwoFactorText) {
       return {
@@ -6979,6 +6997,48 @@ async function detectLoginRequired(page) {
         url: (v && v.href0) ? String(v.href0) : href,
         title,
         evidence: { hasRoyal, hasInputs, hasPersonaText, hasCheckpointText, hasIdentityText, hasTwoFactorText, hasAppealSubmitted, path }
+      };
+    }
+
+    const wall = String(path || '') + ' ' + String(hrefNorm || '');
+    if (/\/auth_platform\//i.test(wall)) {
+      return {
+        loginRequired: true,
+        reason: 'auth_platform',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { path }
+      };
+    }
+    if (/remember_browser/i.test(wall)) {
+      return {
+        loginRequired: true,
+        reason: 'trust_device',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { path }
+      };
+    }
+    if (/two_step_verification|\/two_factor\//i.test(wall) && !/remember_browser/i.test(wall)) {
+      return {
+        loginRequired: true,
+        reason: 'two_factor',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { path }
+      };
+    }
+    if (/\/login\.php|\/login\/|\/checkpoint\//i.test(wall)) {
+      return {
+        loginRequired: true,
+        reason: 'login_wall',
+        domain,
+        url: (v && v.href0) ? String(v.href0) : href,
+        title,
+        evidence: { path }
       };
     }
 

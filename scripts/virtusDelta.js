@@ -318,6 +318,12 @@ function logDebug(...args) {
  * - messenger.com / www.messenger.com (landing [/e2ee]/t/)
  * - fbsbx.com / www.fbsbx.com SOMENTE /maw_proxy_page
  *   (XCometMessengerE2EEThreadController / XCometMessengerController)
+ * - fbsbx.com / www.fbsbx.com SOMENTE /captcha/recaptcha/iframe
+ *   (quadro do reCAPTCHA na verificação; o resto do host continua bloqueado)
+ * - www.google.com / www.recaptcha.net SOMENTE o documento do widget:
+ *   /recaptcha/enterprise/anchor, /recaptcha/enterprise/bframe,
+ *   /recaptcha/api2/anchor, /recaptcha/api2/bframe
+ *   (contas, busca e o resto do Google continuam bloqueados)
  *
  * Goto nosso continua www.facebook.com/messages; o host final é o Facebook.
  * Bloquear maw_proxy engessa E2EE: goto /messages/e2ee/t/... redireciona pra
@@ -327,6 +333,21 @@ function logDebug(...args) {
 const facebookNavHosts = require("./facebookNavHosts.js");
 function __deltaIsAllowedNavigationUrl(rawUrl) {
   return facebookNavHosts.isAllowedDeltaNavigationUrl(rawUrl);
+}
+
+function __deltaShouldDropHeavyChatAsset(page, request) {
+  try {
+    if (!require("./phoneProxyMode").isEnabled()) return false;
+    const pageUrl = String(page && typeof page.url === "function" ? page.url() : "");
+    if (!facebookNavHosts.isMessengerHeavyAssetSurface(pageUrl)) return false;
+    const type = String(request && typeof request.resourceType === "function" ? request.resourceType() : "").toLowerCase();
+    if (type !== "image" && type !== "media" && type !== "font") return false;
+    const assetUrl = String(request && typeof request.url === "function" ? request.url() : "");
+    if (/favicon\.ico|captcha|recaptcha/i.test(assetUrl)) return false;
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 function attachDeltaNavigationFirewall(page, { profileName = "" } = {}) {
@@ -349,6 +370,20 @@ function attachDeltaNavigationFirewall(page, { profileName = "" } = {}) {
       try {
         const isNav = !!(request && typeof request.isNavigationRequest === "function" && request.isNavigationRequest());
         if (!isNav) {
+          if (__deltaShouldDropHeavyChatAsset(page, request)) {
+            try {
+              page.__deltaHeavyDropCount = Number(page.__deltaHeavyDropCount || 0) + 1;
+              if (page.__deltaHeavyDropCount <= 5) {
+                let host = "";
+                try { host = new URL(String(request.url() || "")).hostname; } catch (_) {}
+                logInfo(
+                  `[DELTA_GUARD] chat_asset_drop profile=${String(profileName || "").trim() || "unknown"} type=${String(request.resourceType ? request.resourceType() : "")} host=${host} n=${page.__deltaHeavyDropCount}`
+                );
+              }
+            } catch (_) {}
+            request.abort("blockedbyclient").catch(() => {});
+            return;
+          }
           request.continue().catch(() => {});
           return;
         }
@@ -474,7 +509,7 @@ async function __gotoWithBootInterlock(page, targetUrl, {
       requestHeld: false,
       holdMs,
       isEarReady: (typeof bootInterlockIsEarReady === "function") ? bootInterlockIsEarReady : null,
-      disableInterceptionAfterRelease: true,
+      disableInterceptionAfterRelease: require("./phoneProxyMode").isEnabled() ? false : true,
       matches: (requestUrl) => {
         try {
           if (!__isLikelyMessagesBootUrl(requestUrl)) return false;
@@ -2019,6 +2054,10 @@ function startMarketplacePresenceEnforcer(page, { scope = "worker" } = {}) {
         return;
       }
 
+      if (/\/login|two_step_verification|\/two_factor\/|\/auth_platform\/|remember_browser|\/checkpoint\//i.test(currentUrl)) {
+        clearOutsideTimers(guard);
+        return;
+      }
       if (!currentUrl.includes("facebook.com/messages")) {
         const outsideSince = Number(guard.outsideMessagesSince || 0) || now;
         try {
