@@ -22,6 +22,10 @@ function isUp() {
     && readyPorts.size === expectedPorts;
 }
 
+function publish(up) {
+  try { mode.writeEdgeState(up === true, Array.from(readyPorts)); } catch {}
+}
+
 function send(type, id, body) {
   if (!ws || ws.readyState !== 1) return;
   const src = Buffer.isBuffer(body) ? body : Buffer.from(body || '');
@@ -57,6 +61,7 @@ function onFrame(frame) {
     const was = helloOk;
     helloOk = !!(hello && hello.ok === true && hello.role === 'edge');
     if (helloOk && !was) {
+      publish(true);
       try { mode.note('phone_proxy_edge', { up: true, ports: Array.from(readyPorts) }); } catch {}
     }
     return;
@@ -91,6 +96,7 @@ function listenPort(port) {
   server.on('error', () => {
     readyPorts.delete(port);
     helloOk = false;
+    publish(false);
     try { mode.note('phone_proxy_edge', { up: false, error: 'bind_fail', port }); } catch {}
   });
   server.listen(port, '127.0.0.1', () => { readyPorts.add(port); });
@@ -125,6 +131,7 @@ function connect(cfg) {
     const was = helloOk;
     helloOk = false;
     if (was) {
+      publish(false);
       try { mode.note('phone_proxy_edge', { up: false }); } catch {}
     }
     closeAllLocals();
@@ -141,9 +148,13 @@ function startWith(cfg) {
   if (servers.length) return { ok: true, already: true };
   stopping = false;
   expectedPorts = cfg.phones.length;
+  publish(false);
   for (const phone of cfg.phones) listenPort(phone.port);
   connect(cfg);
-  const ping = setInterval(() => { if (ws && ws.readyState === 1) send(5, 0, ''); }, 20000);
+  const ping = setInterval(() => {
+    if (ws && ws.readyState === 1) send(5, 0, '');
+    if (isUp()) publish(true);
+  }, 20000);
   if (ping.unref) ping.unref();
   return { ok: true };
 }

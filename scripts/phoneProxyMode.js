@@ -8,6 +8,7 @@ const https = require('https');
 // Modo do proxy 4G/5G. Sem o arquivo, o Chrome segue o fluxo atual.
 // Não lê túnel, gateway, ProxyCheap, ASocks nem Bright Data.
 const MODE_PATH = path.join(__dirname, '..', 'dados', 'phone_proxy_mode.json');
+const EDGE_STATE_PATH = path.join(__dirname, '..', 'dados', 'phone_proxy_edge_state.json');
 const HOSTID_PATH = path.join(__dirname, '..', 'dados', '.telemetry_hostid');
 const DEFAULT_WS = 'wss://api.convenientetecnologia.com/ws/phone-proxy';
 
@@ -64,12 +65,34 @@ function isEnabled() {
   return !!readConfig();
 }
 
+function writeEdgeState(up, ports) {
+  try {
+    fs.writeFileSync(EDGE_STATE_PATH, JSON.stringify({
+      up: up === true,
+      ts: Date.now(),
+      ports: Array.isArray(ports) ? ports : []
+    }));
+  } catch {}
+}
+
+function edgeStateFresh() {
+  try {
+    const j = JSON.parse(fs.readFileSync(EDGE_STATE_PATH, 'utf8'));
+    const age = Date.now() - Number(j && j.ts || 0);
+    return !!(j && j.up === true && age >= 0 && age < 45000 && Array.isArray(j.ports) && j.ports.length);
+  } catch {
+    return false;
+  }
+}
+
 function blockReason() {
   try {
     if (!isEnabled()) return '';
-    const edge = require('./phoneProxyEdge');
-    if (!edge.isUp()) return 'phone_pipe_down';
-    return '';
+    try {
+      if (require('./phoneProxyEdge').isUp()) return '';
+    } catch {}
+    if (edgeStateFresh()) return '';
+    return 'phone_pipe_down';
   } catch {
     return 'phone_pipe_down';
   }
@@ -220,6 +243,7 @@ module.exports = {
   isEnabled,
   inspect,
   note,
+  writeEdgeState,
   blockReason,
   takeForLaunch,
   heldAuth,
