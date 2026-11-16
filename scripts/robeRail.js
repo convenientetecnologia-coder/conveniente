@@ -135,7 +135,9 @@ function createSwitch() {
   return {
     listen,
     flip(next) { upstream = next || null; cut(); },
-    backToDirect() { upstream = null; cut(); },
+    phoneHop: null,
+    setPhoneHop(hop) { this.phoneHop = hop || null; if (this.phoneHop) upstream = this.phoneHop; },
+    backToDirect() { upstream = this.phoneHop || null; cut(); },
     bytesToProxy() { return bytesToProxy; },
     close() {
       cut();
@@ -373,6 +375,22 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
   let browser = null;
   let userDataDir = '';
   try {
+    let phoneBlock = '';
+    try { phoneBlock = require('./phoneProxyMode').blockReason(); } catch { phoneBlock = ''; }
+    if (phoneBlock) throw new Error(`phone_proxy_required:${phoneBlock}`);
+    let phoneLaunch = null;
+    try { phoneLaunch = await require('./phoneProxyMode').takeForLaunch(nome, 'publish'); } catch (e) {
+      if (String(e && e.message || '').indexOf('phone_proxy_required:') === 0) throw e;
+      throw new Error('phone_proxy_required:lease_failed');
+    }
+    if (phoneLaunch) {
+      rail.setPhoneHop({
+        host: '127.0.0.1',
+        port: phoneLaunch.port,
+        user: phoneLaunch.username,
+        pass: phoneLaunch.password
+      });
+    }
     const port = await rail.listen();
     const [live, storage] = await Promise.all([
       collectLiveCookies(liveBrowser),
@@ -422,6 +440,11 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
     const api = {
       browser,
       async armAndProve(page) {
+        try {
+          if (require('./phoneProxyMode').isEnabled()) {
+            return { ok: true, asn: '', country: '', ip: '', reason: 'phone_proxy' };
+          }
+        } catch {}
         const cfg = mobile.readSettings();
         if (!cfg.ready) return { ok: false, reason: 'no_credentials' };
         const exit = await mobile.acquireExit(cfg.user, cfg.password);
@@ -472,6 +495,7 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
         try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_direct' }); } catch {}
       },
       async destroy(opts) {
+        try { await require('./phoneProxyMode').release(nome); } catch {}
         const proc = browser && browser.process ? browser.process() : null;
         const pid = proc && proc.pid;
         const killFirst = !!(opts && opts.killFirst);
@@ -489,6 +513,7 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
     browser.__ctRobeRail = api;
     return api;
   } catch (e) {
+    try { await require('./phoneProxyMode').release(nome); } catch {}
     try { if (browser) await browser.close(); } catch {}
     try {
       const proc = browser && browser.process ? browser.process() : null;

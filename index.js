@@ -5018,6 +5018,12 @@ function wipeStaleCellsBeforeListen() {
       require('./scripts/orphanReaper.js').reapCloudflaredOrphans({ reason: 'index_boot' })
     ).catch(() => {});
   } catch {}
+  try {
+    const phoneMode = require('./scripts/phoneProxyMode');
+    if (phoneMode.isEnabled() === true) phoneMode && require('./scripts/phoneProxyEdge').start();
+  } catch (e) {
+    try { logger.warn('[phone-proxy] edge nao armou', { error: (e && e.message) || String(e) }); } catch {}
+  }
 
   httpServer = await new Promise((resolve, reject) => {
     const srv = app.listen(PORT, '127.0.0.1', () => {

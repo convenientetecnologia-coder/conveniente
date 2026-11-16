@@ -1286,6 +1286,18 @@ function _auditBlindar(event, extra) {
 }
 
 async function applyProxyAuthIfEnabled(page, nome) {
+  try {
+    const held = require('./phoneProxyMode').heldAuth(nome);
+    if (held && held.username && held.password && typeof page.authenticate === 'function') {
+      await page.authenticate({
+        username: String(held.username),
+        password: String(held.password)
+      });
+      return { enabled: true };
+    }
+  } catch (e) {
+    if (String(e && e.message || '').indexOf('phone_proxy_required:') === 0) throw e;
+  }
   const manifest = await manifestStore.read(nome).catch(() => null);
   const resolved = gatewayProxy.resolveProxyForProfile({ profileName: nome, manifest: manifest || {} });
   if (gatewayProxy.isStrictProxyRequired() && (!resolved || resolved.enabled !== true)) {
@@ -2573,13 +2585,23 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
   let browser = null;
   let pruneTimer = null;
   try {
+    let phoneBlock = '';
+    try { phoneBlock = require('./phoneProxyMode').blockReason(); } catch { phoneBlock = ''; }
+    if (phoneBlock) throw new Error(`phone_proxy_required:${phoneBlock}`);
+    let phoneLaunch = null;
+    try {
+      phoneLaunch = await require('./phoneProxyMode').takeForLaunch(nome, 'visit');
+    } catch (e) {
+      if (String(e && e.message || '').indexOf('phone_proxy_required:') === 0) throw e;
+      throw new Error('phone_proxy_required:lease_failed');
+    }
     const coords = resolvePatchCoordsForProfile(manifest && manifest.nome ? manifest.nome : nome, manifest);
-    const gatewayResolved = gatewayProxy.resolveProxyForProfile({
+    const gatewayResolved = phoneLaunch ? null : gatewayProxy.resolveProxyForProfile({
       profileName: manifest && manifest.nome ? manifest.nome : nome,
       manifest
     });
     const strictGateway = gatewayProxy.isStrictProxyRequired();
-    if (strictGateway && (!gatewayResolved || gatewayResolved.enabled !== true)) {
+    if (!phoneLaunch && strictGateway && (!gatewayResolved || gatewayResolved.enabled !== true)) {
       const reason = String(gatewayResolved && gatewayResolved.reason || "proxy_unresolved").trim() || "proxy_unresolved";
       throw new Error(`gateway_proxy_required:${reason}`);
     }
@@ -2619,9 +2641,11 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try { if (fs.existsSync(chromeLogFile)) fs.unlinkSync(chromeLogFile); } catch {}
 
     // FLAGS “OURO” ONLY! A lista mora em buildAccountChromeLaunchArgs (Virtus e Robe).
-    const proxyServer = (gatewayResolved && gatewayResolved.enabled && gatewayResolved.proxyServer)
-      ? String(gatewayResolved.proxyServer)
-      : '';
+    const proxyServer = phoneLaunch
+      ? String(phoneLaunch.proxyServer || '')
+      : ((gatewayResolved && gatewayResolved.enabled && gatewayResolved.proxyServer)
+        ? String(gatewayResolved.proxyServer)
+        : '');
     const launchArgs = buildAccountChromeLaunchArgs(proxyServer);
     if (proxyServer) {
       try { require('./connectLane.js').markArmed(true, 'proxy_launch'); } catch {}
@@ -2795,6 +2819,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     return browser;
   } catch (err) {
     try { await safeCloseBrowser(browser); } catch {}
+    try { await require('./phoneProxyMode').release(nome); } catch {}
     logger.error('[BROWSER][ERRO FATAL ao abrir Puppeteer/browser]', {}, err);
     throw err;
   }
