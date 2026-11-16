@@ -54,7 +54,11 @@ function onFrame(frame) {
   if (frame.type === 1 && frame.id === 0) {
     let hello = null;
     try { hello = JSON.parse(frame.body.toString('utf8')); } catch {}
+    const was = helloOk;
     helloOk = !!(hello && hello.ok === true && hello.role === 'edge');
+    if (helloOk && !was) {
+      try { mode.note('phone_proxy_edge', { up: true, ports: Array.from(readyPorts) }); } catch {}
+    }
     return;
   }
   if (frame.type === 6) return;
@@ -84,7 +88,11 @@ function attachSocket(sock, port) {
 
 function listenPort(port) {
   const server = net.createServer((sock) => attachSocket(sock, port));
-  server.on('error', () => { readyPorts.delete(port); helloOk = false; });
+  server.on('error', () => {
+    readyPorts.delete(port);
+    helloOk = false;
+    try { mode.note('phone_proxy_edge', { up: false, error: 'bind_fail', port }); } catch {}
+  });
   server.listen(port, '127.0.0.1', () => { readyPorts.add(port); });
   servers.push(server);
 }
@@ -114,7 +122,11 @@ function connect(cfg) {
   });
   socket.on('message', (data) => onFrame(unpack(data)));
   socket.on('close', () => {
+    const was = helloOk;
     helloOk = false;
+    if (was) {
+      try { mode.note('phone_proxy_edge', { up: false }); } catch {}
+    }
     closeAllLocals();
     if (ws === socket) ws = null;
     scheduleReconnect(cfg);

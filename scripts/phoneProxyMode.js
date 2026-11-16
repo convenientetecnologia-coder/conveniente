@@ -13,24 +13,51 @@ const DEFAULT_WS = 'wss://api.convenientetecnologia.com/ws/phone-proxy';
 
 const holds = new Map();
 
-function readConfig() {
+function load() {
+  if (!fs.existsSync(MODE_PATH)) return { error: 'no_file' };
+  let j;
   try {
-    if (!fs.existsSync(MODE_PATH)) return null;
-    const j = JSON.parse(fs.readFileSync(MODE_PATH, 'utf8'));
-    if (!j || j.enabled !== true) return null;
-    const secret = String(j.secret || '').trim();
-    const wsUrl = String(j.wsUrl || DEFAULT_WS).trim() || DEFAULT_WS;
-    const phones = (Array.isArray(j.phones) ? j.phones : []).map((p) => ({
-      id: String(p && p.id || '').trim(),
-      port: Number(p && p.port || 0) || 0,
-      username: String(p && p.username || p && p.id || '').trim(),
-      password: String(p && p.password || '')
-    })).filter((p) => p.port > 0 && p.port <= 65535 && p.username && p.password);
-    if (!secret || !phones.length) return null;
-    return { enabled: true, secret, wsUrl, phones };
+    const raw = String(fs.readFileSync(MODE_PATH, 'utf8') || '').replace(/^\uFEFF/, '');
+    j = JSON.parse(raw);
   } catch {
-    return null;
+    return { error: 'bad_json' };
   }
+  if (!j || j.enabled !== true) return { error: 'disabled' };
+  const secret = String(j.secret || '').trim();
+  const wsUrl = String(j.wsUrl || DEFAULT_WS).trim() || DEFAULT_WS;
+  const phones = (Array.isArray(j.phones) ? j.phones : []).map((p) => ({
+    id: String(p && p.id || '').trim(),
+    port: Number(p && p.port || 0) || 0,
+    username: String(p && p.username || p && p.id || '').trim(),
+    password: String(p && p.password || '')
+  })).filter((p) => p.port > 0 && p.port <= 65535 && p.username && p.password);
+  if (!secret) return { error: 'missing_secret' };
+  if (!phones.length) return { error: 'missing_phones' };
+  return { cfg: { enabled: true, secret, wsUrl, phones } };
+}
+
+function readConfig() {
+  return load().cfg || null;
+}
+
+function inspect() {
+  const x = load();
+  const phones = x.cfg ? x.cfg.phones : [];
+  return {
+    enabled: !!x.cfg,
+    reason: x.cfg ? 'ok' : x.error,
+    ports: phones.map((p) => p.port)
+  };
+}
+
+function note(event, extra) {
+  try {
+    const row = Object.assign({ event: String(event || 'phone_proxy') }, extra || {});
+    delete row.password;
+    delete row.secret;
+    delete row.username;
+    require('./provisionAudit').append(row);
+  } catch {}
 }
 
 function isEnabled() {
@@ -110,8 +137,10 @@ async function takeForLaunch(nome, purpose) {
     const err = new Error('phone_proxy_required:missing_profile');
     throw err;
   }
-  if (blockReason()) {
-    throw new Error('phone_proxy_required:' + blockReason());
+  const blocked = blockReason();
+  if (blocked) {
+    note('phone_proxy_lease', { nome: who, purpose: purpose === 'publish' ? 'publish' : 'visit', via: 'phone', ok: false, error: blocked });
+    throw new Error('phone_proxy_required:' + blocked);
   }
   const prev = holds.get(who);
   if (prev && prev.port) {
@@ -131,15 +160,28 @@ async function takeForLaunch(nome, purpose) {
     purpose: purpose === 'publish' ? 'publish' : 'visit'
   });
   if (!leased || leased.ok !== true || !leased.port) {
-    throw new Error('phone_proxy_required:' + String(leased && leased.error || 'no_chair'));
+    const why = String(leased && leased.error || 'no_chair');
+    note('phone_proxy_lease', { nome: who, purpose: purpose === 'publish' ? 'publish' : 'visit', via: 'phone', ok: false, error: why });
+    throw new Error('phone_proxy_required:' + why);
   }
   const phone = localPhone(cfg, leased.port);
-  if (!phone) throw new Error('phone_proxy_required:missing_password');
+  if (!phone) {
+    note('phone_proxy_lease', { nome: who, purpose: purpose === 'publish' ? 'publish' : 'visit', via: 'phone', ok: false, error: 'missing_password', port: Number(leased.port) });
+    throw new Error('phone_proxy_required:missing_password');
+  }
   holds.set(who, {
     port: phone.port,
     username: phone.username,
     password: phone.password,
     refs: 1
+  });
+  note('phone_proxy_lease', {
+    nome: who,
+    purpose: purpose === 'publish' ? 'publish' : 'visit',
+    via: 'phone',
+    ok: true,
+    port: phone.port,
+    id: phone.id || ''
   });
   return {
     proxyServer: `http://127.0.0.1:${phone.port}`,
@@ -162,6 +204,7 @@ async function release(nome) {
   row.refs -= 1;
   if (row.refs > 0) return;
   holds.delete(who);
+  note('phone_proxy_release', { nome: who, port: row.port });
   const cfg = readConfig();
   if (!cfg) return;
   try {
@@ -175,6 +218,8 @@ async function release(nome) {
 module.exports = {
   readConfig,
   isEnabled,
+  inspect,
+  note,
   blockReason,
   takeForLaunch,
   heldAuth,

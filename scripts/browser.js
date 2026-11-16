@@ -2646,6 +2646,14 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       : ((gatewayResolved && gatewayResolved.enabled && gatewayResolved.proxyServer)
         ? String(gatewayResolved.proxyServer)
         : '');
+    try {
+      require('./phoneProxyMode').note('phone_proxy_chrome', {
+        nome: String(nome || ''),
+        via: phoneLaunch ? 'phone' : 'direct',
+        port: phoneLaunch ? Number(phoneLaunch.port || 0) : 0,
+        proxyServer
+      });
+    } catch {}
     const launchArgs = buildAccountChromeLaunchArgs(proxyServer);
     if (proxyServer) {
       try { require('./connectLane.js').markArmed(true, 'proxy_launch'); } catch {}

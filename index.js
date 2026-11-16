@@ -5020,7 +5020,18 @@ function wipeStaleCellsBeforeListen() {
   } catch {}
   try {
     const phoneMode = require('./scripts/phoneProxyMode');
-    if (phoneMode.isEnabled() === true) phoneMode && require('./scripts/phoneProxyEdge').start();
+    const look = phoneMode.inspect();
+    let edge = 'off';
+    if (look.enabled === true) {
+      const started = require('./scripts/phoneProxyEdge').start();
+      edge = started && started.ok ? 'started' : String(started && started.reason || 'fail');
+    }
+    phoneMode.note('phone_proxy_boot', {
+      enabled: look.enabled === true,
+      reason: look.reason,
+      ports: look.ports,
+      edge
+    });
   } catch (e) {
     try { logger.warn('[phone-proxy] edge nao armou', { error: (e && e.message) || String(e) }); } catch {}
   }
