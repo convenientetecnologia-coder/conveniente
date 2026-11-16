@@ -4491,6 +4491,7 @@ async function applyCommands(cmds = []) {
         });
       }
       else if (c.type === 'set_groq_config')  { details = await execSetGroqConfig(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
+      else if (c.type === 'set_phone_proxy_mode') { details = await execSetPhoneProxyMode(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
       else if (c.type === 'reseed_host_id')   { details = await execReseedHostId(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
       else if (c.type === 'gateway_set_proxies' || c.type === 'gateway_reconcile') { details = await execGatewaySetProxies(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
       else if (c.type === 'force_full_report') {
