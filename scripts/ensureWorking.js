@@ -43,6 +43,7 @@ function classifyEnsureWorking(input = {}) {
   if (input.wantHumanHold === true) return { action: "skip", reason: "human_hold" };
   if (input.humanControl === true) return { action: "skip", reason: "human_control" };
   if (input.configurando === true) return { action: "skip", reason: "configurando" };
+  if (input.awaitingPhoneCadastro === true) return { action: "skip", reason: "cadastro_aguardando" };
   if (input.robeBusy === true) return { action: "skip", reason: "robe_busy" };
   if (input.faxinaHold === true) return { action: "skip", reason: "faxina_hold" };
   if (input.frozen === true) return { action: "skip", reason: "frozen" };
@@ -226,6 +227,7 @@ function createEnsureWorkingTick(deps) {
           virtusOnline: !!(ctrl && ctrl.virtus),
           humanControl: !!(ctrl && ctrl.humanControl),
           configurando: !!(ctrl && ctrl.configurando),
+          awaitingPhoneCadastro: !!(ctrl && ctrl.awaitingPhoneCadastro),
           robeBusy: !!(isRobeBusy && isRobeBusy(nome)),
           faxinaHold: !!(isFaxinaHold && isFaxinaHold(nome)),
           frozen: !!(isFrozen && isFrozen(nome)),

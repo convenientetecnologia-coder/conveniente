@@ -400,6 +400,62 @@ async function releaseSession(nome) {
   return release(who);
 }
 
+async function openForCadastro(nome, browser) {
+  if (!isEnabled()) return { ok: true, skipped: 'disabled' };
+  let mode = '';
+  try { mode = require('./proxyMode').read(); } catch {}
+  if (mode === 'gen') return { ok: true, skipped: 'gen' };
+  const sw = browser && browser.__ctDirectSwitch;
+  if (!sw || typeof sw.flip !== 'function' || typeof sw.port !== 'function') {
+    throw new Error('phone_proxy_required:switch');
+  }
+  const rail = require('./robeRail');
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const hop = await hopForPublish(nome);
+    sw.flip(hop);
+    await new Promise((r) => setTimeout(r, 1500));
+    let raw = '';
+    try {
+      raw = await rail.proveThroughRail(sw.port());
+    } catch {
+      try { sw.flip(null); } catch {}
+      await releaseSession(nome);
+      await new Promise((r) => setTimeout(r, 2000));
+      continue;
+    }
+    let parsed = null;
+    try { parsed = JSON.parse(raw); } catch {}
+    if (!parsed) {
+      const blob = String(raw || '').match(/\{[\s\S]*\}/);
+      if (blob) { try { parsed = JSON.parse(blob[0]); } catch {} }
+    }
+    const seen = rail.readExit(parsed);
+    if (!seen.ip || seen.asn === 'AS262481') {
+      try { sw.flip(null); } catch {}
+      await releaseSession(nome);
+      await new Promise((r) => setTimeout(r, 2000));
+      continue;
+    }
+    note('phone_proxy_cadastro', {
+      nome: String(nome || ''),
+      ok: true,
+      asn: seen.asn,
+      country: seen.country,
+      ip: seen.ip,
+      attempt
+    });
+    return { ok: true, asn: seen.asn, country: seen.country, ip: seen.ip };
+  }
+  throw new Error('phone_proxy_required:prove');
+}
+
+async function closeForCadastro(nome, browser) {
+  const sw = browser && browser.__ctDirectSwitch;
+  try { if (sw && typeof sw.flip === 'function') sw.flip(null); } catch {}
+  await releaseSession(nome);
+  note('phone_proxy_cadastro_release', { nome: String(nome || '') });
+}
+
 async function hopForPublish(nome) {
   while (true) {
     try {
@@ -427,6 +483,8 @@ module.exports = {
   isEnabled,
   inspect,
   hopForPublish,
+  openForCadastro,
+  closeForCadastro,
   note,
   writeEdgeState,
   blockReason,

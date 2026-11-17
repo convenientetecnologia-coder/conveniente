@@ -5463,27 +5463,35 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   const pcLogin = require('./pcSessionLogin.js');
   const loginNow = manifest && (manifest.login || manifest.email || manifest.user || manifest.username);
   const passNow = manifest && (manifest.password || manifest.pass);
-  if (String(loginNow || '').trim() && String(passNow || '').trim()) {
+  // Cookie já autenticado (com 2FA) entra primeiro, em mbasic.
+  // Senha e 2FA só se esse cookie não deixar a conta logada.
+  const restored = await pcLogin.tryExistingPcSession(p0, nome, { url: 'https://mbasic.facebook.com/login/' });
+  let sessionIn = !!(restored && restored.in === true);
+  let via = sessionIn ? 'cookie' : '';
+  if (!sessionIn && String(loginNow || '').trim() && String(passNow || '').trim()) {
     await pcLogin.openFreshLoginPage(p0, nome);
     const entered = await pcLogin.attemptCredentialRelogin(p0, nome, {
       login: String(loginNow).trim(),
       password: String(passNow)
     });
-    if (!entered || entered.ok !== true) {
-      if (entered && entered.error === 'whatsapp_confirm') {
-        const stop = new Error('whatsapp_confirm');
-        throw stop;
-      }
-      if (dbg) logger.debug('[CONFIG] credential login failed', { nome, error: entered && entered.error });
-      return;
+    if (entered && entered.error === 'whatsapp_confirm') {
+      const stop = new Error('whatsapp_confirm');
+      throw stop;
     }
-  } else {
-    const restored = await pcLogin.tryExistingPcSession(p0, nome);
-    if (!restored || restored.in !== true) {
-      if (dbg) logger.debug('[CONFIG] emergency cookie did not open feed', { nome, reason: restored && restored.reason });
-      return;
-    }
+    sessionIn = !!(entered && entered.ok === true);
+    via = 'password';
+    if (!sessionIn && dbg) logger.debug('[CONFIG] credential login failed', { nome, error: entered && entered.error });
   }
+  try {
+    provisionAudit.append({
+      ts: Date.now(),
+      event: 'configure_login_via',
+      nome: String(nome || ''),
+      via: via || 'none',
+      cookieReason: restored && restored.reason ? String(restored.reason) : null
+    });
+  } catch {}
+  if (!sessionIn) return;
   try { await p0.goto(fb0Url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
   try { await sleep(900); } catch {}
   try {

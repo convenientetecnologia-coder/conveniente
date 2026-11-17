@@ -400,13 +400,14 @@ async function placeCookies(page, cookies) {
   return list.length;
 }
 
-async function tryExistingPcSession(page, nome) {
+async function tryExistingPcSession(page, nome, opts) {
   const man = await manifestStore.read(String(nome || '')).catch(() => null);
   if (man && man.sessionRejected === true) return { ok: false, loggedOut: true, reason: 'rejected' };
   const cookies = man && Array.isArray(man.cookies) ? man.cookies : [];
   if (!cookiesHaveSession(cookies)) return { ok: false, loggedOut: true, reason: 'no_session' };
+  const startUrl = (opts && opts.url) ? String(opts.url) : HOME_URL;
   await placeCookies(page, cookies);
-  await page.goto(HOME_URL, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+  await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
   await sleep(1200);
   if (await feedOpened(page)) {
     logger.info('[LOGIN][pc] o feed abriu com o jar salvo. Não digito senha.', { nome });

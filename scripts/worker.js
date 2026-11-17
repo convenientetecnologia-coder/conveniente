@@ -8921,7 +8921,26 @@ async function activateOnce(nome, source = '', operator = '') {
             } catch {}
           }, 2000);
         }
-        controllers.set(nome, { browser, virtus: null, robe: null, status: { active: true }, configurando: false, trabalhando: false });
+        const phoneCadastroHold = _isStockProvisionOpen && (() => {
+          try { return require('./phoneProxyMode').isEnabled() && require('./proxyMode').read() !== 'gen'; }
+          catch { return false; }
+        })();
+        controllers.set(nome, {
+          browser,
+          virtus: null,
+          robe: null,
+          status: { active: true },
+          configurando: false,
+          trabalhando: false,
+          awaitingPhoneCadastro: phoneCadastroHold
+        });
+        if (phoneCadastroHold) {
+          const holdUntil = Date.now() + (20 * 60 * 1000);
+          const guard = browser._suppressBlankKillUntil = browser._suppressBlankKillUntil || {};
+          guard[nome] = holdUntil;
+          browser._aboutBlankMaxAgeMs = browser._aboutBlankMaxAgeMs || {};
+          browser._aboutBlankMaxAgeMs[nome] = 20 * 60 * 1000;
+        }
         try { installAccountTabGuards(nome, browser); } catch {}
         try {
           await closeRedundantVirtusTabs(browser, { nome, reason: 'activate_after_launch' });
@@ -9002,7 +9021,12 @@ async function activateOnce(nome, source = '', operator = '') {
                   if (!needsEntry && p0) {
                     try { needsEntry = await pageLooksLikeChromeNetError(p0); } catch { needsEntry = false; }
                   }
-                  if (needsEntry) {
+                  const phoneCadastroOpen = ctrl.awaitingPhoneCadastro === true;
+                  if (phoneCadastroOpen && ctrl.browser) {
+                    const guard = ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {};
+                    guard[nome] = Math.max(Number(guard[nome] || 0) || 0, Date.now() + 120000);
+                  }
+                  if (needsEntry && !phoneCadastroOpen) {
                     const desiredEngineAtOpen = readDesiredVirtusEngineRuntime();
                     const preferEntry = (_isStockProvisionOpen || desiredEngineAtOpen === 'delta') ? 'facebook_messages' : 'messenger';
                     await ensureNonBlankEntryPage(nome, ctrl, {
@@ -9027,7 +9051,7 @@ async function activateOnce(nome, source = '', operator = '') {
               // Landing já passou. Suppress 60s + maxAge 120s deixava about:blank
               // e facebook.com/messages morto empilharem. newPage ainda arma 25s sozinho.
               try {
-                if (ctrl.browser && Number(ctrl.browser._convenienteGateInFlight || 0) === 0) {
+                if (ctrl.browser && Number(ctrl.browser._convenienteGateInFlight || 0) === 0 && ctrl.awaitingPhoneCadastro !== true) {
                   if (ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome];
                   if (ctrl.browser._aboutBlankMaxAgeMs) delete ctrl.browser._aboutBlankMaxAgeMs[nome];
                 }
@@ -12419,6 +12443,9 @@ async function start_work({ nome, operator }) {
       logger.warn('[HANDLER] start_work denied (human/config mode)', { nome });
       return { ok: false, error: 'profile_in_human_or_config' };
     }
+    if (ctrl.awaitingPhoneCadastro === true) {
+      return { ok: false, error: 'awaiting_phone_cadastro' };
+    }
 
     try { await browserHelper.disableGlassForWorkBrowser(ctrl.browser, nome, { source: 'start_work', onlyIfArmed: true }); } catch {}
 
@@ -13610,6 +13637,18 @@ const handlers = {
         } catch {}
 
         try { provisionAudit.append({ ts: Date.now(), event: 'configure_inject_cookies_begin', nome: String(nome||''), operator: op || null }); } catch {}
+        let cadastroPhone = false;
+        try {
+          const phoneOn = require('./phoneProxyMode').isEnabled() && require('./proxyMode').read() !== 'gen';
+          if (phoneOn) {
+            await require('./phoneProxyMode').openForCadastro(nome, ctrl.browser);
+            cadastroPhone = true;
+          }
+        } catch (e) {
+          ctrl._cadastroPhone = false;
+          throw e;
+        }
+        ctrl._cadastroPhone = cadastroPhone;
         await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
         try { provisionAudit.append({ ts: Date.now(), event: 'configure_inject_cookies_done', nome: String(nome||''), operator: op || null }); } catch {}
 
@@ -14056,6 +14095,10 @@ const handlers = {
         return { ok: true, closedForRam };
       } catch (e) {
         const errMsg = (e && e.message) ? String(e.message) : String(e || 'falha_injetar_cookies');
+        if (/^phone_proxy_required:/.test(errMsg)) {
+          try { provisionAudit.append({ ts: Date.now(), event: 'configure_phone_wait', nome: String(nome||''), operator: op || null, error: errMsg.slice(0, 180) }); } catch {}
+          return { ok: false, error: errMsg };
+        }
         if (/whatsapp_confirm/i.test(errMsg)) {
           enteredHuman = true;
           try { await enterHumanMode(nome, controllers.get(nome), { reason: 'whatsapp_confirm' }); } catch {}
@@ -14137,6 +14180,15 @@ const handlers = {
         try { await invokeHumanForConfigure(errMsg); } catch {}
         return { ok: false, error: errMsg || 'falha_injetar_cookies' };
       } finally {
+        if (ctrl && ctrl._cadastroPhone) {
+          ctrl._cadastroPhone = false;
+          try { await require('./phoneProxyMode').closeForCadastro(nome, ctrl.browser); } catch {}
+        }
+        if (ctrl) ctrl.awaitingPhoneCadastro = false;
+        try {
+          if (ctrl && ctrl.browser && ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome];
+          if (ctrl && ctrl.browser && ctrl.browser._aboutBlankMaxAgeMs) delete ctrl.browser._aboutBlankMaxAgeMs[nome];
+        } catch {}
         ctrl.configurando = false;
         // Regra enterprise:
         // - configure (falha) => entra em modo humano (para inspeção/resolução)
@@ -19411,7 +19463,7 @@ async function waitHeavyNavBootLanding(nome, ctrl) {
     const settleMs = connectLane.bootSettleMs();
     let land = await waitForHeavyNavLanding(page, { timeoutMs: settleMs, pollMs: 400 });
     const tunnelCool = (() => { try { return !!connectLane.isCooling(); } catch { return false; } })();
-    if (land && land.reason === 'net_error' && !tunnelCool) {
+    if (land && land.reason === 'net_error' && !tunnelCool && !(ctrl && ctrl.awaitingPhoneCadastro === true)) {
       try {
         provisionAudit.append({
           ts: Date.now(),
