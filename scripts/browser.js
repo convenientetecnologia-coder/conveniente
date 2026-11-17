@@ -2665,13 +2665,20 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try { if (fs.existsSync(chromeLogFile)) fs.unlinkSync(chromeLogFile); } catch {}
 
     // FLAGS “OURO” ONLY! A lista mora em buildAccountChromeLaunchArgs (Virtus e Robe).
-    const proxyServer = phoneLaunch
+    let proxyServer = phoneLaunch
       ? String(phoneLaunch.proxyServer || '')
       : (genLaunch
         ? String(genLaunch.proxyServer || '')
         : ((gatewayResolved && gatewayResolved.enabled && gatewayResolved.proxyServer)
           ? String(gatewayResolved.proxyServer)
           : ''));
+    let directSwitch = null;
+    if (!proxyServer && require('./phoneProxyMode').isEnabled() && require('./proxyMode').read() !== 'gen' && require('./proxyMode').read() !== 'phone') {
+      directSwitch = require('./robeRail').createDirectSwitch();
+      const switchPort = await directSwitch.listen();
+      if (!switchPort) throw new Error('phone_proxy_required:switch');
+      proxyServer = `127.0.0.1:${switchPort}`;
+    }
     try {
       require('./phoneProxyMode').note('phone_proxy_chrome', {
         nome: String(nome || ''),
@@ -2767,9 +2774,14 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     }
 
     if (!browserTry) {
+      try { if (directSwitch) await directSwitch.close(); } catch {}
       throw new Error('Browser não iniciou após 3 tentativas. Veja logs acima e o arquivo chrome_launch.log do perfil.');
     }
     browser = browserTry;
+    if (directSwitch) {
+      browser.__ctDirectSwitch = directSwitch;
+      browser.on('disconnected', () => { try { directSwitch.close(); } catch {} });
+    }
     try { browser._convenienteNome = String((manifest && manifest.nome) || nome || '').trim(); } catch {}
 
     // 1. PATCH: Set protocol timeout GLOBAL para 60s
@@ -6333,11 +6345,20 @@ function installAboutBlankKiller(browser, nome, { graceMs = 7000 } = {}) {
  * Detecta se a página está exigindo login (form Facebook/Messenger clássico, checkpoint, captcha).
  * Retorna { loginRequired: true/false, reason: string, domain: string }
  */
+function isMarketplaceDocCheckpointUrl(url) {
+  // Fluxo do documento do Marketplace. O segundo número muda por perfil.
+  return /\/checkpoint\/1501092823525282\/\d+/i.test(String(url || ''));
+}
+
 async function detectLoginRequired(page) {
   try {
     const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
     const isFbOrMsg = /(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(href);
     if (!isFbOrMsg) return { loginRequired: false };
+    // Documento do Marketplace. Não é login, captcha nem conta caída.
+    if (isMarketplaceDocCheckpointUrl(href)) {
+      return { loginRequired: false, reason: '', domain: 'facebook', url: href, title: '' };
+    }
 
     const v = await page.evaluate((twoFloorOff) => {
       function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
@@ -8585,6 +8606,7 @@ async function detectAccountSuspended(page) {
     const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
     const isFbOrMsg = /(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(href);
     if (!isFbOrMsg) return { banned: false };
+    if (isMarketplaceDocCheckpointUrl(href)) return { banned: false };
 
     const targets = [];
     try {
@@ -8773,6 +8795,7 @@ module.exports = {
   pageIsBlinding: _pageIsBlinding,
   installAboutBlankKiller,
   // ==== NOVOS:
+  isMarketplaceDocCheckpointUrl,
   detectLoginRequired,
   detectVirtusIdentityBlock,
   tryClickAymhContinuar,

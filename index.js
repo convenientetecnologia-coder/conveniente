@@ -1418,6 +1418,95 @@ const STOCK_PROVISION_OUTBOX_DIR = path.join(__dirname, 'dados', 'stock_provisio
 const STOCK_PROVISION_PENDING_DIR = path.join(STOCK_PROVISION_OUTBOX_DIR, 'pending');
 const STOCK_PROVISION_DONE_DIR = path.join(STOCK_PROVISION_OUTBOX_DIR, 'done');
 let __stockProvisionPumpInFlight = false;
+const STOCK_PROVISION_FINISHED_PATH = path.join(STOCK_PROVISION_OUTBOX_DIR, 'last_finished.json');
+let __stockProvisionFinished = [];
+
+function __edgeStockFinishShouldReturn(error) {
+  const m = String(error || '').toLowerCase();
+  if (!m) return false;
+  return (
+    m.includes('cookies inv') ||
+    m.includes('c_user') ||
+    m.includes('servidor_sem_cidades') ||
+    m.includes('cidade_sem_coordenadas') ||
+    m.includes('capacity_limit') ||
+    m.includes('capacity_sync_failed') ||
+    m.includes('missing_city') ||
+    m.includes('create_profile_missing_name') ||
+    m.includes('perfis_write_failed') ||
+    m.includes('manifest_write_failed') ||
+    m.includes('provision_lock_busy')
+  );
+}
+
+function __edgeLoadStockProvisionFinishedSync() {
+  if (__stockProvisionFinished.length) return __stockProvisionFinished;
+  try {
+    if (!fs.existsSync(STOCK_PROVISION_FINISHED_PATH)) return __stockProvisionFinished;
+    const arr = JSON.parse(String(fs.readFileSync(STOCK_PROVISION_FINISHED_PATH, 'utf8') || '[]'));
+    if (Array.isArray(arr)) __stockProvisionFinished = arr.slice(-20);
+  } catch {}
+  return __stockProvisionFinished;
+}
+
+function __edgeRememberStockProvisionFinished(items) {
+  const now = Date.now();
+  const list = __edgeLoadStockProvisionFinishedSync();
+  for (const it of (Array.isArray(items) ? items : [])) {
+    const sid = Number(it && it.stockAccountId || 0) || 0;
+    if (!sid) continue;
+    const profileName = String(it && it.profileName || '').trim();
+    const real = !!(profileName && !profileName.startsWith('__ct_pending__'));
+    const error = real ? null : String(it && it.error || 'provision_finished_no_profile').slice(0, 180);
+    list.push({
+      stockAccountId: sid,
+      ok: !!(it && it.ok === true && real),
+      profileName: real ? profileName.slice(0, 120) : null,
+      city: real && it && it.city ? String(it.city).slice(0, 80) : null,
+      error,
+      returnToStock: !real && __edgeStockFinishShouldReturn(error),
+      finishedAt: now
+    });
+  }
+  while (list.length > 20) list.shift();
+  __stockProvisionFinished = list;
+  try {
+    __edgeEnsureStockProvisionOutboxDirsSync();
+    const tmp = STOCK_PROVISION_FINISHED_PATH + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(list), 'utf8');
+    fs.renameSync(tmp, STOCK_PROVISION_FINISHED_PATH);
+  } catch {}
+}
+
+function __edgeNoteStockProvisionFinished(rec, out) {
+  const results = (out && Array.isArray(out.results)) ? out.results : [];
+  const row = results.find((r) => r && String(r.type || '') === 'stock_provision') || null;
+  const det = row && row.details && typeof row.details === 'object' ? row.details : null;
+  const actions = det && Array.isArray(det.results) ? det.results : [];
+  const noted = [];
+  if (actions.length) {
+    for (const a of actions) {
+      const sid = Number(a && a.stockAccountId || 0) || 0;
+      if (!sid) continue;
+      noted.push({
+        stockAccountId: sid,
+        ok: !!(a && a.ok === true),
+        profileName: a && a.profileName ? String(a.profileName) : '',
+        city: a && a.city ? String(a.city) : '',
+        error: a && a.error ? String(a.error) : (row && row.error ? String(row.error) : '')
+      });
+    }
+  } else {
+    const ids = Array.isArray(rec && rec.stockAccountIds) ? rec.stockAccountIds : [];
+    const err = String((row && row.error) || 'provision_finished_no_profile');
+    for (const raw of ids) {
+      const sid = Number(raw || 0) || 0;
+      if (!sid) continue;
+      noted.push({ stockAccountId: sid, ok: false, profileName: '', city: '', error: err });
+    }
+  }
+  if (noted.length) __edgeRememberStockProvisionFinished(noted);
+}
 
 function __edgeEnsureStockProvisionOutboxDirsSync() {
   try { fs.mkdirSync(STOCK_PROVISION_PENDING_DIR, { recursive: true }); } catch {}
@@ -1467,12 +1556,14 @@ function __edgeListStockProvisionOutboxSync() {
       }
     }
   } catch {}
+  const finished = __edgeLoadStockProvisionFinishedSync();
   return {
     pendingCount,
     pendingAccountIds: accountIds,
     pumpInFlight: !!__stockProvisionPumpInFlight,
     oldestEnqueuedAt: oldestEnqueuedAt || null,
-    oldestAgeMs: oldestEnqueuedAt ? Math.max(0, Date.now() - oldestEnqueuedAt) : 0
+    oldestAgeMs: oldestEnqueuedAt ? Math.max(0, Date.now() - oldestEnqueuedAt) : 0,
+    lastFinished: finished.slice(-8)
   };
 }
 
@@ -1597,11 +1688,21 @@ async function __edgePumpStockProvisionOutbox() {
         type: 'stock_provision',
         payload: (rec && rec.payload && typeof rec.payload === 'object') ? rec.payload : {}
       };
+      let provisionOut = null;
       try {
         // Só tira da fila quando o cadastro devolve. Timeout artificial aqui
         // movia o JSON pra done com o Chrome ainda nascendo e o CT reenviava.
-        await applyInfraCommands([cmd]);
+        provisionOut = await applyInfraCommands([cmd]);
       } catch (e) {
+        provisionOut = {
+          ok: false,
+          results: [{
+            type: 'stock_provision',
+            ok: false,
+            error: (e && e.message) ? String(e.message) : String(e),
+            details: null
+          }]
+        };
         try {
           forensicLog('STOCK_PROVISION', 'outbox_exec_failed', {
             cmdId: cmd.id,
@@ -1609,6 +1710,7 @@ async function __edgePumpStockProvisionOutbox() {
           });
         } catch {}
       }
+      try { __edgeNoteStockProvisionFinished(rec, provisionOut); } catch {}
       try {
         if (fs.existsSync(donePath)) {
           try { fs.unlinkSync(pendingPath); } catch {}
@@ -4227,7 +4329,12 @@ function __buildServerEventTelemetry(status) {
     stockProvisionOutbox: {
       pendingCount: Number(ob.pendingCount || 0) || 0,
       pendingAccountIds: Array.isArray(ob.pendingAccountIds) ? ob.pendingAccountIds.slice(0, 80) : [],
-      pumpInFlight: !!ob.pumpInFlight
+      pumpInFlight: !!ob.pumpInFlight,
+      lastFinishedAt: (() => {
+        const fin = Array.isArray(ob.lastFinished) ? ob.lastFinished : [];
+        const last = fin.length ? fin[fin.length - 1] : null;
+        return Number(last && last.finishedAt || 0) || 0;
+      })()
     },
     // Mudança false→true força snapshot completo quando Gate B/tunnel fica pronto.
     gateBReady: !!(

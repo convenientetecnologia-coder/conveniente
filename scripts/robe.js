@@ -4488,6 +4488,11 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
   // 2) Watcher de GraphQL só como sinal — nunca valida sucesso antes do dwell
   const gql = setupGraphqlPublishWatcher(page);
   const rail = page.browser && page.browser().__ctRobeRail;
+  const phoneOn = (() => {
+    try { return require('./phoneProxyMode').isEnabled() && require('./proxyMode').read() !== 'gen'; }
+    catch { return false; }
+  })();
+  let phoneGate = null;
   stepLog.appendJSONL(nome, 'robe', { step: 'exact_btn_flow_start' });
   let flowRes;
   let proved = null;
@@ -4495,7 +4500,48 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
     flowRes = await clickFlowExactRetry(page, nome, {
       maxSteps: 24,
       publishMaxRetries: 3,
-      onBeforePublish: rail ? async () => {
+      onBeforePublish: (rail || phoneOn) ? async () => {
+        if (phoneOn) {
+          const sw = page.browser && page.browser().__ctDirectSwitch;
+          if (!sw || typeof sw.flip !== 'function' || !sw.port()) {
+            const err = new Error('proxy_mobile_unavailable');
+            err.PROXY_PUBLISH = true;
+            throw err;
+          }
+          const hop = await require('./phoneProxyMode').hopForPublish(nome);
+          const before = sw.bytesToProxy();
+          sw.flip(hop);
+          await sleep(1500);
+          let raw = '';
+          try { raw = await require('./robeRail').proveThroughRail(sw.port()); }
+          catch (e) {
+            try { sw.flip(null); } catch {}
+            try { await require('./phoneProxyMode').release(nome); } catch {}
+            const err = new Error('proxy_mobile_unavailable');
+            err.PROXY_PUBLISH = true;
+            throw err;
+          }
+          let parsed = null;
+          try { parsed = JSON.parse(raw); } catch {}
+          if (!parsed) {
+            const blob = String(raw || '').match(/\{[\s\S]*\}/);
+            if (blob) { try { parsed = JSON.parse(blob[0]); } catch {} }
+          }
+          const seen = require('./robeRail').readExit(parsed);
+          if (!seen.ip || seen.asn === 'AS262481') {
+            try { sw.flip(null); } catch {}
+            try { await require('./phoneProxyMode').release(nome); } catch {}
+            const err = new Error('proxy_mobile_unavailable');
+            err.PROXY_PUBLISH = true;
+            throw err;
+          }
+          phoneGate = { before, sw, bytes() { return Math.max(0, sw.bytesToProxy() - before); }, async stop() { try { sw.flip(null); } catch {} } };
+          proved = { ok: true, asn: seen.asn, country: seen.country, ip: seen.ip, reason: 'phone_proxy' };
+          try {
+            stepLog.appendJSONL(nome, 'robe', { step: 'robe_rail_proved', asn: seen.asn, country: seen.country, ip: seen.ip, via: 'phone_tab' });
+          } catch {}
+          return;
+        }
         proved = await rail.armAndProve(page);
         if (!proved || proved.ok !== true) {
           const err = new Error('proxy_mobile_unavailable');
@@ -4508,7 +4554,41 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
     if (rail && rail.backToDirect) {
       try { await rail.backToDirect(); } catch {}
     }
+    try { if (phoneGate) await phoneGate.stop(); } catch {}
+    try { if (phoneOn) await require('./phoneProxyMode').release(nome); } catch {}
     throw e;
+  }
+  if (phoneOn && flowRes && flowRes.publishClicked === true) {
+    const started = Date.now();
+    let last = 0;
+    let quiet = 0;
+    while (Date.now() - started < 15000) {
+      const now = phoneGate ? phoneGate.bytes() : 0;
+      if (now >= 2048 && now === last) {
+        if (!quiet) quiet = Date.now();
+        if (Date.now() - quiet >= 800) break;
+      } else {
+        quiet = 0;
+        last = now;
+      }
+      await sleep(100);
+    }
+    const bytes = phoneGate ? phoneGate.bytes() : 0;
+    stepLog.appendJSONL(nome, 'robe', {
+      step: 'publish_left_proxy',
+      ok: bytes >= 2048,
+      bytes,
+      asn: proved && proved.asn || null,
+      ip: proved && proved.ip || null,
+      via: 'phone_tab'
+    });
+    try { if (phoneGate) await phoneGate.stop(); } catch {}
+    phoneGate = null;
+    try { await require('./phoneProxyMode').release(nome); } catch {}
+    if (bytes < 2048) {
+      gql.cleanup && gql.cleanup();
+      return { ok: false, reason: 'publish_not_left_proxy', publishClicked: true, proxySent: true, bytes };
+    }
   }
   if (rail && flowRes && flowRes.publishClicked === true && proved && proved.ok === true) {
     const left = await waitPublishLeftProxy(rail);
@@ -4790,7 +4870,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       }
     }
 
-    if (require('./mobilePublishProxy').readSettings().enabled === true) {
+    if (require('./mobilePublishProxy').readSettings().enabled === true && !require('./phoneProxyMode').isEnabled()) {
       try {
         accountBrowser = browser;
         robeRailHandle = await require('./robeRail').openRobeRail({

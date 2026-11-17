@@ -44,6 +44,7 @@ function createSwitch() {
   const sockets = new Set();
   let upstream = null;
   let bytesToProxy = 0;
+  let boundPort = 0;
   const server = http.createServer();
   server.timeout = 0;
   server.requestTimeout = 0;
@@ -127,13 +128,15 @@ function createSwitch() {
       server.once('error', reject);
       server.listen(0, '127.0.0.1', () => {
         const addr = server.address();
-        resolve(addr && addr.port);
+        boundPort = addr && addr.port ? addr.port : 0;
+        resolve(boundPort);
       });
     });
   }
 
   return {
     listen,
+    port() { return boundPort; },
     flip(next) { upstream = next || null; cut(); },
     phoneHop: null,
     setPhoneHop(hop) { this.phoneHop = hop || null; if (this.phoneHop) upstream = this.phoneHop; },
@@ -456,10 +459,52 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
       browser,
       async armAndProve(page) {
         try {
-          if (require('./proxyMode').read() === 'phone') {
-            return { ok: true, asn: '', country: '', ip: '', reason: 'phone_proxy' };
+          if (require('./phoneProxyMode').isEnabled() && require('./proxyMode').read() !== 'gen') {
+            const hop = await require('./phoneProxyMode').hopForPublish(nome);
+            rail.flip(hop);
+            await new Promise((r) => setTimeout(r, 1500));
+            let phoneRaw = '';
+            try {
+              phoneRaw = await proveThroughRail(port);
+            } catch (e) {
+              const error = String((e && e.message) || e).slice(0, 180);
+              try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_prove_fail', reason: 'prove_failed', error }); } catch {}
+              return { ok: false, reason: 'prove_failed', error };
+            }
+            let phoneParsed = null;
+            try { phoneParsed = JSON.parse(phoneRaw); } catch {}
+            if (!phoneParsed) {
+              const blob = String(phoneRaw || '').match(/\{[\s\S]*\}/);
+              if (blob) { try { phoneParsed = JSON.parse(blob[0]); } catch {} }
+            }
+            const phoneSeen = readExit(phoneParsed);
+            if (!phoneSeen.ip || phoneSeen.asn === 'AS262481') {
+              try {
+                stepLog.appendJSONL(nome || 'system', 'robe', {
+                  step: 'robe_rail_prove_fail',
+                  reason: 'prove_not_mobile',
+                  asn: phoneSeen.asn,
+                  country: phoneSeen.country,
+                  ip: phoneSeen.ip
+                });
+              } catch {}
+              return { ok: false, reason: 'prove_not_mobile', asn: phoneSeen.asn, country: phoneSeen.country, ip: phoneSeen.ip };
+            }
+            try {
+              stepLog.appendJSONL(nome || 'system', 'robe', {
+                step: 'robe_rail_proved',
+                asn: phoneSeen.asn,
+                country: phoneSeen.country,
+                ip: phoneSeen.ip,
+                via: 'phone'
+              });
+            } catch {}
+            return { ok: true, asn: phoneSeen.asn, country: phoneSeen.country, ip: phoneSeen.ip, reason: 'phone_proxy' };
           }
-        } catch {}
+        } catch (e) {
+          const error = String((e && e.message) || e).slice(0, 180);
+          return { ok: false, reason: 'phone_proxy_unavailable', error };
+        }
         const cfg = mobile.readSettings();
         if (!cfg.ready) return { ok: false, reason: 'no_credentials' };
         const exit = await mobile.acquireExit(cfg.user, cfg.password);
@@ -540,4 +585,4 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
   }
 }
 
-module.exports = { openRobeRail, readExit, soleCreatePage };
+module.exports = { openRobeRail, readExit, soleCreatePage, proveThroughRail, createDirectSwitch: createSwitch };

@@ -3671,6 +3671,11 @@ function __deltaGotoCircuitTrip(account, thread, reason, { immediate = true } = 
 }
 
 async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccountLogin = null, stepAError = null } = {}) {
+  try {
+    if (page && page.__virtusDeltaHumanHold === true) {
+      return { ok: false, error: "identity_hold", skipped: true, opened_via: "direct_goto" };
+    }
+  } catch (_) {}
   const t = String(threadKey || "").trim();
   const acc = forensicAccountLogin ? String(forensicAccountLogin).trim() : "";
 
@@ -4350,6 +4355,11 @@ async function readLastConversationMessage(page, threadKey) {
 }
 
 async function openThreadByClick(page, threadKey, { maxScrollSteps: _maxScrollSteps = 16, forensicAccountLogin = null } = {}) {
+  try {
+    if (page && page.__virtusDeltaHumanHold === true) {
+      return { ok: false, error: "identity_hold", skipped: true };
+    }
+  } catch (_) {}
   const t = String(threadKey || "").trim();
   if (!t) throw new Error("thread_key_empty");
   try {
@@ -6863,6 +6873,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     await blindarPaginaDaConta(page, bootNome, { source: "virtusDelta_boot_existing" });
   }
   attachDeltaNavigationFirewall(page, { profileName: ACCOUNT_LOGIN || nome });
+  try {
+    page.__ctVirtusQueuePause = (on) => { try { enqueue.setPaused(!!on); } catch (_) {} };
+    page.__ctVirtusQueueRunning = () => { try { return !!enqueue.isRunning(); } catch (_) { return false; } };
+    page.__ctVirtusQueuePaused = () => { try { return !!enqueue.isPaused(); } catch (_) { return false; } };
+  } catch (_) {}
 
   async function faxinaAposCicloPesado(reason) {
     try {
@@ -6877,7 +6892,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   // Boot minimal: garantir que estamos em /messages (permitido no boot; proibição é no reply flow).
   try {
     const u0 = String(page.url ? page.url() : "");
-    if (!isFacebookMessagesUrl(u0)) {
+    let identityHold = false;
+    try { identityHold = page.__virtusDeltaHumanHold === true; } catch {}
+    if (!isFacebookMessagesUrl(u0) && !identityHold) {
       await __gotoWithBootInterlock(page, startUrl, {
         timeoutMs: 45000,
         profileName: ACCOUNT_LOGIN || nome,

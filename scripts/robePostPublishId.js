@@ -94,7 +94,8 @@ function isIdentityReviewText(text) {
 
 function isIdentityRetryText(text) {
   const n = norm(text);
-  return n.includes('nao foi possivel') && (n.includes('identidade') || n.includes('identity'));
+  if (!n.includes('identidade') && !n.includes('identity')) return false;
+  return n.includes('nao foi possivel') || n.includes('nao conseguimos validar');
 }
 
 function isIdentityDocIntroText(text) {
@@ -683,6 +684,7 @@ async function detectIdWizardScreen(page) {
         return rect.width >= 8 && rect.height >= 8 && rect.bottom > 0 && rect.top < window.innerHeight;
       });
       if (cnhChoice) return 'doc_type';
+      if (body.includes('carregue uma foto do seu documento') || body.includes('carregue uma foto do documento')) return 'upload_photo';
       if (
         (body.includes('com um documento') || body.includes('reconhecimento facial') || body.includes('facial recognition') || (body.includes('30 dias') && body.includes('documento'))) &&
         (body.includes('identidade') || body.includes('identity'))
@@ -690,12 +692,12 @@ async function detectIdWizardScreen(page) {
         return 'identity_doc_intro';
       }
       if (
-        body.includes('nao foi possivel') &&
-        (body.includes('identidade') || body.includes('identity'))
+        (body.includes('identidade') || body.includes('identity')) &&
+        (body.includes('nao foi possivel') || body.includes('nao conseguimos validar'))
       ) {
         return 'identity_retry';
       }
-      if (hasFile || body.includes('carregue uma foto do seu documento')) return 'upload_photo';
+      if (body.includes('carregue uma foto do seu documento') || body.includes('carregue uma foto do documento')) return 'upload_photo';
       // doc_type: exige o título da lista (não basta “carteira…” solto no body)
       if (
         body.includes('escolha um tipo de documento') ||
@@ -753,7 +755,7 @@ async function detectIdWizardScreen(page) {
 
 async function clickConfirmeSuaIdentidade(page) {
   try {
-    const point = await page.evaluate(() => {
+    const label = await page.evaluate(() => {
       const normLocal = (s) => {
         try {
           return String(s || '')
@@ -766,44 +768,25 @@ async function clickConfirmeSuaIdentidade(page) {
           return String(s || '').toLowerCase().trim();
         }
       };
-      const isIdentity = (text) => {
-        const n = normLocal(text);
-        if (!n || n.length > 80) return false;
-        if (!n.includes('identidade') && !n.includes('identity')) return false;
-        return /\b(confirme|confirmar|confirma|confirm|verifique|verificar|verifica|verify)\b/.test(n);
-      };
       const buttons = Array.from(document.querySelectorAll('[role="button"],button'));
       let best = null;
-      let bestLen = 999;
-      let bestLabel = '';
       for (const el of buttons) {
         const aria = normLocal(el.getAttribute('aria-label') || '');
         const own = normLocal(el.innerText || el.textContent || '');
-        const label = isIdentity(aria) ? aria : (isIdentity(own) ? own : '');
-        if (!label) continue;
+        if (aria !== 'confirmar identidade' && aria !== 'confirm identity' && own !== 'confirmar identidade' && own !== 'confirm identity') continue;
         const rect = el.getBoundingClientRect();
         if (rect.width < 8 || rect.height < 8) continue;
         const style = window.getComputedStyle(el);
         if (!style || style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') continue;
-        if (label.length < bestLen) {
-          best = el;
-          bestLen = label.length;
-          bestLabel = String(el.getAttribute('aria-label') || el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
-        }
+        best = el;
+        break;
       }
-      if (!best) return null;
-      const rect = best.getBoundingClientRect();
-      return {
-        x: rect.left + (rect.width / 2),
-        y: rect.top + (rect.height / 2),
-        label: bestLabel
-      };
+      if (!best) return '';
+      try { best.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch {}
+      best.click();
+      return String(best.getAttribute('aria-label') || best.innerText || best.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
     });
-    if (!point) return false;
-    await page.mouse.move(point.x, point.y);
-    await sleep(300);
-    await page.mouse.click(point.x, point.y, { delay: 60 });
-    return point.label || true;
+    return label || false;
   } catch {
     return false;
   }
@@ -878,7 +861,69 @@ async function pageHasNorm(page, testFnSource) {
 }
 
 async function identityRetryStillOpen(page) {
-  return pageHasNorm(page, "n.includes('nao foi possivel') && n.includes('identidade')");
+  return pageHasNorm(page, "(n.includes('nao foi possivel') || n.includes('nao conseguimos validar')) && n.includes('identidade')");
+}
+
+function armIdPageHold(page, on) {
+  if (!page) return;
+  try { page.__virtusDeltaHumanHold = !!on; } catch {}
+  try {
+    const g = page.__virtusDeltaMarketplaceGuard || {};
+    page.__virtusDeltaMarketplaceGuard = {
+      ...g,
+      outsideMessagesSince: 0,
+      marketplaceInactiveSince: 0
+    };
+  } catch {}
+}
+
+async function takeIdentityTab(page) {
+  const pause = page && page.__ctVirtusQueuePause;
+  const running = page && page.__ctVirtusQueueRunning;
+  const pausedNow = page && page.__ctVirtusQueuePaused;
+  let alreadyPaused = false;
+  try { alreadyPaused = typeof pausedNow === 'function' && pausedNow() === true; } catch {}
+  let wePaused = false;
+  if (typeof pause === 'function' && !alreadyPaused) {
+    try { pause(true); wePaused = true; } catch {}
+  }
+  const start = Date.now();
+  while (Date.now() - start < 120000) {
+    let busy = false;
+    try { busy = !!(page && page.__virtusDeltaReplyInFlight); } catch {}
+    try { if (!busy && typeof running === 'function') busy = running() === true; } catch {}
+    if (!busy) break;
+    await sleep(200);
+  }
+  const holdAlready = !!(page && page.__virtusDeltaHumanHold === true);
+  armIdPageHold(page, true);
+  return { wePaused, holdAlready };
+}
+
+function releaseIdentityTab(page, taken) {
+  if (!page || !taken) return;
+  if (!taken.holdAlready) armIdPageHold(page, false);
+  if (taken.wePaused && typeof page.__ctVirtusQueuePause === 'function') {
+    try { page.__ctVirtusQueuePause(false); } catch {}
+  }
+}
+
+function pageIsMarketplaceDocCheckpoint(page) {
+  try {
+    return /\/checkpoint\/1501092823525282\/\d+/i.test(String(page.url() || ''));
+  } catch {
+    return false;
+  }
+}
+
+async function revealMarketplaceDocCheckpoint(page) {
+  const on = pageIsMarketplaceDocCheckpoint(page);
+  let glass;
+  try { glass = require('./glassViewer.js'); } catch { return on; }
+  try {
+    if (typeof glass.suppressGlassForIdentity === 'function') await glass.suppressGlassForIdentity(page, on);
+  } catch {}
+  return on;
 }
 
 async function cnhChoiceVisible(page) {
@@ -953,7 +998,7 @@ async function clickAvancar(page) {
             continue;
           }
           const intro = (t.includes('com um documento') || t.includes('reconhecimento facial') || t.includes('facial recognition')) && (t.includes('identidade') || t.includes('identity'));
-          const retry = t.includes('nao foi possivel') && t.includes('identidade');
+          const retry = (t.includes('nao foi possivel') || t.includes('nao conseguimos validar')) && t.includes('identidade');
           if (intro || retry) return true;
           p = p.parentElement;
         }
@@ -970,40 +1015,33 @@ async function clickAvancar(page) {
         try { el.click(); } catch {}
       };
       const hits = [];
-      const nodes = Array.from(document.querySelectorAll('span,div,button,[role="button"]'));
+      const nodes = Array.from(document.querySelectorAll('a,[role="link"],span,div,button,[role="button"]'));
       for (const el of nodes) {
         const aria = normLocal(el.getAttribute('aria-label') || '');
         const own = normLocal(el.innerText || el.textContent || '');
-        if (!isAdvance(aria) && !isAdvance(own)) continue;
-        if (!visible(el)) continue;
-        let overlay = null;
-        let walk = el;
-        while (walk && walk !== document.body) {
-          const role = walk.getAttribute ? String(walk.getAttribute('role') || '') : '';
-          const found = Array.from(walk.children || []).find((child) => child.getAttribute && child.getAttribute('data-visualcompletion') === 'ignore');
-          if (found || role === 'button' || String(walk.tagName || '') === 'BUTTON') {
-            const probe = found || walk;
-            const rect = probe.getBoundingClientRect();
-            if (rect.width <= 500 && rect.height <= 220) overlay = found || null;
-            break;
-          }
-          walk = walk.parentElement;
+        const href = String((el.getAttribute && el.getAttribute('href')) || '');
+        const docLink = /\/checkpoint\/1501092823525282\/\d+/.test(href) || aria.includes('verificacao de identidade') || (aria.includes('a seguir') && aria.includes('identidade'));
+        if (!docLink && !isAdvance(aria) && !isAdvance(own)) continue;
+        if (!visible(el)) {
+          try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch {}
         }
-        const textRect = el.getBoundingClientRect();
+        if (!visible(el)) continue;
+        const target = (el.closest && el.closest('a,[role="link"],[role="button"],button')) || el;
+        const textRect = target.getBoundingClientRect();
         hits.push({
-          el,
-          overlay,
+          el: target,
           x: textRect.left + (textRect.width / 2),
           y: textRect.top + (textRect.height / 2),
           area: textRect.width * textRect.height,
-          inDialog: inDialog(el)
+          inDialog: inDialog(el),
+          docLink
         });
       }
-      hits.sort((a, b) => Number(b.inDialog) - Number(a.inDialog) || a.area - b.area);
+      hits.sort((a, b) => Number(b.docLink) - Number(a.docLink) || Number(b.inDialog) - Number(a.inDialog) || a.area - b.area);
       const pick = hits[0];
       if (!pick) return null;
-      fire(pick.overlay || pick.el);
-      if (pick.overlay) fire(pick.el);
+      try { pick.el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch {}
+      fire(pick.el);
       return { x: pick.x, y: pick.y };
     });
   } catch {}
@@ -1013,7 +1051,7 @@ async function clickAvancar(page) {
   }
   if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
     try {
-      await page.mouse.move(point.x, point.y);
+    await page.mouse.move(point.x, point.y);
       await sleep(150);
       await page.mouse.click(point.x, point.y, { delay: 80 });
     } catch {}
@@ -1101,6 +1139,62 @@ async function readNamedButton(page, labels) {
   }
 }
 
+async function readVisibleButtonLabels(page) {
+  try {
+    return await page.evaluate(() => {
+      const normLocal = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+      const out = [];
+      for (const el of Array.from(document.querySelectorAll('button,[role="button"],span,div'))) {
+        const text = normLocal(el.innerText || el.getAttribute('aria-label') || '');
+        if (!text || text.length > 40) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 8 || rect.height < 8 || rect.top > window.innerHeight || rect.bottom < 0) continue;
+        out.push(text);
+        if (out.length >= 12) break;
+      }
+      return out;
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function clickExactWord(page, words) {
+  let point = null;
+  try {
+    point = await page.evaluate((wanted) => {
+      const normLocal = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const want = new Set(wanted);
+      const hits = [];
+      for (const el of Array.from(document.querySelectorAll('span,div,button,[role="button"]'))) {
+        const aria = normLocal(el.getAttribute('aria-label') || '');
+        const own = normLocal(el.innerText || el.textContent || '');
+        if (!want.has(aria) && !want.has(own)) continue;
+        if ((want.has(own) ? own : aria).length > 40) continue;
+        let rect = el.getBoundingClientRect();
+        if (rect.width < 8 || rect.height < 8) continue;
+        if (rect.bottom < 0 || rect.top > window.innerHeight) {
+          try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch {}
+          rect = el.getBoundingClientRect();
+        }
+        if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+        hits.push({ x: rect.left + (rect.width / 2), y: rect.top + (rect.height / 2), area: rect.width * rect.height });
+      }
+      hits.sort((a, b) => a.area - b.area);
+      return hits[0] || null;
+    }, words);
+  } catch {
+    return false;
+  }
+  if (!point) return false;
+  try {
+    await page.mouse.click(point.x, point.y, { delay: 80 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function clickBlueOverlay(page, labels) {
   const handle = await page.evaluateHandle((wanted) => {
     const normLocal = (s) => {
@@ -1124,8 +1218,13 @@ async function clickBlueOverlay(page, labels) {
       if (el.getAttribute('aria-hidden') === 'true') continue;
       if (el.closest && el.closest('[aria-hidden="true"]')) continue;
       if (String(el.getAttribute('tabindex') || '') === '-1') continue;
-      const rect = el.getBoundingClientRect();
-      if (rect.width < 8 || rect.height < 8 || rect.bottom < 0 || rect.top > window.innerHeight) continue;
+      let rect = el.getBoundingClientRect();
+      if (rect.width < 8 || rect.height < 8) continue;
+      if (rect.bottom < 0 || rect.top > window.innerHeight) {
+        try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch {}
+        rect = el.getBoundingClientRect();
+      }
+      if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
       const style = window.getComputedStyle(el);
       if (!style || style.display === 'none' || style.visibility === 'hidden') continue;
       hits.push({ el, area: rect.width * rect.height });
@@ -1175,15 +1274,145 @@ async function advanceBlueAndSeeUpload(page, deadlineAt) {
   return false;
 }
 
-async function clickDocIntroAvancar(page, deadlineAt) {
-  let advanced = false;
-  const start = Date.now();
-  while (!advanced && (Date.now() - start) < 20000 && deadlineLeft(deadlineAt) > 0) {
-    if (await cnhChoiceVisible(page)) return true;
-    advanced = await clickAvancar(page);
-    if (!advanced) await sleep(1000);
+async function readUploadProblem(page) {
+  try {
+    return await page.evaluate(() => {
+      const normLocal = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const root = document.querySelector('[role="dialog"],[aria-modal="true"]') || document.querySelector('[role="main"]') || document.body;
+      const raw = String((root && root.innerText) || '').replace(/\s+/g, ' ').trim();
+      const n = normLocal(raw);
+      const bad = [
+        'nao foi possivel',
+        'nao conseguimos carregar',
+        'ocorreu um erro',
+        'tente novamente',
+        'formato nao suportado',
+        'formato de arquivo',
+        'arquivo invalido',
+        'muito pequena',
+        'pelo menos 1500',
+        'problemas tecnicos',
+        'could not upload',
+        'something went wrong'
+      ];
+      let hit = '';
+      for (const item of bad) {
+        if (n.includes(item)) { hit = item; break; }
+      }
+      const preview = Array.from(root.querySelectorAll('img')).some((img) => img.naturalWidth >= 200 && img.naturalHeight >= 120);
+      let fileSize = 0;
+      for (const el of Array.from(document.querySelectorAll('input[type="file"]'))) {
+        const size = el.files && el.files[0] ? el.files[0].size : 0;
+        if (size > fileSize) fileSize = size;
+      }
+      return { hit, preview, fileSize, snippet: raw.slice(0, 320) };
+    });
+  } catch {
+    return { hit: '', preview: false, fileSize: 0, snippet: '' };
   }
-  return advanced;
+}
+
+async function waitPhotoAttached(page, deadlineAt) {
+  const start = Date.now();
+  let last = null;
+  while (Date.now() - start < 15000 && deadlineLeft(deadlineAt) > 0) {
+    const problem = await readUploadProblem(page);
+    const enviar = await readNamedButton(page, ['enviar', 'submit', 'send']);
+    const enabled = buttonLooksEnabled(enviar);
+    last = {
+      ok: !problem.hit && (problem.preview || problem.fileSize > 0) && enabled,
+      error: problem.hit ? `foto_recusada:${problem.hit}` : '',
+      preview: !!problem.preview,
+      fileSize: problem.fileSize || 0,
+      enviar: !!enabled,
+      snippet: String(problem.snippet || '').slice(0, 180)
+    };
+    if (problem.hit) return last;
+    if (last.ok) return last;
+    await sleep(800);
+  }
+  if (!last) return { ok: false, error: 'foto_nao_entrou', preview: false, fileSize: 0, enviar: false, snippet: '' };
+  last.ok = false;
+  if (!last.error) last.error = 'foto_nao_entrou';
+  return last;
+}
+
+async function clickRoleAria(page, label) {
+  const want = norm(label);
+  if (!want) return false;
+  try {
+    return await page.evaluate((wanted) => {
+      const normLocal = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const buttons = Array.from(document.querySelectorAll('[role="button"],button'));
+      for (const el of buttons) {
+        if (el.getAttribute('aria-disabled') === 'true') continue;
+        const aria = normLocal(el.getAttribute('aria-label') || '');
+        const own = normLocal(el.innerText || '').replace(/^\+\s*/, '');
+        if (aria !== wanted && own !== wanted) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 8 || rect.height < 8) continue;
+        if (rect.bottom < 0 || rect.top > window.innerHeight) {
+          try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch {}
+        }
+        el.click();
+        return true;
+      }
+      return false;
+    }, want);
+  } catch {
+    return false;
+  }
+}
+
+async function carregarButtonVisible(page) {
+  try {
+    return await page.evaluate(() => {
+      const normLocal = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
+      for (const el of Array.from(document.querySelectorAll('[role="button"],button'))) {
+        if (el.getAttribute('aria-disabled') === 'true') continue;
+        const aria = normLocal(el.getAttribute('aria-label') || '');
+        const own = normLocal(el.innerText || '').replace(/^\+\s*/, '');
+        if (aria !== 'carregar' && own !== 'carregar') continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 8 || rect.height < 8) continue;
+        if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+        return true;
+      }
+      return false;
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function waitCarregarStable(page, deadlineAt) {
+  const start = Date.now();
+  let seenAt = 0;
+  while (Date.now() - start < 20000 && deadlineLeft(deadlineAt) > 0) {
+    if (await carregarButtonVisible(page)) {
+      if (!seenAt) seenAt = Date.now();
+      if (Date.now() - seenAt >= 2500) return true;
+    } else {
+      seenAt = 0;
+    }
+    await sleep(400);
+  }
+  return false;
+}
+
+async function clickDocIntroAvancar(page, deadlineAt) {
+  const start = Date.now();
+  while ((Date.now() - start) < 20000 && deadlineLeft(deadlineAt) > 0) {
+    if (await cnhChoiceVisible(page)) return true;
+    if (await pageHasNorm(page, "n.includes('carregue uma foto')")) return true;
+    const clicked = await clickRoleAria(page, 'avancar');
+    if (!clicked) await clickAvancar(page);
+    await sleep(1200);
+    if (await cnhChoiceVisible(page)) return true;
+    if (await pageHasNorm(page, "n.includes('carregue uma foto')")) return true;
+    if (!(await identityDocIntroStillOpen(page))) return true;
+  }
+  return false;
 }
 
 async function waitForScreenAfterConfirmIdentity(page, { deadlineAt, minMs = 8000, maxMs = 60000 } = {}) {
@@ -1203,6 +1432,7 @@ async function waitForScreenAfterConfirmIdentity(page, { deadlineAt, minMs = 800
   let last = '';
   let streak = 0;
   while ((Date.now() - start) < maxMs && deadlineLeft(deadlineAt) > 0) {
+    await revealMarketplaceDocCheckpoint(page);
     const info = await readMarketplacePhoneConfirmInfo(page);
     const scr = (info && info.detected) ? 'marketplace_phone_confirm' : await detectIdWizardScreen(page);
     const ready = readyScreens.has(scr);
@@ -1227,6 +1457,7 @@ async function waitForWizardScreen(page, wanted, { maxMs = 90000, deadlineAt } =
   const want = new Set(Array.isArray(wanted) ? wanted : [wanted]);
   const start = Date.now();
   while (Date.now() - start < maxMs && deadlineLeft(deadlineAt) > 0) {
+    await revealMarketplaceDocCheckpoint(page);
     const scr = await detectIdWizardScreen(page);
     if (want.has(scr)) return scr;
     if (scr === 'success' || scr === 'pending_review') return scr;
@@ -1867,12 +2098,12 @@ async function waitCnhSelected(page, { maxMs = 90000, deadlineAt } = {}) {
     const avancarBlue = buttonLooksEnabled(await readNamedButton(page, ['avancar', 'next']));
     last = Object.assign({}, probe || {}, sel || {}, { avancarBlue });
     if ((sel && sel.verified) || avancarBlue) {
-      await sleep(700);
-      const p2 = await probeDocTypeRadios(page);
+        await sleep(700);
+        const p2 = await probeDocTypeRadios(page);
       return { ok: true, probe: p2 || probe, sel, avancarBlue: true };
-    }
+      }
     if (!(probe && probe.cnhLabel)) {
-      await clickByText(page, ['ver mais', 'see more'], { withinDialog: false });
+    await clickByText(page, ['ver mais', 'see more'], { withinDialog: false });
     }
     await sleep(1500);
   }
@@ -1998,7 +2229,7 @@ async function ensureSellingFeed(page, { deadlineAt } = {}) {
     });
   }
   // DOM do selling é bem pesado — settle gordo.
-  await sleep(Math.max(WAIT_FEED_SETTLE_MS, 14000));
+  await sleep(5000);
   assertBudget(deadlineAt, 'selling_settle');
   return true;
 }
@@ -2289,48 +2520,58 @@ async function openActionNeededListing(page, { mode = 'today', preferTitle = '' 
           todayHint: `${hintsIn.todayDay}/${hintsIn.todayMonth}`
         };
 
-        // 1) Clique preferencial: botão do título (aria-label), evitando Marcar/Promover/Mais opções.
-        const titleBtns = Array.from(pick.root.querySelectorAll('[role="button"][aria-label]'));
-        let titleBtn = null;
-        for (const b of titleBtns) {
-          const al = normLocal(b.getAttribute('aria-label') || '');
-          if (!al) continue;
-          if (
-            al.includes('marcar como') ||
-            al.includes('promover') ||
-            al.includes('turbinar') ||
-            al.includes('mais opcoes') ||
-            al.includes('mais opções') ||
-            al.includes('more options') ||
-            al.includes('cliques')
-          ) {
-            continue;
-          }
-          if (preferN && al.includes(preferN)) {
-            titleBtn = b;
-            break;
-          }
-          if (!titleBtn) titleBtn = b;
+        const badCardAria = (al) => {
+          if (!al) return true;
+          if (al.includes('marcar como') || al.includes('promover') || al.includes('turbinar')) return true;
+          if (al.includes('mais opcoes') || al.includes('more options')) return true;
+          if (al.includes('visualizaram') || al.includes('people viewed') || al.includes('viewed the')) return true;
+          if (al.includes('mensagem') || al.includes('message') || al.includes('messenger') || al.includes('conversar')) return true;
+          return false;
+        };
+        const cardBtns = [];
+        let walk = pick.root;
+        for (let up = 0; up < 4 && walk; up++) {
+          if (walk.getAttribute && walk.getAttribute('role') === 'button') cardBtns.push(walk);
+          walk = walk.parentElement;
         }
-        if (titleBtn) {
+        cardBtns.push(...pick.root.querySelectorAll('[role="button"][aria-label]'));
+        const cardBtn = cardBtns.find((b) => {
+          const al = normLocal(b.getAttribute('aria-label') || '');
+          if (badCardAria(al)) return false;
+          if (preferN && al.includes(preferN)) return true;
+          return al.includes('anunciado') || al.includes('listed');
+        });
+        if (cardBtn) {
           try {
-            titleBtn.click();
+            cardBtn.scrollIntoView({ block: 'center', inline: 'nearest' });
+            cardBtn.click();
             return {
               found: true,
               clicked: true,
-              method: 'title_button',
-              aria: String(titleBtn.getAttribute('aria-label') || '').slice(0, 80),
+              method: 'listing_card',
+              aria: String(cardBtn.getAttribute('aria-label') || '').slice(0, 80),
               ...meta
             };
           } catch {}
         }
 
-        // 2) Fallback seguro: ⋮ Mais opções → Ver classificado
-        const more =
+        const itemLink = pick.root.querySelector('a[href*="/marketplace/item/"]');
+        if (itemLink) {
+          try {
+            itemLink.scrollIntoView({ block: 'center', inline: 'nearest' });
+            itemLink.click();
+            return { found: true, clicked: true, method: 'item_link', ...meta };
+          } catch {}
+        }
+
+        const moreBtn =
           pick.root.querySelector('[aria-label*="Mais opções"], [aria-label*="Mais opcoes"], [aria-label*="More options"]') ||
           Array.from(pick.root.querySelectorAll('[role="button"][aria-label]')).find((b) =>
             /mais opcoes|mais opções|more options/i.test(normLocal(b.getAttribute('aria-label') || ''))
           );
+
+        // 2) Fallback seguro: ⋮ Mais opções → Ver classificado
+        const more = moreBtn;
         if (more) {
           try {
             more.click();
@@ -2344,18 +2585,8 @@ async function openActionNeededListing(page, { mode = 'today', preferTitle = '' 
           } catch {}
         }
 
-        // 3) Último recurso: clicar no próprio banner de ação
-        try {
-          const banner = Array.from(pick.root.querySelectorAll('div, span')).find((el) =>
-            actionRe.test(normLocal(el.innerText || el.textContent || '').slice(0, 120))
-          );
-          if (banner) {
-            banner.click();
-            return { found: true, clicked: true, method: 'action_banner', ...meta };
-          }
-        } catch {}
-
-        return { found: true, clicked: false, method: 'none', ...meta };
+        // O texto laranja não abre o classificado. Sem o botão do card, tenta de novo.
+        return { found: true, clicked: false, method: 'card_not_ready', ...meta };
       },
       mode,
       prefer,
@@ -2427,18 +2658,19 @@ async function waitListingIdentityPrompt(page, { maxMs = 45000, deadlineAt } = {
         };
         const body = normLocal(document.body && (document.body.innerText || '') || '');
         const verb = /\b(confirme|confirmar|confirma|confirm|verifique|verificar|verifica|verify)\b/;
-        const hasBtn = Array.from(document.querySelectorAll('[role="button"],button')).some((el) => {
-          const label = normLocal(`${el.getAttribute('aria-label') || ''} ${el.innerText || el.textContent || ''}`).slice(0, 80);
-          if (!label || (!label.includes('identidade') && !label.includes('identity'))) return false;
-          return verb.test(label);
+        const exactBtn = Array.from(document.querySelectorAll('[role="button"],button')).some((el) => {
+          const aria = normLocal(el.getAttribute('aria-label') || '');
+          const own = normLocal(el.innerText || el.textContent || '');
+          return aria === 'confirmar identidade' || aria === 'confirm identity' || own === 'confirmar identidade' || own === 'confirm identity';
         });
+        const onCheckpoint = /\/checkpoint\/1501092823525282\/\d+/.test(String(location.pathname || ''));
         return {
-          hasBtn,
+          hasBtn: exactBtn || onCheckpoint,
           hasText: verb.test(body) && (body.includes('identidade') || body.includes('identity')),
           onItem: /\/marketplace\/item\//.test(location.pathname || '')
         };
       });
-      if (st && (st.hasBtn || st.hasText)) return st;
+      if (st && st.hasBtn) return st;
     } catch {}
     await sleep(2000);
   }
@@ -2487,9 +2719,9 @@ async function isPendingReviewScreen(page) {
         const hasId = t.includes('identidade') || t.includes('identity');
         const reviewing = t.includes('em andamento') || t.includes('analis') || t.includes('enviad') || t.includes('submitted');
         return (hasId && reviewing) ||
-          t.includes('normalmente analisamos suas informacoes') ||
-          t.includes('normalmente analisamos suas informações') ||
-          (t.includes('em andamento') && t.includes('48 horas'));
+        t.includes('normalmente analisamos suas informacoes') ||
+        t.includes('normalmente analisamos suas informações') ||
+        (t.includes('em andamento') && t.includes('48 horas'));
       };
       const body = normLocal(document.body && (document.body.innerText || document.body.textContent) || '');
       if (hit(body)) return true;
@@ -2636,6 +2868,11 @@ async function closeSuccessDialog(page, { deadlineAt } = {}) {
  * Pós-Enviar: espera 1–120s+ → (Pronto se “em andamento”) → Fechar.
  */
 async function finishAfterEnviar(page, { nome, source, deadlineAt } = {}) {
+  const sendError = await readUploadProblem(page);
+  if (sendError && (sendError.hit === 'ocorreu um erro' || sendError.hit === 'problemas tecnicos')) {
+    logEvt(nome, source, 'wizard_enviar_erro', { snippet: sendError.snippet || '' });
+    return { ok: false, error: 'facebook_erro_tecnico' };
+  }
   let success = await waitForSuccessScreen(page, { maxMs: POLL_SUCCESS_MS, deadlineAt });
   if (!success && deadlineLeft(deadlineAt) > 15000) {
     logEvt(nome, source, 'wizard_refresh_retry', {});
@@ -2737,6 +2974,7 @@ async function tryOpenActionNeededAtTop(
     logEvt(nome, source, 'open_attempt', {
       found: !!(scan && scan.found),
       method: (scan && scan.method) || null,
+      aria: (scan && scan.aria) ? String(scan.aria).slice(0, 80) : null,
       reason: (scan && scan.reason) || null,
       preferHit: !!(scan && scan.preferHit),
       listedToday: scan && Object.prototype.hasOwnProperty.call(scan, 'listedToday')
@@ -2754,7 +2992,7 @@ async function tryOpenActionNeededAtTop(
       return { openedOk: false, scan };
     }
 
-    if (!(scan && scan.found)) continue;
+    if (!(scan && scan.found && scan.clicked)) continue;
 
     await sleep(4000);
     if (scan.needVerClassificado || scan.method === 'more_options_opened') {
@@ -2763,11 +3001,14 @@ async function tryOpenActionNeededAtTop(
       await sleep(5000);
     }
 
-    const prompt = await waitListingIdentityPrompt(page, { maxMs: 50000, deadlineAt });
+    const prompt = await waitListingIdentityPrompt(page, { maxMs: 12000, deadlineAt });
     if (prompt) {
       openedOk = true;
       break;
     }
+    try {
+      logEvt(nome, source, 'open_no_prompt', { url: String(page.url() || '').slice(0, 180) });
+    } catch {}
 
     // Título pode ter aberto painel sem navegar — plano B: ⋮ → Ver classificado
     if (scan.method === 'title_button') {
@@ -2782,14 +3023,13 @@ async function tryOpenActionNeededAtTop(
       await sleep(2500);
       await clickVerClassificadoMenu(page);
       await sleep(5000);
-      const prompt2 = await waitListingIdentityPrompt(page, { maxMs: 45000, deadlineAt });
+      const prompt2 = await waitListingIdentityPrompt(page, { maxMs: 12000, deadlineAt });
       if (prompt2) {
         openedOk = true;
         break;
       }
     }
-    // Banner existia mas não abriu o prompt — não fica caçando mais cards abaixo.
-    break;
+    // O card foi clicado e o botão azul ainda não apareceu. Tenta o mesmo topo de novo.
   }
 
   return { openedOk, scan };
@@ -3124,7 +3364,112 @@ async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt,
   }
 }
 
-async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
+async function submitEnviarOnPhone(page, nome, source, action, minBytes, network) {
+  if (network === 'neorede') {
+    logEvt(nome, source, 'wizard_enviar_neorede', {});
+    const direct = await action();
+    return direct && (direct.ok || direct.navigated) ? direct : (direct || { ok: false, error: 'enviar_not_clicked' });
+  }
+  let phoneOn = false;
+  try {
+    const mode = require('./proxyMode').read();
+    phoneOn = require('./phoneProxyMode').isEnabled() && mode !== 'gen' && mode !== 'phone';
+  } catch {}
+  if (!phoneOn) return action();
+  const sw = page.browser && page.browser().__ctDirectSwitch;
+  if (!sw || typeof sw.flip !== 'function' || !sw.port()) {
+    logEvt(nome, source, 'wizard_enviar_proxy', { ok: false, error: 'no_switch' });
+    return { ok: false, error: 'proxy_mobile_unavailable' };
+  }
+  let hopped = false;
+  try {
+    const hop = await require('./phoneProxyMode').hopForPublish(nome);
+    hopped = true;
+    sw.flip(hop);
+    await sleep(1500);
+    let raw = '';
+    try {
+      raw = await require('./robeRail').proveThroughRail(sw.port());
+    } catch {
+      try { sw.flip(null); } catch {}
+      try { await require('./phoneProxyMode').release(nome); } catch {}
+      logEvt(nome, source, 'wizard_enviar_proxy', { ok: false, error: 'prove_failed' });
+      return { ok: false, error: 'proxy_mobile_unavailable' };
+    }
+    let parsed = null;
+    try { parsed = JSON.parse(raw); } catch {}
+    if (!parsed) {
+      const blob = String(raw || '').match(/\{[\s\S]*\}/);
+      if (blob) { try { parsed = JSON.parse(blob[0]); } catch {} }
+    }
+    const seen = require('./robeRail').readExit(parsed);
+    if (!seen.ip || seen.asn === 'AS262481') {
+      try { sw.flip(null); } catch {}
+      try { await require('./phoneProxyMode').release(nome); } catch {}
+      logEvt(nome, source, 'wizard_enviar_proxy', { ok: false, asn: seen.asn || '', ip: seen.ip || '' });
+      return { ok: false, error: 'proxy_mobile_unavailable' };
+    }
+    logEvt(nome, source, 'wizard_enviar_proxy', { ok: true, asn: seen.asn, ip: seen.ip, via: 'phone_tab' });
+    const mark = sw.bytesToProxy();
+    let result = null;
+    try {
+      result = await action();
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      if (/execution context was destroyed|context was destroyed/i.test(msg)) {
+        result = { ok: true, navigated: true };
+        logEvt(nome, source, 'wizard_enviar', { ok: true, navigated: true });
+      } else {
+        throw e;
+      }
+    }
+    const started = Date.now();
+    let last = sw.bytesToProxy();
+    let quiet = 0;
+    while (Date.now() - started < 15000) {
+      const now = sw.bytesToProxy();
+      if (now > mark && now === last) {
+        if (!quiet) quiet = Date.now();
+        if (Date.now() - quiet >= 800) break;
+      } else {
+        quiet = 0;
+        last = now;
+      }
+      await sleep(100);
+    }
+    const bytes = Math.max(0, sw.bytesToProxy() - mark);
+    const need = Math.max(2048, Number(minBytes) || 0);
+    logEvt(nome, source, 'wizard_enviar_left_proxy', {
+      ok: !!(result && result.ok) && bytes >= need,
+      bytes,
+      need,
+      clicked: !!(result && result.ok),
+      asn: seen.asn,
+      ip: seen.ip
+    });
+    try { sw.flip(null); } catch {}
+    try { await require('./phoneProxyMode').release(nome); } catch {}
+    hopped = false;
+    if (bytes < need) {
+      return { ok: false, error: 'enviar_photo_not_sent', bytes };
+    }
+    if (!(result && (result.ok || result.navigated))) return result || { ok: false, error: 'enviar_not_clicked', bytes };
+    return { ok: true, bytes, navigated: !!(result && result.navigated) };
+  } catch (e) {
+    if (hopped) {
+      try { if (sw) sw.flip(null); } catch {}
+      try { await require('./phoneProxyMode').release(nome); } catch {}
+    }
+    const msg = String((e && e.message) || e);
+    logEvt(nome, source, 'wizard_enviar_proxy', { ok: false, error: msg.slice(0, 160) });
+    if (msg.indexOf('phone_proxy_required') === 0 || msg.indexOf('proxy_mobile') === 0) {
+      return { ok: false, error: 'proxy_mobile_unavailable' };
+    }
+    throw e;
+  }
+}
+
+async function runIdDocWizard(page, { idPath, deadlineAt, nome, source, network } = {}) {
   assertBudget(deadlineAt, 'wizard_start');
 
   const maybeMarketplacePhoneConfirm = async (where, extra = {}) => {
@@ -3160,7 +3505,13 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
     if (handoff) return handoff;
   }
 
-  // 1) Confirme sua identidade (página do item / selling)
+  // 1) Confirme sua identidade (página do item / selling).
+  // Se a URL já é o checkpoint deste perfil, o botão azul ficou para trás.
+  if ((screen === 'confirm' || screen === 'unknown') && pageIsMarketplaceDocCheckpoint(page)) {
+    await revealMarketplaceDocCheckpoint(page);
+    await sleep(1500);
+    screen = await detectIdWizardScreen(page);
+  }
   if (screen === 'confirm' || screen === 'unknown') {
     let confirmBtn = false;
     const confirmStart = Date.now();
@@ -3214,17 +3565,17 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
     }
     if (!advanced) {
       advanced = await waitClickByText(
-        page,
-        [
-          'a seguir: continue para a verificacao',
-          'a seguir: continue para a verificação',
-          'continue para a verificacao',
-          'continue para a verificação',
-          'avancar',
-          'avançar'
-        ],
+      page,
+      [
+        'a seguir: continue para a verificacao',
+        'a seguir: continue para a verificação',
+        'continue para a verificacao',
+        'continue para a verificação',
+        'avancar',
+        'avançar'
+      ],
         { maxMs: 20000, deadlineAt, withinDialog: false, settleMs: WAIT_STEP_MS + 3000 }
-      );
+    );
     }
     if (!advanced) {
       try {
@@ -3272,6 +3623,7 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
   }
 
   if (screen === 'identity_doc_intro') {
+    await revealMarketplaceDocCheckpoint(page);
     const introAdvance = await clickDocIntroAvancar(page, deadlineAt);
     logEvt(nome, source, 'wizard_doc_intro_avancar', { ok: !!introAdvance });
     if (!introAdvance) return { ok: false, error: 'doc_intro_avancar_not_clicked' };
@@ -3326,16 +3678,16 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
     }
     if (!loadDoc) {
       loadDoc = await waitClickByText(
-        page,
-        [
-          'carregar documento de identidade',
-          'carregar seu documento de identidade',
+      page,
+      [
+        'carregar documento de identidade',
+        'carregar seu documento de identidade',
           'enviar documento de identidade',
-          'upload identity document',
-          'upload your id'
-        ],
+        'upload identity document',
+        'upload your id'
+      ],
         { maxMs: 20000, deadlineAt, withinDialog: false, settleMs: WAIT_STEP_MS + 3000 }
-      );
+    );
     }
     logEvt(nome, source, 'wizard_carregar_documento', { ok: !!loadDoc, screenBefore: screen });
     if (!loadDoc) {
@@ -3401,8 +3753,10 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
 
   // 7) Upload id.png via input[type=file] (mesmo padrão do ROBE de fotos)
   let input = null;
+  let uploadedViaChooser = false;
   const findStart = Date.now();
-  while (!input && Date.now() - findStart < 120000 && deadlineLeft(deadlineAt) > 0) {
+  while (!input && !uploadedViaChooser && Date.now() - findStart < 120000 && deadlineLeft(deadlineAt) > 0) {
+    await revealMarketplaceDocCheckpoint(page);
     if (await cnhChoiceVisible(page)) {
       const cnhWait = await waitCnhSelected(page, { maxMs: 25000, deadlineAt });
       logEvt(nome, source, 'wizard_cnh', {
@@ -3418,7 +3772,7 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
       await sleep(1500);
       continue;
     }
-    if (await identityDocIntroStillOpen(page)) {
+    if (await identityDocIntroStillOpen(page) && !pageIsMarketplaceDocCheckpoint(page)) {
       const advanced = await clickDocIntroAvancar(page, deadlineAt);
       logEvt(nome, source, 'wizard_doc_intro_avancar_late', { ok: !!advanced });
       if (!advanced) return { ok: false, error: 'doc_intro_avancar_not_clicked' };
@@ -3427,9 +3781,54 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
     }
     if (await identityRetryStillOpen(page)) {
       const advanced = await clickAvancar(page);
-      if (!advanced) return { ok: false, error: 'avancar_not_clicked' };
-      await sleep(1500);
-      continue;
+      if (advanced) {
+        await sleep(1500);
+        continue;
+      }
+      if (!pageIsMarketplaceDocCheckpoint(page)) return { ok: false, error: 'avancar_not_clicked' };
+    }
+    if (pageIsMarketplaceDocCheckpoint(page)) {
+      if (await identityDocIntroStillOpen(page)) {
+        const advanced = await clickRoleAria(page, 'avancar');
+        logEvt(nome, source, 'wizard_doc_intro_avancar', { ok: !!advanced, where: 'checkpoint_file_loop' });
+        await sleep(1500);
+        continue;
+      }
+      const photo = await pageHasNorm(page, "n.includes('carregue uma foto')");
+      if (photo) {
+        const stable = await waitCarregarStable(page, deadlineAt);
+        logEvt(nome, source, 'wizard_carregar_pronto', { ok: !!stable });
+        if (!stable) {
+          await sleep(1000);
+          continue;
+        }
+        const waiter = page.waitForFileChooser({ timeout: 8000 }).catch(() => null);
+        const loaded = await clickRoleAria(page, 'carregar');
+        logEvt(nome, source, 'wizard_carregar_documento', { ok: !!loaded, where: 'foto_carregar' });
+        const got = loaded ? await waiter : null;
+        if (got) await got.accept([idPath]);
+        logEvt(nome, source, 'wizard_upload', { ok: !!got, via: 'file_chooser' });
+        if (!got) {
+          await sleep(1500);
+          continue;
+        }
+        const attachedNow = await waitPhotoAttached(page, deadlineAt);
+        logEvt(nome, source, 'wizard_foto_pronta', {
+          ok: !!(attachedNow && attachedNow.ok),
+          error: (attachedNow && attachedNow.error) || '',
+          preview: !!(attachedNow && attachedNow.preview),
+          fileSize: attachedNow && attachedNow.fileSize || 0,
+          enviar: !!(attachedNow && attachedNow.enviar),
+          snippet: (attachedNow && attachedNow.snippet) || '',
+          where: 'depois_do_carregar'
+        });
+        if (attachedNow && attachedNow.ok) {
+          uploadedViaChooser = true;
+          break;
+        }
+        await sleep(1500);
+        continue;
+      }
     }
     input = await findFileInputEverywhere(page);
     if (input) break;
@@ -3439,27 +3838,66 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
     });
     await sleep(2500);
   }
-  if (!input) {
-    return { ok: false, error: 'file_input_not_found' };
+  if (!uploadedViaChooser) {
+    if (!input) {
+      return { ok: false, error: 'file_input_not_found' };
+    }
+    try {
+      await input.uploadFile(idPath);
+    } catch (e) {
+      return { ok: false, error: `upload_failed:${(e && e.message) || e}` };
+    }
+    logEvt(nome, source, 'wizard_upload', { ok: true });
   }
-  try {
-    await input.uploadFile(idPath);
-  } catch (e) {
-    return { ok: false, error: `upload_failed:${(e && e.message) || e}` };
+  const attached = await waitPhotoAttached(page, deadlineAt);
+  logEvt(nome, source, 'wizard_foto_pronta', {
+    ok: !!(attached && attached.ok),
+    error: (attached && attached.error) || '',
+    preview: !!(attached && attached.preview),
+    fileSize: attached && attached.fileSize || 0,
+    enviar: !!(attached && attached.enviar),
+    snippet: (attached && attached.snippet) || ''
+  });
+  if (!(attached && attached.ok)) {
+    return { ok: false, error: (attached && attached.error) || 'foto_nao_entrou' };
   }
-  logEvt(nome, source, 'wizard_upload', { ok: true });
-  await sleep(WAIT_AFTER_UPLOAD_MS);
   assertBudget(deadlineAt, 'wizard_after_upload');
 
-  // 8) Enviar fica azul só depois do arquivo. É a mesma camada do Avançar, não um botão comum.
-  let sent = false;
-  const sendStart = Date.now();
-  while (!sent && Date.now() - sendStart < 90000 && deadlineLeft(deadlineAt) > 0) {
-    sent = await clickBlueOverlay(page, ['enviar', 'submit', 'send']);
-    if (!sent) await sleep(1500);
+  // 8) A foto já está na tela e o Enviar está azul. Só esse clique sai pelo celular.
+  const fileBytes = (() => { try { return fs.statSync(idPath).size; } catch { return 0; } })();
+  const sentWrap = await submitEnviarOnPhone(page, nome, source, async () => {
+    let sent = false;
+    let notedButtons = false;
+    const sendStart = Date.now();
+    while (!sent && Date.now() - sendStart < 90000 && deadlineLeft(deadlineAt) > 0) {
+      try {
+        const ready = buttonLooksEnabled(await readNamedButton(page, ['enviar', 'submit', 'send']));
+        if (!ready) {
+          await sleep(800);
+          continue;
+        }
+        sent = await clickBlueOverlay(page, ['enviar', 'submit', 'send']);
+        if (!sent) sent = await clickExactWord(page, ['enviar', 'submit', 'send']);
+        if (!sent && !notedButtons) {
+          notedButtons = true;
+          const labels = await readVisibleButtonLabels(page);
+          logEvt(nome, source, 'wizard_enviar_buttons', { labels: labels.slice(0, 12) });
+        }
+      } catch (e) {
+        const msg = String((e && e.message) || e);
+        if (!/execution context was destroyed|context was destroyed/i.test(msg)) throw e;
+        await sleep(1500);
+        continue;
+      }
+      if (!sent) await sleep(1500);
+    }
+    logEvt(nome, source, 'wizard_enviar', { ok: !!sent });
+    if (!sent) return { ok: false, error: 'enviar_not_clicked' };
+    return { ok: true };
+  }, Math.floor(fileBytes * 0.4), network === 'neorede' ? 'neorede' : 'phone');
+  if (!(sentWrap && sentWrap.ok)) {
+    return { ok: false, error: (sentWrap && sentWrap.error) || 'enviar_not_clicked' };
   }
-  logEvt(nome, source, 'wizard_enviar', { ok: !!sent });
-  if (!sent) return { ok: false, error: 'enviar_not_clicked' };
 
   // 9) Pós-Enviar: 1–120s → (em andamento → Pronto) → Fechar
   const finished = await finishAfterEnviar(page, { nome, source, deadlineAt });
@@ -3471,12 +3909,54 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source } = {}) {
   return { ok: true };
 }
 
+function phoneSendShouldRetry(wiz) {
+  const err = String((wiz && wiz.error) || '');
+  return err === 'facebook_erro_tecnico' || err === 'proxy_mobile_unavailable' || err === 'enviar_photo_not_sent';
+}
+
+async function reopenIdentityListing(page, { nome, source, deadlineAt, mode }) {
+  await ensureSellingFeed(page, { deadlineAt });
+  const opened = await tryOpenActionNeededAtTop(page, {
+    nome,
+    source,
+    mode: mode === 'auto' ? 'today' : 'firstAny',
+    preferTitle: '',
+    attempts: mode === 'auto' ? TOP_SCAN_ATTEMPTS_AUTO : TOP_SCAN_ATTEMPTS_HUMAN,
+    deadlineAt
+  });
+  if (opened && opened.openedOk) return true;
+  if (mode === 'auto') return false;
+  const probed = await openIdentityFromVisibleListings(page, { nome, source, deadlineAt });
+  return !!probed;
+}
+
+async function runIdDocWithFallback(page, { idPath, deadlineAt, nome, source, mode }) {
+  let wiz = await runIdDocWizard(page, { idPath, deadlineAt, nome, source, network: 'phone' });
+  if (wiz && wiz.ok) return wiz;
+  if (!phoneSendShouldRetry(wiz)) return wiz;
+
+  logEvt(nome, source, 'wizard_proxy_rotate', { error: wiz.error || '' });
+  try { await require('./phoneProxyMode').release(nome); } catch {}
+  if (!(await reopenIdentityListing(page, { nome, source, deadlineAt, mode }))) return wiz;
+
+  wiz = await runIdDocWizard(page, { idPath, deadlineAt, nome, source, network: 'phone' });
+  if (wiz && wiz.ok) return wiz;
+  if (!phoneSendShouldRetry(wiz)) return wiz;
+
+  logEvt(nome, source, 'wizard_neorede_fallback', { error: wiz.error || '' });
+  try { await require('./phoneProxyMode').release(nome); } catch {}
+  if (!(await reopenIdentityListing(page, { nome, source, deadlineAt, mode }))) return wiz;
+  return runIdDocWizard(page, { idPath, deadlineAt, nome, source, network: 'neorede' });
+}
+
 async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
   const startedAt = Date.now();
   const source = 'auto';
   const hardDeadline = Number(deadlineAt) || Date.now() + BUDGET_TOTAL_MS;
 
+  let taken = null;
   try {
+    taken = await takeIdentityTab(page);
     const handle0 = pageHandleState(page);
     logEvt(nome, source, 'page_handle', { reason: handle0.reason, url: String(handle0.url || '').slice(0, 180) });
     if (!handle0.ok) {
@@ -3548,11 +4028,12 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
 
     await sleep(WAIT_STEP_MS);
 
-    const wiz = await runIdDocWizard(page, {
+    const wiz = await runIdDocWithFallback(page, {
       idPath: ID_PNG_PATH,
       deadlineAt: workDeadline,
       nome,
-      source
+      source,
+      mode: 'auto'
     });
 
     if (wiz && (wiz.marketplacePhoneNoBalance === true || wiz.marketplacePhoneError === true)) {
@@ -3602,7 +4083,63 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
       await setMarketplaceDocFlag(nome, { reason: 'marketplace_doc_error', text: String(msg).slice(0, 400) });
     }
     return fail;
+  } finally {
+    releaseIdentityTab(page, taken);
   }
+}
+
+async function openIdentityFromVisibleListings(page, { nome, source, deadlineAt } = {}) {
+  let labels = [];
+  try {
+    labels = await page.evaluate(() => {
+      const normLocal = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+      const skip = /marcar como|promover|turbinar|mais opcoes|more options|visualizaram|criar classificado|anunciar|enviar mensagem/;
+      const out = [];
+      const seen = new Set();
+      for (const el of Array.from(document.querySelectorAll('[role="button"][aria-label], a[aria-label]'))) {
+        const al = String(el.getAttribute('aria-label') || '').trim();
+        const n = normLocal(al);
+        if (!al || al.length < 8 || al.length > 180 || skip.test(n) || /voltar|pagina anterior|^back$|^facebook$/.test(n) || seen.has(n)) continue;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 8 || rect.height < 8) continue;
+        seen.add(n);
+        out.push(al);
+        if (out.length >= 6) break;
+      }
+      return out;
+    });
+  } catch {
+    return '';
+  }
+  for (const label of labels) {
+    if (deadlineLeft(deadlineAt) < 20000) break;
+    let clicked = false;
+    try {
+      clicked = await page.evaluate((wanted) => {
+        const el = Array.from(document.querySelectorAll('[role="button"][aria-label], a[aria-label]')).find((node) => {
+          return String(node.getAttribute('aria-label') || '').trim() === wanted;
+        });
+        if (!el) return false;
+        el.click();
+        return true;
+      }, label);
+    } catch {
+      clicked = false;
+    }
+    if (!clicked) continue;
+    await sleep(5000);
+    let screen = '';
+    try { screen = await detectIdWizardScreen(page); } catch {}
+    logEvt(nome, source, 'listing_probe', { label: String(label).slice(0, 60), screen: screen || 'unknown' });
+    if (['identity_retry', 'upload_photo', 'doc_type', 'carregar_doc', 'identity_doc_intro', 'continuar', 'confirm'].includes(screen)) {
+      return screen;
+    }
+    try {
+      await page.goto(SELLING_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT_MS });
+    } catch {}
+    await sleep(4000);
+  }
+  return '';
 }
 
 async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
@@ -3610,7 +4147,9 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
   const source = 'human';
   const workDeadline = Number(deadlineAt) || Date.now() + BUDGET_TOTAL_MS;
 
+  let taken = null;
   try {
+    taken = await takeIdentityTab(page);
     if (!pageHandleState(page).ok) {
       logEvt(nome, source, 'human_page_gone', {});
       return { ok: false, error: 'page_gone' };
@@ -3620,17 +4159,37 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
       await dismissTurbineUpsell(page, { deadlineAt: Math.min(workDeadline, Date.now() + 20000) });
     } catch {}
 
-    await ensureSellingFeed(page, { deadlineAt: workDeadline });
+    const here = await detectIdWizardScreen(page).catch(() => '');
+    const wizardHere = ['identity_retry', 'upload_photo', 'doc_type', 'carregar_doc', 'identity_doc_intro', 'continuar', 'confirm'].includes(here);
+    let openedOk = false;
+    let scan = null;
+    if (wizardHere) {
+      openedOk = true;
+      scan = { found: true, method: 'already_open' };
+      logEvt(nome, source, 'wizard_already_open', { screen: here });
+    } else {
+      await ensureSellingFeed(page, { deadlineAt: workDeadline });
 
-    // Humano força o fluxo, mas banner também fica no topo — sem scroll-hunt.
-    const { openedOk, scan } = await tryOpenActionNeededAtTop(page, {
-      nome,
-      source,
-      mode: 'firstAny',
-      preferTitle: '',
-      attempts: TOP_SCAN_ATTEMPTS_HUMAN,
-      deadlineAt: workDeadline
-    });
+      // Humano força o fluxo, mas banner também fica no topo — sem scroll-hunt.
+      const opened = await tryOpenActionNeededAtTop(page, {
+        nome,
+        source,
+        mode: 'firstAny',
+        preferTitle: '',
+        attempts: TOP_SCAN_ATTEMPTS_HUMAN,
+        deadlineAt: workDeadline
+      });
+      openedOk = opened.openedOk;
+      scan = opened.scan;
+      if (!openedOk) {
+        const probed = await openIdentityFromVisibleListings(page, { nome, source, deadlineAt: workDeadline });
+        if (probed) {
+          openedOk = true;
+          scan = { found: true, method: 'listing_probe' };
+          logEvt(nome, source, 'wizard_listing_probe', { screen: probed });
+        }
+      }
+    }
 
     if (!openedOk) {
       logEvt(nome, source, 'human_no_action', {
@@ -3647,11 +4206,12 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
     }
 
     await sleep(WAIT_STEP_MS);
-    const wiz = await runIdDocWizard(page, {
+    const wiz = await runIdDocWithFallback(page, {
       idPath: ID_PNG_PATH,
       deadlineAt: workDeadline,
       nome,
-      source
+      source,
+      mode: 'human'
     });
 
     // CONTRATO: humano NUNCA marca robeIdDocDoneDay
@@ -3677,6 +4237,8 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
       await setMarketplaceDocFlag(nome, { reason: 'marketplace_doc_error', text: String(msg).slice(0, 400) });
     }
     return fail;
+  } finally {
+    releaseIdentityTab(page, taken);
   }
 }
 

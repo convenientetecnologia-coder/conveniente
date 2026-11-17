@@ -2460,7 +2460,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     }
 
     // Nova aba + patchPage (sem minimizar/off-screen)
-    if (require('./mobilePublishProxy').readSettings().enabled === true) {
+    if (require('./mobilePublishProxy').readSettings().enabled === true && !require('./phoneProxyMode').isEnabled()) {
       try {
         const virtusBrowser = browser;
         robeRailHandle = await require('./robeRail').openRobeRail({

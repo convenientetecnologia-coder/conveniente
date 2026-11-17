@@ -2407,7 +2407,9 @@ const OWN_PROFILE_PROBE_URL = 'https://m.facebook.com/profile.php';
 const OWN_PROFILE_HOME_URL = 'https://www.facebook.com/messages';
 
 function isRealBlockUrl(url) {
-  return /\/login|\/checkpoint|two_step_verification|\/two_factor\/|remember_browser|disabled_checkpoint/i.test(String(url || ''));
+  const u = String(url || '');
+  if (browserHelper.isMarketplaceDocCheckpointUrl(u)) return false;
+  return /\/login|\/checkpoint|two_step_verification|\/two_factor\/|remember_browser|disabled_checkpoint/i.test(u);
 }
 
 function profileReleaseReason(reason) {
@@ -2497,6 +2499,7 @@ async function pickMessagesProbePage(ctrl) {
     let u = '';
     try { u = typeof pg.url === 'function' ? String(pg.url() || '') : ''; } catch {}
     if (/\/marketplace\/(create|you\/selling)/i.test(u)) continue;
+    if (browserHelper.isMarketplaceDocCheckpointUrl(u)) continue;
     if (/facebook\.com\/messages|messenger\.com/i.test(u)) return pg;
     if (!fallback && /facebook\.com|messenger\.com/i.test(u)) fallback = pg;
   }
@@ -2517,6 +2520,9 @@ async function confirmOwnProfile(nome, ctrl) {
   }
   const page = await pickMessagesProbePage(ctrl);
   if (!page) return 'skipped';
+  let probeUrl = '';
+  try { probeUrl = typeof page.url === 'function' ? String(page.url() || '') : ''; } catch {}
+  if (browserHelper.isMarketplaceDocCheckpointUrl(probeUrl)) return 'skipped';
   robeMeta[nome].ownProfileProbeBusy = true;
   try {
     const cUser = await readCUserForProfile(nome, page);
@@ -2598,11 +2604,22 @@ async function nurseEnsureTerminalHumanOnce(nome, ctrl, want, reason) {
 // Contrato ops: captcha/checkpoint → NÃO fecha browser, marca flag, INVOCA humano.
 // Usuário verifica no dia; exclusão diária fecha+exclui no horário configurado.
 async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = '', title = '' } = {}) {
+  if (browserHelper.isMarketplaceDocCheckpointUrl(url)) {
+    try {
+      const prevDoc = await readAccountFlags(nome).catch(() => null);
+      if (prevDoc && prevDoc.captchaCheckpoint === true) await clearAccountFlags(nome, ['captchaCheckpoint']);
+    } catch {}
+    return;
+  }
   if (await ownProfileProofIsFresh(nome, controllers.get(nome))) return;
   let already = false;
   try {
     const prev = await readAccountFlags(nome).catch(() => null);
     already = !!(prev && prev.captchaCheckpoint === true);
+    if (already && browserHelper.isMarketplaceDocCheckpointUrl(prev && prev.captchaCheckpointUrl)) {
+      await clearAccountFlags(nome, ['captchaCheckpoint']);
+      return;
+    }
     if (already) {
       robeMeta[nome] = robeMeta[nome] || {};
       robeMeta[nome].whyNotOpen = 'captcha_checkpoint';
@@ -4864,7 +4881,8 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
           if (desiredEngineAtProbe === 'delta') {
             const cur = (() => { try { return String(pg.url() || ''); } catch { return ''; } })();
             const alreadyOnMessages = isFacebookMessagesUrl(cur);
-            if (!alreadyOnMessages) {
+            const onIdentityDoc = browserHelper.isMarketplaceDocCheckpointUrl(cur);
+            if (!alreadyOnMessages && !onIdentityDoc) {
               await pg.goto('https://www.facebook.com/messages', { waitUntil: 'domcontentloaded', timeout: 45000 });
             }
             try {
@@ -13536,7 +13554,7 @@ const handlers = {
           for (const pg of (pages || []).slice(0, 8)) {
             let u = '';
             try { u = (pg && typeof pg.url === 'function') ? String(pg.url() || '') : ''; } catch { u = ''; }
-            if (/\/checkpoint\//i.test(u) || /captcha/i.test(u)) {
+            if ((/\/checkpoint\//i.test(u) || /captcha/i.test(u)) && !browserHelper.isMarketplaceDocCheckpointUrl(u)) {
               const urlHit = { loginRequired: true, reason: 'url_checkpoint', domain: 'facebook', url: u, title: '' };
               if (!hit || reasonPriority(urlHit.reason) >= reasonPriority(hit.reason)) {
                 hit = urlHit;
@@ -19643,7 +19661,7 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
         } catch {}
         return { ok: true, state: 'trust_device', reason: 'trust_device' };
       }
-      if (/\/auth_platform\/|two_step_verification|\/two_factor\/|\/login\.php|\/login\/|\/checkpoint\//i.test(hrefNow) && !/remember_browser/i.test(hrefNow)) {
+      if (/\/auth_platform\/|two_step_verification|\/two_factor\/|\/login\.php|\/login\/|\/checkpoint\//i.test(hrefNow) && !/remember_browser/i.test(hrefNow) && !browserHelper.isMarketplaceDocCheckpointUrl(hrefNow)) {
         const reason = /auth_platform/i.test(hrefNow)
           ? 'auth_platform'
           : (/two_step_verification|\/two_factor\//i.test(hrefNow) ? 'two_factor' : 'login_wall');

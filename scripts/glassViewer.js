@@ -502,8 +502,21 @@ async function clearGlassPaint(page) {
   }).catch(() => {});
 }
 
+function identityGlassShouldStayOff(page) {
+  if (!page || page.__ctSkipGlassForIdDoc !== true) return false;
+  let url = '';
+  try { url = String(page.url() || ''); } catch {}
+  if (/\/checkpoint\/1501092823525282\/\d+/i.test(url)) return true;
+  try { page.__ctSkipGlassForIdDoc = false; } catch {}
+  return false;
+}
+
 async function paint(page) {
   if (pageClosed(page)) return;
+  if (identityGlassShouldStayOff(page)) {
+    await clearGlassPaint(page);
+    return;
+  }
   if (!isGlassArmed(page) || !isGlassViewerEnabled()) {
     await clearGlassPaint(page);
     return;
@@ -892,7 +905,7 @@ function detachNavHook(page) {
 async function applyGlassViewerOnce(page, opts = {}) {
   const source = String((opts && opts.source) || 'apply').slice(0, 80);
   const light = source === 'framenavigated';
-  if (!isGlassArmed(page)) {
+  if (identityGlassShouldStayOff(page)) {
     return readState(page);
   }
   if (!isGlassViewerEnabled()) {

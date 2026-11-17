@@ -4,7 +4,6 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
-
 // Modo do proxy 4G/5G. Sem o arquivo, o Chrome segue o fluxo atual.
 // Não lê túnel, gateway, ProxyCheap, ASocks nem Bright Data.
 const MODE_PATH = path.join(__dirname, '..', 'dados', 'phone_proxy_mode.json');
@@ -350,10 +349,34 @@ async function release(nome) {
   } catch {}
 }
 
+async function hopForPublish(nome) {
+  const started = Date.now();
+  while (Date.now() - started < 30 * 60 * 1000) {
+    try {
+      const launch = await resolveLaunch(nome, 'publish');
+      if (launch && launch.port && !launch.external) {
+        return {
+          host: '127.0.0.1',
+          port: launch.port,
+          user: launch.username,
+          pass: launch.password
+        };
+      }
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      const wait = msg.indexOf('no_chair') >= 0 || msg.indexOf('phone_pipe_down') >= 0 || msg.indexOf('no_carrier') >= 0 || msg.indexOf('lease_failed') >= 0;
+      if (!wait) throw e;
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+  throw new Error('phone_proxy_required:no_chair');
+}
+
 module.exports = {
   readConfig,
   isEnabled,
   inspect,
+  hopForPublish,
   note,
   writeEdgeState,
   blockReason,
