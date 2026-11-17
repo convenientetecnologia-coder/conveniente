@@ -3570,6 +3570,65 @@ async function execSelfUpdate(cmd) {
   }
 }
 
+// Fecha os navegadores, baixa o código e abre de novo.
+// O index continua no ar. O código novo da postagem entra nos workers que nascem no Abrir 24h.
+async function execUpdateAndReload(cmd) {
+  const payload = (cmd && cmd.payload && typeof cmd.payload === 'object') ? cmd.payload : {};
+  const requestId = String(payload.requestId || '').trim() || (cmd && cmd.id) || 'noid';
+  const steps = [];
+  try { updateLogAppend({ event: 'update_and_reload_start', requestId }); } catch {}
+
+  let stopRes = null;
+  try {
+    stopRes = await httpJson('/api/cells/stop', {
+      method: 'POST',
+      body: { confirm: true },
+      timeoutMs: 180000
+    });
+  } catch (e) {
+    stopRes = { ok: false, error: (e && e.message) || String(e) };
+  }
+  steps.push({
+    step: 'stop_workers',
+    ok: !!(stopRes && stopRes.ok === true),
+    error: (stopRes && stopRes.ok === true) ? null : String((stopRes && stopRes.error) || 'stop_workers_failed')
+  });
+
+  let pullError = null;
+  try {
+    const pullCmd = Object.assign({}, cmd, {
+      payload: Object.assign({}, payload, { restart: false })
+    });
+    await execSelfUpdate(pullCmd);
+  } catch (e) {
+    pullError = (e && e.message) || String(e);
+  }
+  steps.push({ step: 'pull', ok: !pullError, error: pullError });
+
+  await sleep(1000);
+
+  let openRes = null;
+  try {
+    openRes = await httpJson('/api/perfis/open-all-24h', {
+      method: 'POST',
+      timeoutMs: 15 * 60 * 1000
+    });
+  } catch (e) {
+    openRes = { ok: false, error: (e && e.message) || String(e) };
+  }
+  const openOk = !!(openRes && openRes.ok !== false);
+  steps.push({
+    step: 'open_24h',
+    ok: openOk,
+    error: openOk ? null : String((openRes && openRes.error) || 'open_all_24h_failed')
+  });
+
+  const ok = steps.every((s) => s && s.ok === true);
+  const error = ok ? null : steps.filter((s) => s && s.ok !== true).map((s) => s.step + ':' + (s.error || 'falhou')).join('|');
+  try { updateLogAppend({ event: 'update_and_reload_done', requestId, ok, error, steps }); } catch {}
+  return { ok, error, steps };
+}
+
 // ===== NOVO: Configurar CT_BASE_URL + LOG_INGEST_SECRET via comando (persistente) =====
 function __locationCityKey(value) {
   return String(value || '')
@@ -4512,6 +4571,16 @@ async function applyCommands(cmds = []) {
       }
       else if (c.type === 'rotate_logs')      { details = await execRotateLogs(c); results.push({ id: cmdId || null, type: cmdType, ok: !!(details && details.ok !== false), details: details || null }); }
       else if (c.type === 'self_update')      { await execSelfUpdate(c); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
+      else if (c.type === 'update_and_reload') {
+        details = await execUpdateAndReload(c);
+        results.push({
+          id: cmdId || null,
+          type: cmdType,
+          ok: !!(details && details.ok === true),
+          error: (details && details.ok === true) ? null : String((details && details.error) || 'update_and_reload_failed'),
+          details: details || null
+        });
+      }
       else if (c.type === 'infra_ping')       { results.push({ id: cmdId || null, type: cmdType, ok: true, details: { ok: true, pong: true, ts: Date.now() } }); }
       else { throw new Error('unknown_command:' + String(c.type)); }
       logger.info('[DASH][CMD] executado: ' + c.type);
@@ -4737,6 +4806,7 @@ const COMMAND_HANDLERS = Object.freeze({
   gateway_reconcile: execGatewaySetProxies,
   rotate_logs: execRotateLogs,
   self_update: execSelfUpdate,
+  update_and_reload: execUpdateAndReload,
   infra_ping: async () => ({ ok: true, pong: true, ts: Date.now() })
 });
 

@@ -3392,7 +3392,7 @@ async function submitEnviarOnPhone(page, nome, source, action, minBytes, network
       raw = await require('./robeRail').proveThroughRail(sw.port());
     } catch {
       try { sw.flip(null); } catch {}
-      try { await require('./phoneProxyMode').release(nome); } catch {}
+      try { await require('./phoneProxyMode').releaseSession(nome); } catch {}
       logEvt(nome, source, 'wizard_enviar_proxy', { ok: false, error: 'prove_failed' });
       return { ok: false, error: 'proxy_mobile_unavailable' };
     }
@@ -3405,7 +3405,7 @@ async function submitEnviarOnPhone(page, nome, source, action, minBytes, network
     const seen = require('./robeRail').readExit(parsed);
     if (!seen.ip || seen.asn === 'AS262481') {
       try { sw.flip(null); } catch {}
-      try { await require('./phoneProxyMode').release(nome); } catch {}
+      try { await require('./phoneProxyMode').releaseSession(nome); } catch {}
       logEvt(nome, source, 'wizard_enviar_proxy', { ok: false, asn: seen.asn || '', ip: seen.ip || '' });
       return { ok: false, error: 'proxy_mobile_unavailable' };
     }
@@ -3448,7 +3448,7 @@ async function submitEnviarOnPhone(page, nome, source, action, minBytes, network
       ip: seen.ip
     });
     try { sw.flip(null); } catch {}
-    try { await require('./phoneProxyMode').release(nome); } catch {}
+    try { await require('./phoneProxyMode').releaseSession(nome); } catch {}
     hopped = false;
     if (bytes < need) {
       return { ok: false, error: 'enviar_photo_not_sent', bytes };
@@ -3458,7 +3458,7 @@ async function submitEnviarOnPhone(page, nome, source, action, minBytes, network
   } catch (e) {
     if (hopped) {
       try { if (sw) sw.flip(null); } catch {}
-      try { await require('./phoneProxyMode').release(nome); } catch {}
+      try { await require('./phoneProxyMode').releaseSession(nome); } catch {}
     }
     const msg = String((e && e.message) || e);
     logEvt(nome, source, 'wizard_enviar_proxy', { ok: false, error: msg.slice(0, 160) });

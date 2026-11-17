@@ -4516,7 +4516,7 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
           try { raw = await require('./robeRail').proveThroughRail(sw.port()); }
           catch (e) {
             try { sw.flip(null); } catch {}
-            try { await require('./phoneProxyMode').release(nome); } catch {}
+            try { await require('./phoneProxyMode').releaseSession(nome); } catch {}
             const err = new Error('proxy_mobile_unavailable');
             err.PROXY_PUBLISH = true;
             throw err;
@@ -4530,7 +4530,7 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
           const seen = require('./robeRail').readExit(parsed);
           if (!seen.ip || seen.asn === 'AS262481') {
             try { sw.flip(null); } catch {}
-            try { await require('./phoneProxyMode').release(nome); } catch {}
+            try { await require('./phoneProxyMode').releaseSession(nome); } catch {}
             const err = new Error('proxy_mobile_unavailable');
             err.PROXY_PUBLISH = true;
             throw err;
@@ -4555,7 +4555,7 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
       try { await rail.backToDirect(); } catch {}
     }
     try { if (phoneGate) await phoneGate.stop(); } catch {}
-    try { if (phoneOn) await require('./phoneProxyMode').release(nome); } catch {}
+    try { if (phoneOn) await require('./phoneProxyMode').releaseSession(nome); } catch {}
     throw e;
   }
   if (phoneOn && flowRes && flowRes.publishClicked === true) {
@@ -4584,7 +4584,7 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
     });
     try { if (phoneGate) await phoneGate.stop(); } catch {}
     phoneGate = null;
-    try { await require('./phoneProxyMode').release(nome); } catch {}
+    try { await require('./phoneProxyMode').releaseSession(nome); } catch {}
     if (bytes < 2048) {
       gql.cleanup && gql.cleanup();
       return { ok: false, reason: 'publish_not_left_proxy', publishClicked: true, proxySent: true, bytes };

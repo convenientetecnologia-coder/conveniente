@@ -7758,7 +7758,7 @@ function isPidAlive(pid) {
 }
 
 async function hardCloseController(nome, ctrl, { reason = '', allowKillUserDataDir = true } = {}) {
-  try { await require('./phoneProxyMode').release(nome); } catch {}
+  try { await require('./phoneProxyMode').releaseSession(nome); } catch {}
   const t0 = Date.now();
   const flowId = newFlowId('hard_close');
   try { if (ctrl) ctrl.deltaCdpClosing = true; } catch {}

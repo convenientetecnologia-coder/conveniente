@@ -98,6 +98,10 @@ function blockReason() {
   }
 }
 
+function sessionOf(nome) {
+  return hostId() + '::' + String(nome || '').trim();
+}
+
 function hostId() {
   try {
     return String(fs.readFileSync(HOSTID_PATH, 'utf8') || '').trim();
@@ -254,6 +258,17 @@ async function takeForLaunch(nome, purpose) {
   }
   const prev = holds.get(who);
   if (prev && prev.port) {
+    if (prev.keep === true) {
+      if (!prev.holdReq && !prev.external) {
+        prev.holdReq = startHold(cfg, prev.session || sessionOf(who));
+      }
+      return {
+        proxyServer: `http://127.0.0.1:${prev.port}`,
+        port: prev.port,
+        username: prev.username,
+        password: prev.password
+      };
+    }
     prev.refs += 1;
     return {
       proxyServer: `http://127.0.0.1:${prev.port}`,
@@ -301,7 +316,8 @@ async function takeForLaunch(nome, purpose) {
     password: phone.password,
     refs: 1,
     session: String(leased.session || session),
-    holdReq: kind === 'visit' ? startHold(cfg, String(leased.session || session)) : null
+    keep: false,
+    holdReq: startHold(cfg, String(leased.session || session))
   });
   note('phone_proxy_lease', {
     nome: who,
@@ -325,10 +341,16 @@ function heldAuth(nome) {
   return { username: row.username || '', password: row.password || '', port: row.port };
 }
 
+function sessionHeld(nome) {
+  const row = holds.get(String(nome || '').trim());
+  return !!(row && row.keep === true && row.port);
+}
+
 async function release(nome) {
   const who = String(nome || '').trim();
   const row = holds.get(who);
   if (!row) return;
+  if (row.keep === true) return;
   row.refs -= 1;
   if (row.refs > 0) return;
   holds.delete(who);
@@ -349,12 +371,41 @@ async function release(nome) {
   } catch {}
 }
 
+async function awaitChair(nome) {
+  const who = String(nome || '').trim();
+  while (true) {
+    try {
+      const launch = await takeForLaunch(who, 'publish');
+      if (!launch) throw new Error('phone_proxy_required:disabled');
+      if (launch.port) {
+        const row = holds.get(who);
+        if (row && !row.external) row.keep = true;
+        return launch;
+      }
+    } catch (e) {
+      const msg = String((e && e.message) || e);
+      const wait = msg.indexOf('no_chair') >= 0 || msg.indexOf('phone_pipe_down') >= 0 || msg.indexOf('no_carrier') >= 0 || msg.indexOf('lease_failed') >= 0;
+      if (!wait) throw e;
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
+async function releaseSession(nome) {
+  const who = String(nome || '').trim();
+  const row = holds.get(who);
+  if (!row) return;
+  row.keep = false;
+  row.refs = 1;
+  return release(who);
+}
+
 async function hopForPublish(nome) {
-  const started = Date.now();
-  while (Date.now() - started < 30 * 60 * 1000) {
+  while (true) {
     try {
       const launch = await resolveLaunch(nome, 'publish');
-      if (launch && launch.port && !launch.external) {
+      if (launch && launch.external) throw new Error('phone_proxy_required:static_route');
+      if (launch && launch.port) {
         return {
           host: '127.0.0.1',
           port: launch.port,
@@ -367,9 +418,8 @@ async function hopForPublish(nome) {
       const wait = msg.indexOf('no_chair') >= 0 || msg.indexOf('phone_pipe_down') >= 0 || msg.indexOf('no_carrier') >= 0 || msg.indexOf('lease_failed') >= 0;
       if (!wait) throw e;
     }
-    await new Promise((r) => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 2000));
   }
-  throw new Error('phone_proxy_required:no_chair');
 }
 
 module.exports = {
@@ -382,6 +432,9 @@ module.exports = {
   blockReason,
   resolveLaunch,
   takeForLaunch,
+  awaitChair,
   heldAuth,
-  release
+  sessionHeld,
+  release,
+  releaseSession
 };

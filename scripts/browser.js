@@ -2605,6 +2605,7 @@ async function maximizeAccountWindow(page) {
 async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, ctrl=undefined, openingMap=undefined } = {}) {
   let browser = null;
   let pruneTimer = null;
+  let directSwitch = null;
   try {
     const proxyMode = require('./proxyMode').read();
     let genLaunch = null;
@@ -2662,7 +2663,6 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       : ((gatewayResolved && gatewayResolved.enabled && gatewayResolved.proxyServer)
         ? String(gatewayResolved.proxyServer)
         : '');
-    let directSwitch = null;
     if (!proxyServer && require('./phoneProxyMode').isEnabled() && proxyMode !== 'gen') {
       directSwitch = require('./robeRail').createDirectSwitch();
       const switchPort = await directSwitch.listen();
@@ -2672,7 +2672,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try {
       require('./phoneProxyMode').note('phone_proxy_chrome', {
         nome: String(nome || ''),
-        via: genLaunch ? 'gen' : 'direct',
+        via: directSwitch ? 'neorede' : (genLaunch ? 'gen' : 'direct'),
         port: genLaunch ? Number(genLaunch.port || 0) : 0,
         proxyServer
       });
@@ -2770,7 +2770,10 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     browser = browserTry;
     if (directSwitch) {
       browser.__ctDirectSwitch = directSwitch;
-      browser.on('disconnected', () => { try { directSwitch.close(); } catch {} });
+      browser.on('disconnected', () => {
+        try { directSwitch.close(); } catch {}
+        try { require('./phoneProxyMode').releaseSession(nome); } catch {}
+      });
     }
     try { browser._convenienteNome = String((manifest && manifest.nome) || nome || '').trim(); } catch {}
 
@@ -2855,7 +2858,8 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     return browser;
   } catch (err) {
     try { await safeCloseBrowser(browser); } catch {}
-    try { await require('./phoneProxyMode').release(nome); } catch {}
+    try { if (directSwitch) await directSwitch.close(); } catch {}
+    try { await require('./phoneProxyMode').releaseSession(nome); } catch {}
     logger.error('[BROWSER][ERRO FATAL ao abrir Puppeteer/browser]', {}, err);
     throw err;
   }
