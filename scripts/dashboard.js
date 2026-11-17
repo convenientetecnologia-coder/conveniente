@@ -1053,6 +1053,26 @@ async function execOpenAll24h() {
   const r = await httpJson('/api/perfis/open-all-24h', { method: 'POST' });
   if (!r || r.ok === false) throw new Error((r && r.error) ? String(r.error) : 'open_all_24h_failed');
 }
+async function execStopWorkers() {
+  const r = await httpJson('/api/cells/stop', {
+    method: 'POST',
+    body: { confirm: true },
+    timeoutMs: 180000
+  });
+  if (!r || r.ok !== true) throw new Error((r && r.error) ? String(r.error) : 'stop_workers_failed');
+  return r;
+}
+async function execInvokeAll() {
+  const r = await httpJson('/api/perfis/invoke-human-all-active', {
+    method: 'POST',
+    timeoutMs: 15 * 60 * 1000
+  });
+  if (!r || r.ok !== true) {
+    const failed = r && Array.isArray(r.failed) ? r.failed.length : 0;
+    throw new Error((r && r.error) ? String(r.error) : ('invoke_all_failed:' + failed));
+  }
+  return r;
+}
 // ===== FIM ALTERAÇÃO =====
 async function execRobePauseAll() {
   const r = await httpJson('/api/robes/pause-24h-all', { method:'POST' });
@@ -4485,6 +4505,8 @@ async function applyCommands(cmds = []) {
         results.push({ id: cmdId || null, type: cmdType, ok: true });
       }
       else if (c.type === 'open_all_24h')     { await execOpenAll24h(); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
+      else if (c.type === 'stop_workers')     { details = await execStopWorkers(); results.push({ id: cmdId || null, type: cmdType, ok: true, details: details || null }); }
+      else if (c.type === 'invoke_all')       { details = await execInvokeAll(); results.push({ id: cmdId || null, type: cmdType, ok: true, details: details || null }); }
       else if (c.type === 'robes_pause_24h_all')  { await execRobePauseAll(); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
       else if (c.type === 'robes_release_all')    { await execRobeReleaseAll(); results.push({ id: cmdId || null, type: cmdType, ok: true }); }
       else if (c.type === 'ua_presets_realign' || c.type === 'ua-presets-realign') {
@@ -4773,6 +4795,8 @@ function startDashboardMonitor() {
 const COMMAND_HANDLERS = Object.freeze({
   close_all: execCloseAll,
   open_all_24h: execOpenAll24h,
+  stop_workers: execStopWorkers,
+  invoke_all: execInvokeAll,
   robes_pause_24h_all: execRobePauseAll,
   robes_release_all: execRobeReleaseAll,
   robe_v2_recalc: execRobeV2Recalc,
