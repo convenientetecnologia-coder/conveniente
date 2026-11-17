@@ -335,19 +335,8 @@ function __deltaIsAllowedNavigationUrl(rawUrl) {
   return facebookNavHosts.isAllowedDeltaNavigationUrl(rawUrl);
 }
 
-function __deltaShouldDropHeavyChatAsset(page, request) {
-  try {
-    if (require("./proxyMode").read() !== "phone") return false;
-    const pageUrl = String(page && typeof page.url === "function" ? page.url() : "");
-    if (!facebookNavHosts.isMessengerHeavyAssetSurface(pageUrl)) return false;
-    const type = String(request && typeof request.resourceType === "function" ? request.resourceType() : "").toLowerCase();
-    if (type !== "image" && type !== "media" && type !== "font") return false;
-    const assetUrl = String(request && typeof request.url === "function" ? request.url() : "");
-    if (/favicon\.ico|captcha|recaptcha/i.test(assetUrl)) return false;
-    return true;
-  } catch (_) {
-    return false;
-  }
+function __deltaShouldDropHeavyChatAsset() {
+  return false;
 }
 
 function attachDeltaNavigationFirewall(page, { profileName = "" } = {}) {
@@ -509,7 +498,7 @@ async function __gotoWithBootInterlock(page, targetUrl, {
       requestHeld: false,
       holdMs,
       isEarReady: (typeof bootInterlockIsEarReady === "function") ? bootInterlockIsEarReady : null,
-      disableInterceptionAfterRelease: require("./proxyMode").read() === "phone" ? false : true,
+      disableInterceptionAfterRelease: true,
       matches: (requestUrl) => {
         try {
           if (!__isLikelyMessagesBootUrl(requestUrl)) return false;

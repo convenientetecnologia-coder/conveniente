@@ -3373,7 +3373,7 @@ async function submitEnviarOnPhone(page, nome, source, action, minBytes, network
   let phoneOn = false;
   try {
     const mode = require('./proxyMode').read();
-    phoneOn = require('./phoneProxyMode').isEnabled() && mode !== 'gen' && mode !== 'phone';
+    phoneOn = require('./phoneProxyMode').isEnabled() && mode !== 'gen';
   } catch {}
   if (!phoneOn) return action();
   const sw = page.browser && page.browser().__ctDirectSwitch;

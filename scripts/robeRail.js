@@ -379,29 +379,12 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
   let userDataDir = '';
   try {
     const proxyMode = require('./proxyMode').read();
-    let phoneLaunch = null;
     let genLaunch = null;
-    if (proxyMode === 'phone') {
-      try { phoneLaunch = await require('./phoneProxyMode').resolveLaunch(nome, 'publish'); } catch (e) {
-        if (String(e && e.message || '').indexOf('phone_proxy_required:') === 0) throw e;
-        throw new Error('phone_proxy_required:lease_failed');
-      }
-    } else if (proxyMode === 'gen') {
+    if (proxyMode === 'gen') {
       genLaunch = await require('./proxyGen').takeForLaunch(nome);
     }
-    if (phoneLaunch && phoneLaunch.external && String(phoneLaunch.proxyServer || '').indexOf('socks') === 0) {
-      try { await require('./phoneProxyMode').release(nome); } catch {}
-      throw new Error('phone_proxy_required:socks_robe');
-    }
     if (genLaunch && genLaunch.kind === 'socks') throw new Error('proxy_gen_required:socks_robe');
-    if (phoneLaunch) {
-      rail.setPhoneHop({
-        host: phoneLaunch.external ? String(phoneLaunch.host || '') : '127.0.0.1',
-        port: phoneLaunch.port,
-        user: phoneLaunch.username,
-        pass: phoneLaunch.password
-      });
-    } else if (genLaunch) {
+    if (genLaunch) {
       rail.setPhoneHop({
         host: String(genLaunch.host || ''),
         port: genLaunch.port,

@@ -2607,25 +2607,17 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
   let pruneTimer = null;
   try {
     const proxyMode = require('./proxyMode').read();
-    let phoneLaunch = null;
     let genLaunch = null;
-    if (proxyMode === 'phone') {
-      try {
-        phoneLaunch = await require('./phoneProxyMode').resolveLaunch(nome, 'visit');
-      } catch (e) {
-        if (String(e && e.message || '').indexOf('phone_proxy_required:') === 0) throw e;
-        throw new Error('phone_proxy_required:lease_failed');
-      }
-    } else if (proxyMode === 'gen') {
+    if (proxyMode === 'gen') {
       genLaunch = await require('./proxyGen').takeForLaunch(nome);
     }
     const coords = resolvePatchCoordsForProfile(manifest && manifest.nome ? manifest.nome : nome, manifest);
-    const gatewayResolved = (phoneLaunch || genLaunch) ? null : gatewayProxy.resolveProxyForProfile({
+    const gatewayResolved = genLaunch ? null : gatewayProxy.resolveProxyForProfile({
       profileName: manifest && manifest.nome ? manifest.nome : nome,
       manifest
     });
     const strictGateway = gatewayProxy.isStrictProxyRequired();
-    if (!phoneLaunch && !genLaunch && strictGateway && (!gatewayResolved || gatewayResolved.enabled !== true)) {
+    if (!genLaunch && strictGateway && (!gatewayResolved || gatewayResolved.enabled !== true)) {
       const reason = String(gatewayResolved && gatewayResolved.reason || "proxy_unresolved").trim() || "proxy_unresolved";
       throw new Error(`gateway_proxy_required:${reason}`);
     }
@@ -2665,15 +2657,13 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try { if (fs.existsSync(chromeLogFile)) fs.unlinkSync(chromeLogFile); } catch {}
 
     // FLAGS “OURO” ONLY! A lista mora em buildAccountChromeLaunchArgs (Virtus e Robe).
-    let proxyServer = phoneLaunch
-      ? String(phoneLaunch.proxyServer || '')
-      : (genLaunch
-        ? String(genLaunch.proxyServer || '')
-        : ((gatewayResolved && gatewayResolved.enabled && gatewayResolved.proxyServer)
-          ? String(gatewayResolved.proxyServer)
-          : ''));
+    let proxyServer = genLaunch
+      ? String(genLaunch.proxyServer || '')
+      : ((gatewayResolved && gatewayResolved.enabled && gatewayResolved.proxyServer)
+        ? String(gatewayResolved.proxyServer)
+        : '');
     let directSwitch = null;
-    if (!proxyServer && require('./phoneProxyMode').isEnabled() && require('./proxyMode').read() !== 'gen' && require('./proxyMode').read() !== 'phone') {
+    if (!proxyServer && require('./phoneProxyMode').isEnabled() && proxyMode !== 'gen') {
       directSwitch = require('./robeRail').createDirectSwitch();
       const switchPort = await directSwitch.listen();
       if (!switchPort) throw new Error('phone_proxy_required:switch');
@@ -2682,8 +2672,8 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try {
       require('./phoneProxyMode').note('phone_proxy_chrome', {
         nome: String(nome || ''),
-        via: genLaunch ? 'gen' : (phoneLaunch && phoneLaunch.external ? 'static' : (phoneLaunch ? 'phone' : 'direct')),
-        port: genLaunch ? Number(genLaunch.port || 0) : (phoneLaunch ? Number(phoneLaunch.port || 0) : 0),
+        via: genLaunch ? 'gen' : 'direct',
+        port: genLaunch ? Number(genLaunch.port || 0) : 0,
         proxyServer
       });
     } catch {}
