@@ -2,8 +2,10 @@
 const {VirtusTurn}=require('./virtusTurn');
 async function create({nome,onState=()=>{},dependencies={}}){
  const config=dependencies.config||require('./serverConfig').readServerConfigEffective();
- if(config.virtus?.proxyEnabled!==true)return null;
- if(!dependencies.allowPilot&&process.env.VIRTUS_PROXY_PILOT_ACCOUNT!==nome)throw Error('virtus_proxy_pilot_not_enabled_for_account');
+ const pilot=dependencies.pilot===undefined?readPilot():dependencies.pilot;
+ const accountPilot=pilot?.enabled===true&&pilot.accountId===nome;
+ if(config.virtus?.proxyEnabled!==true&&!accountPilot)return null;
+ if(!dependencies.allowPilot&&!accountPilot&&process.env.VIRTUS_PROXY_PILOT_ACCOUNT!==nome)throw Error('virtus_proxy_pilot_not_enabled_for_account');
  if(!dependencies.allowPilot){const fs=require('node:fs'),path=require('node:path');let desired={};try{desired=JSON.parse(fs.readFileSync(path.join(__dirname,'../dados/desired.json'),'utf8'))}catch{}const engine=String(desired._autoMode?.engine||desired.autoMode?.engine||desired.engine||'delta').toLowerCase();if(engine==='legacy')throw Error('virtus_proxy_requires_delta_engine');}
  const cp2=dependencies.cp2||require('./carrierV2/accountOperation');
  await cp2.ensureConfig();
@@ -33,7 +35,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
    },
    finishBoot(){bootResolve()},
    noteNetwork(){lastNetworkAt=Date.now()},
-   snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld}},
+   snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld,pilot:accountPilot}},
    async enterHuman(){
     if(humanTask)return humanTask.ready;
     humanHeld=true;api.finishBoot();let readyResolve,readyReject;const ready=new Promise((r,j)=>{readyResolve=r;readyReject=j});
@@ -101,5 +103,10 @@ async function create({nome,onState=()=>{},dependencies={}}){
   };
   return api;
  }catch(error){await rail.close();throw error}
+}
+function readPilot(){
+ const fs=require('node:fs'),path=require('node:path');
+ const file=path.join(__dirname,'../dados/carrier_v2_private/virtus_pilot.json');
+ try{const value=JSON.parse(fs.readFileSync(file,'utf8'));if(value.enabled!==true)return null;if(value.version!==1||typeof value.accountId!=='string'||!value.accountId.trim()||value.accountId.length>128)throw Error('virtus_pilot_config_invalid');return value}catch(error){if(error.code==='ENOENT')return null;throw error}
 }
 module.exports={create};
