@@ -18,7 +18,6 @@ const {
   prepareAccountChromeProfile,
   maximizeAccountWindow,
   ensureRobeProfile,
-  wipeRobeSiteData,
   releaseProfileLocks
 } = require('./browser.js');
 const stepLog = require('./stepLog.js');
@@ -40,7 +39,8 @@ function readExit(payload) {
   };
 }
 
-function createSwitch() {
+function createSwitch({ connectTimeoutMs = 30000, requireProxy = false } = {}) {
+  if (!Number.isSafeInteger(connectTimeoutMs) || connectTimeoutMs < 1) throw Error('invalid_connect_timeout');
   const sockets = new Set();
   let upstream = null;
   let bytesToProxy = 0;
@@ -78,11 +78,58 @@ function createSwitch() {
     const host = colon > 0 ? raw.slice(0, colon) : raw;
     const port = colon > 0 ? Number(raw.slice(colon + 1)) || 443 : 443;
     const hop = upstream;
-    if (!hop) {
-      const dest = net.connect(port, host);
+    if (!hop && requireProxy) {
+      client.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      return;
+    }
+    let dest;
+    let established = false;
+    let failed = false;
+    const timer = setTimeout(() => fail(), connectTimeoutMs);
+    timer.unref();
+    const fail = () => {
+      if (failed) return;
+      failed = true;
+      clearTimeout(timer);
+      if (!client.destroyed) {
+        if (established) client.destroy();
+        else client.end('HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      }
+      if (dest) dest.destroy();
+    };
+    // Ler FIN/cancelamento enquanto o CONNECT aguarda upstream, sem perder
+    // bytes TLS antecipados nem permitir buffer ilimitado antes do HTTP 200.
+    const earlyData = chunk => {
+      if ((head?.length || 0) + chunk.length > 65536) { fail(); return; }
+      head = head?.length ? Buffer.concat([head, chunk]) : chunk;
+    };
+    client.on('data', earlyData);
+    client.on('end', () => { if (!established) fail(); });
+    client.resume();
+    const bindDestination = socket => {
+      dest = socket;
       track(dest);
+      client.on('close', () => { clearTimeout(timer); dest.destroy(); });
+      dest.on('error', fail);
+      dest.on('end', () => { if (!established) fail(); });
+      dest.on('close', () => {
+        clearTimeout(timer);
+        if (!established) fail();
+        else if (!dest.readableEnded && !client.destroyed) client.destroy();
+      });
+    };
+    const connected = () => {
+      if (failed || client.destroyed) { dest.destroy(); return false; }
+      established = true;
+      clearTimeout(timer);
+      client.removeListener('data', earlyData);
+      client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      return true;
+    };
+    if (!hop) {
+      bindDestination(net.connect(port, host));
       dest.on('connect', () => {
-        try { client.write('HTTP/1.1 200 Connection Established\r\n\r\n'); } catch {}
+        if (!connected()) return;
         if (head && head.length) { traffic.directUp += head.length; dest.write(head); }
         client.on('data', chunk => { traffic.directUp += chunk.length; });
         dest.on('data', chunk => { traffic.directDown += chunk.length; });
@@ -91,23 +138,19 @@ function createSwitch() {
       });
       return;
     }
-    const dest = net.connect(hop.port, hop.host);
-    track(dest);
+    bindDestination(net.connect(hop.port, hop.host));
     dest.on('data', chunk => { traffic.proxyDown += chunk.length; });
     let buf = Buffer.alloc(0);
-    const fail = () => {
-      try { client.end('HTTP/1.1 502 Bad Gateway\r\n\r\n'); } catch {}
-      try { dest.destroy(); } catch {}
-    };
     const onProxyResponse = (chunk) => {
       buf = Buffer.concat([buf, chunk]);
       const idx = buf.indexOf('\r\n\r\n');
-      if (idx < 0) return;
+      if (idx < 0) { if (buf.length > 16384) fail(); return; }
+      if (idx > 16384) { fail(); return; }
       dest.removeListener('data', onProxyResponse);
       const header = buf.slice(0, idx).toString('latin1');
       const rest = buf.slice(idx + 4);
       if (!/^HTTP\/1\.[01] 200/i.test(header)) { fail(); return; }
-      try { client.write('HTTP/1.1 200 Connection Established\r\n\r\n'); } catch {}
+      if (!connected()) return;
       if (rest.length) client.write(rest);
       if (head && head.length) { bytesToProxy += head.length; traffic.proxyUp += head.length; dest.write(head); }
       dest.pipe(client);
@@ -432,17 +475,42 @@ async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', p
   if (!profileKey) throw new Error('isolated_profile_required');
   if (isolatedProfiles.has(profileKey)) throw new Error('isolated_flow_busy');
   isolatedProfiles.add(profileKey);
-  const rail = createSwitch();
+  const rail = createSwitch({ requireProxy: proxyRequired });
   let browser = null;
   let userDataDir = '';
   let evidence = null;
   let phoneUsed = false;
   let carrierOperation = null;
+  let mobileProof = null;
   const carrierAbort = new AbortController();
   let clickTraffic = null;
   let destroyed = false;
   try {
     const port = await rail.listen();
+    // Acquire the chair and bind the mobile route BEFORE starting Chrome.
+    // Startup traffic, create/item, native uploads and publication share it.
+    if (proxyRequired) {
+      const cp2 = require('./carrierV2/accountOperation');
+      await cp2.ensureConfig();
+      if (cp2.readConfig() && ['publish','renew','id'].includes(purpose)) {
+        carrierOperation = await cp2.begin({ nome, purpose, signal: carrierAbort.signal,
+          isReady: async () => !destroyed,
+          onWait: status => { try { stepLog.appendJSONL(nome,'robe',{step:'carrier_v2_wait',purpose,state:status.state,operationId:status.operationId}); } catch {} }
+        });
+        rail.flip(carrierOperation.hop);
+      } else if (require('./phoneProxyMode').isEnabled()) {
+        phoneUsed = true;
+        rail.flip(await require('./phoneProxyMode').hopForPublish(nome, { deadlineAt }));
+      } else throw Error('phone_proxy_not_configured');
+      const raw = await proveThroughRail(port);
+      let parsed;
+      try { parsed = JSON.parse(raw); } catch {
+        const match = String(raw).match(/\{[\s\S]*\}/);
+        if (match) parsed = JSON.parse(match[0]);
+      }
+      mobileProof = readExit(parsed);
+      if (!mobileProof.ip) throw Error('mobile_proof_missing');
+    }
     const [live, storage] = await Promise.all([
       collectLiveCookies(liveBrowser),
       captureAccountStorage(liveBrowser)
@@ -450,12 +518,15 @@ async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', p
     try { await primeAccountStealth(nome); } catch {}
     userDataDir = ensureRobeProfile(nome);
     releaseProfileLocks(userDataDir);
-    wipeRobeSiteData(userDataDir);
+    // Fixed, per-account profile: Chrome validates/reuses disk cache normally.
+    // Do not erase cookies, storage or cache on every isolated session.
     prepareAccountChromeProfile(userDataDir);
-    browser = await launchIsolatedBrowser(accountChromeLaunchConfig({
+    const launchConfig = accountChromeLaunchConfig({
       userDataDir,
       proxyServer: `127.0.0.1:${port}`
-    }));
+    });
+    if (proxyRequired) launchConfig.args.push('--disable-quic','--proxy-bypass-list=<-loopback>');
+    browser = await launchIsolatedBrowser(launchConfig);
     browser.once('disconnected',()=>carrierAbort.abort(Error('isolated_browser_disconnected')));
     browser.__ctRobeStorage = storage;
     const pages = await browser.pages();
@@ -490,6 +561,9 @@ async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', p
         browserRole: 'robe_isolated',
         purpose,
         proxyRequired,
+        exitIp: mobileProof?.ip || null,
+        exitAsn: mobileProof?.asn || null,
+        exitCountry: mobileProof?.country || null,
         robePid: browser.process && browser.process() ? browser.process().pid : null,
         virtusPid: liveBrowser && liveBrowser.process && liveBrowser.process() ? liveBrowser.process().pid : null
       });
@@ -498,78 +572,14 @@ async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', p
       browser,
       purpose,
       proxyRequired,
-      isProxyArmed: false,
+      isProxyArmed: proxyRequired && !!mobileProof,
       async armAndProve(page) {
         if (!proxyRequired) return { ok: true, skipped: true, provider: 'direct' };
-        if (api.isProxyArmed) return { ok: true, provider: 'phone', alreadyArmed: true };
-        if (evidence) evidence.cleanup();
-        evidence = purpose === 'publish' || purpose === 'renew'
-          ? require('./robePublishEvidence').watch(page, { operation: purpose }) : null;
-        try {
-          const cp2=require('./carrierV2/accountOperation');
-          await cp2.ensureConfig();
-          if(cp2.readConfig()&&['publish','renew','id'].includes(purpose)){
-            page.once('close',()=>carrierAbort.abort(Error('isolated_page_closed')));
-            carrierOperation=await cp2.begin({nome,purpose,signal:carrierAbort.signal,isReady:async()=>!destroyed&&browser.isConnected()&&!page.isClosed(),onWait:status=>{try{stepLog.appendJSONL(nome,'robe',{step:'carrier_v2_wait',purpose,state:status.state,operationId:status.operationId})}catch{}}});
-            rail.flip(carrierOperation.hop);
-            // TCP OPEN is insufficient: exercise HTTPS through authenticated CONNECT.
-            const raw=await proveThroughRail(port);let parsed;try{parsed=JSON.parse(raw)}catch{const match=String(raw).match(/\{[\s\S]*\}/);if(match)parsed=JSON.parse(match[0])}
-            const seen=readExit(parsed);if(!seen.ip)throw Error('cp2_mobile_proof_missing');
-            api.isProxyArmed=true;
-            stepLog.appendJSONL(nome,'robe',{step:'carrier_v2_proved',purpose,operationId:carrierOperation.operationId,ip:seen.ip,asn:seen.asn});
-            return {ok:true,provider:'carrier_v2',...seen};
-          }
-          if (require('./phoneProxyMode').isEnabled()) {
-            phoneUsed = true;
-            const hop = await require('./phoneProxyMode').hopForPublish(nome, { deadlineAt });
-            rail.flip(hop);
-            await new Promise((r) => setTimeout(r, 1500));
-            let phoneRaw = '';
-            try {
-              phoneRaw = await proveThroughRail(port);
-            } catch (e) {
-              const error = String((e && e.message) || e).slice(0, 180);
-              try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_prove_fail', reason: 'prove_failed', error }); } catch {}
-              return { ok: false, reason: 'prove_failed', error };
-            }
-            let phoneParsed = null;
-            try { phoneParsed = JSON.parse(phoneRaw); } catch {}
-            if (!phoneParsed) {
-              const blob = String(phoneRaw || '').match(/\{[\s\S]*\}/);
-              if (blob) { try { phoneParsed = JSON.parse(blob[0]); } catch {} }
-            }
-            const phoneSeen = readExit(phoneParsed);
-            if (!phoneSeen.ip || phoneSeen.asn === 'AS262481') {
-              try {
-                stepLog.appendJSONL(nome || 'system', 'robe', {
-                  step: 'robe_rail_prove_fail',
-                  reason: 'prove_not_mobile',
-                  asn: phoneSeen.asn,
-                  country: phoneSeen.country,
-                  ip: phoneSeen.ip
-                });
-              } catch {}
-              return { ok: false, reason: 'prove_not_mobile', asn: phoneSeen.asn, country: phoneSeen.country, ip: phoneSeen.ip };
-            }
-            try {
-              stepLog.appendJSONL(nome || 'system', 'robe', {
-                step: 'robe_rail_proved',
-                asn: phoneSeen.asn,
-                country: phoneSeen.country,
-                ip: phoneSeen.ip,
-                via: 'phone',
-                purpose
-              });
-            } catch {}
-            api.isProxyArmed = true;
-            return { ok: true, asn: phoneSeen.asn, country: phoneSeen.country, ip: phoneSeen.ip, reason: 'phone_proxy' };
-          }
-        } catch (e) {
-          const error = String((e && e.message) || e).slice(0, 180);
-          try { stepLog.appendJSONL(nome || 'system', 'robe', {step:'carrier_v2_admission_failed',purpose,error,code:String(e?.code||''),cause:String(e?.cause?.code||'')}); } catch {}
-          return { ok: false, reason: 'phone_proxy_unavailable', error };
-        }
-        return { ok: false, reason: 'phone_proxy_not_configured' };
+        if (destroyed || carrierAbort.signal.aborted || !browser.isConnected() || page.isClosed()) throw Error('mobile_session_closed');
+        if (!api.isProxyArmed || !mobileProof) throw Error('mobile_route_not_armed');
+        if (carrierOperation?.snapshot().healthy === false) throw Error('mobile_transport_not_healthy');
+        if (!evidence && (purpose === 'publish' || purpose === 'renew')) evidence = require('./robePublishEvidence').watch(page, {operation:purpose});
+        return { ok: true, provider: carrierOperation ? 'carrier_v2' : 'phone', alreadyArmed: true, ...mobileProof };
       },
       bytesToProxy() { return rail.bytesToProxy(); },
       async markPublishClick() {
@@ -597,6 +607,9 @@ async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', p
         return result;
       },
       async backToDirect() {
+        // Compatibility with callers that used to switch after publishing.
+        // A mobile session stays mobile until its browser is closed.
+        if (proxyRequired) return;
         if (purpose === 'id' && proxyRequired) throw new Error('identity_proxy_required_until_close');
         const current=carrierOperation?.snapshot();
         if(current?.sent&&current.result!=='confirmed')throw Error('cp2_unknown_keep_proxy_until_close');
@@ -605,6 +618,8 @@ async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', p
         try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_direct' }); } catch {}
       },
       async releaseProxy() {
+        // Mobile sessions release their chair only after the browser closes.
+        if (proxyRequired) return;
         await api.backToDirect();
         if(carrierOperation){await carrierOperation.close();carrierOperation=null}
         if (phoneUsed) await require('./phoneProxyMode').releaseSession(nome);
@@ -632,9 +647,12 @@ async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', p
     browser.__ctIsolatedFlow = { kind: purpose, proxyRequired, rail: api };
     return api;
   } catch (e) {
+    const error = String(e?.message || e).slice(0,180);
+    try { stepLog.appendJSONL(nome || 'system','robe',{step:'carrier_v2_admission_failed',purpose,error,code:String(e?.code||''),cause:String(e?.cause?.code||'')}); } catch {}
     if (evidence) evidence.cleanup();
     try { await closeIsolatedBrowser(browser); } catch {}
     try { await rail.close(); } catch {}
+    try { if (carrierOperation) await carrierOperation.close(); } catch {}
     try { if (phoneUsed) await require('./phoneProxyMode').releaseSession(nome); } catch {}
     try { if (userDataDir) releaseProfileLocks(userDataDir); } catch {}
     isolatedProfiles.delete(profileKey);

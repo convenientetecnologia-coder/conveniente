@@ -61,7 +61,7 @@ class OperationClient {
   async possibleSideEffect(op){await this.request('/'+op.operationId+'/possible-side-effect',this.lease(op.status));op.result='unknown'}
   async openRoute(op,{heartbeatMs=10000}={}){
     const url=new URL(this.url);url.protocol=url.protocol==='https:'?'wss:':'ws:';url.pathname=this.url.pathname.replace(/\/$/,'')+'/edge';url.searchParams.set('operationId',op.operationId);
-    const ws=new WebSocket(url,'conveniente.carrier.v2.r2',{headers:this.headers(),maxPayload:65536,perMessageDeflate:false,handshakeTimeout:10000});
+    const ws=new WebSocket(url,'conveniente.carrier.v2.r2',{headers:{...this.headers(),'x-cp2-browser-budget':'1'},maxPayload:65536,perMessageDeflate:false,handshakeTimeout:10000});
     const session=new CarrierSession(ws,{authenticated:true,requestTimeoutMs:this.protocolTimeoutMs,peerRole:'CT',replyRole:'authority'});await session.ready;
     const sockets=new Set(),flows=new Set();let closing=false,inflightHeartbeat=false;
     const close=async()=>{if(closing)return;closing=true;clearInterval(timer);for(const s of sockets)s.destroy();for(const f of flows)f.destroy();session.close();await new Promise(resolve=>server.close(resolve))};

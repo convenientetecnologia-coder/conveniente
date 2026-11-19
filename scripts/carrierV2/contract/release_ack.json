@@ -112,13 +112,13 @@
         "pendingConnects": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 60,
+          "maximum": 384,
           "const": 0
         },
         "closingFlows": {
           "type": "integer",
           "minimum": 0,
-          "maximum": 60,
+          "maximum": 384,
           "const": 0
         }
       },

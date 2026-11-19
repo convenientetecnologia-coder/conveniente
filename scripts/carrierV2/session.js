@@ -2,6 +2,7 @@
 const { EventEmitter }=require('node:events');
 const { Duplex }=require('node:stream');
 const p=require('./protocol'),{F}=p;
+const {acceptedLimits}=require('./limits');
 const features=['window-credit','signed-grant','fencing','bounded-flows','operation-metrics','closure-proof-r2'];
 const ackKinds=new Set([F.ACTIVATE_ACK,F.HEARTBEAT_ACK,F.RELEASE_ACK,F.STATUS_ACK]);
 class CarrierSession extends EventEmitter {
@@ -27,7 +28,7 @@ class CarrierSession extends EventEmitter {
   }
   receive({kind,id,body}){
     if(!this.hello){
-      if(kind!==F.HELLO||id!==0||body.role!==this.peerRole||body.contractRevision!==2||!features.every(f=>body.features.includes(f))||body.limits.queueChunks>8||body.limits.maxFlows>60||body.limits.operationFlows>20)throw Error('carrier_negotiation_failed');
+      if(kind!==F.HELLO||id!==0||body.role!==this.peerRole||body.contractRevision!==2||!features.every(f=>body.features.includes(f))||!acceptedLimits(body.limits))throw Error('carrier_negotiation_failed');
       this.hello=body;clearTimeout(this.helloTimer);
       this.send(F.HELLO,0,{...body,role:this.replyRole}).then(async()=>{
         if(this.peerRole==='carrier'){
@@ -89,6 +90,9 @@ class CarrierSession extends EventEmitter {
     if(!this.hello||this.closed||!this.admitted)throw Error('carrier_not_ready');
     if(this.nextId>=Math.min(0xffffffff,this.hello.limits.historyLimit))throw Error('carrier_generation_drain_required');
     if(this.flows.size>=this.hello.limits.maxFlows)throw Error('capacity');
+    let operationFlows=0;
+    for(const flow of this.flows.values())if(flow.binding.operationId===binding.operationId)operationFlows++;
+    if(operationFlows>=this.hello.limits.operationFlows)throw Error('capacity');
     const id=++this.nextId,flow=new CarrierFlow(this,id,binding);this.flows.set(id,flow);
     this.send(F.OPEN,id,binding).catch(e=>flow.destroy(e));return flow;
   }

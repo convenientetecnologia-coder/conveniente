@@ -3595,12 +3595,15 @@ async function isLocalizacaoValida(page) {
     if (!inp) return false;
     const val = (inp.value || '').trim();
     const invalid = inp.getAttribute('aria-invalid') === 'true';
-    let ok = !!val && !invalid;
+    // At this stage every required composer field has been filled. Typed text
+    // alone is not a committed location; the form must permit the next step.
+    const next = Array.from(document.querySelectorAll('[role="button"],button')).find(el => /^(Avançar|Next|Publicar|Publish)$/.test((el.getAttribute('aria-label') || el.textContent || '').trim()));
+    let ok = !!val && !invalid && !!next && next.getAttribute('aria-disabled') !== 'true' && !next.disabled;
     try {
       const label = inp.closest('label');
       const siblingWrap = label ? label.nextElementSibling : null;
       const okIcon = siblingWrap && siblingWrap.querySelector('i[aria-label*="válida"]');
-      if (okIcon) ok = true;
+      if (okIcon && !invalid && next && next.getAttribute('aria-disabled') !== 'true' && !next.disabled) ok = true;
     } catch {}
     return ok;
   });
@@ -3681,11 +3684,16 @@ async function preencherLocalizacao(page, cidade, locationScope = null) {
     await sleep(jitter(600, 900));
 
     for (let idx = 0; idx < 2; idx++) {
-      try { await inp.focus(); } catch {}
-      await sleep(80);
-      try { await page.keyboard.press('ArrowDown'); } catch {}
-      await sleep(jitter(80, 140));
-      try { await page.keyboard.press('Enter'); } catch {}
+      // Mobile latency can exceed a fixed sleep. Select a real server suggestion.
+      let suggestion;
+      try {
+        suggestion = await page.waitForFunction(() => Array.from(document.querySelectorAll('[role="option"]')).find(el => (el.textContent || '').trim() && el.getClientRects().length > 0) || false, {timeout:10000});
+        const option = suggestion.asElement();
+        if (!option) throw Error('location_suggestion_missing');
+        await option.click();
+      } catch {
+        continue;
+      } finally { await suggestion?.dispose().catch(() => {}); }
       await sleep(jitter(350, 550));
 
       if (await isLocalizacaoValida(page)) {
@@ -4924,7 +4932,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
 
     postFlowStarted = true;
     page = await openCreateItemPageRobust(browser, nome, coords, attId);
-    await installCreatePageGraphqlRateGuard(page, nome, attId);
+    // Native requests/cache: do not replace composer GraphQL responses with stubs.
     installCreatePageForensics(page, nome, attId);
     stepLogArr.push(`[${nome}] Nova aba criada para Robe`);
 
@@ -5202,15 +5210,16 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       throw new Error('Campo para upload de foto não localizado (frames varridos).');
     }
     await waitBeforeComposeAction(composePlan, 'before_upload', { nome, attId });
-    const mobilePublish = require('./mobilePublishProxy');
-    const photoUpload = mobilePublish.waitWifiPhotoUpload(page);
+    const photoUpload = require('./photoUpload').watchPhotoUpload(page);
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'upload_start', file: fotoNome });
-    await inputFoto.uploadFile(fotoPath);
+    let photoResult;
+    try {
+      await inputFoto.uploadFile(fotoPath);
+      photoResult = await photoUpload.wait();
+    } finally { photoUpload.cancel(); }
+    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'photo_upload_result', ...photoResult });
+    if (!photoResult?.ok) throw new Error('photo_upload_unconfirmed:' + String(photoResult?.reason || 'unknown'));
     fotoUploaded = true;
-    const photoRes = await photoUpload;
-    let photoStatus = null;
-    try { photoStatus = photoRes && typeof photoRes.status === 'function' ? photoRes.status() : null; } catch {}
-    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'photo_wifi_done', status: photoStatus, timedOut: !photoRes });
     await sleep(jitter(250, 450));
 
     // TÍTULO

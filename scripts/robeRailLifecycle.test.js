@@ -46,3 +46,10 @@ test('não mascara outros erros de abertura nem repete indefinidamente perfil oc
     assert.equal(attempts, message === 'bad executable' ? 1 : 2);
   }
 });
+
+test('pedido antecipado de liberação mantém a cadeira enquanto o navegador móvel está aberto',async()=>{
+ const start=source.indexOf('      async releaseProxy() {'),end=source.indexOf('      async destroy(opts)',start);
+ const calls=[];
+ const api=vm.runInNewContext('({'+source.slice(start,end)+'})',{proxyRequired:true,api:{backToDirect:async()=>calls.push('direct')},carrierOperation:{close:async()=>calls.push('release')},phoneUsed:false,require});
+ await api.releaseProxy();assert.deepEqual(calls,[]);
+});

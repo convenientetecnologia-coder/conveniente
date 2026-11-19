@@ -36,7 +36,7 @@ async function beginOnce({nome,purpose,signal,isReady=async()=>true,onWait=()=>{
    async possibleSideEffect(){if(row.sent)return;if(op.heartbeatError||op.transportError)throw Error('cp2_transport_not_healthy');row.sent=true;row.result='unknown';persist();await client.possibleSideEffect(op)},
    confirm(){row.result='confirmed';op.result='confirmed';persist()},
    async close(){if(closed)return;closed=true;try{await client.release(op,row.result);row.phase='closed';persist()}finally{unlock()}},
-   snapshot(){return {operationId:row.operationId,type:row.type,phase:row.phase,sent:row.sent,result:row.result}}
+   snapshot(){return {operationId:row.operationId,type:row.type,phase:row.phase,sent:row.sent,result:row.result,healthy:!op.heartbeatError&&!op.transportError}}
   };
  }catch(error){if(op)try{await client.release(op,row?.result||'not_started')}catch{}unlock();throw error}
 }
