@@ -6956,7 +6956,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     // Cura vitalícia do freeze por seleção: injeta CSS global anti-seleção logo após o boot.
     await __injectAntiSelectionCss(page, { profileName: ACCOUNT_LOGIN || nome, reason: "boot_worker" });
   } catch (_) {}
-  if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
+  if(proxySession){
+    const inbox=await prepareProxyInbox(page);
+    proxySession.noteInbox(inbox);
+    logInfo('[virtusDelta][proxy_inbox] '+JSON.stringify(inbox));
+  } else if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
     try {
       // Hands liberam em <= BOOT_TIMEOUT mesmo se o filtro DOM nao validar.
       const mpBoot = await __raceMarketplaceActivate(page, {
@@ -6979,11 +6983,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   // Este runtime NÃO possui mais o "Ouvido" (CDP Network.webSocketFrameReceived).
   // A escuta de rede + fila/ingest stateless são responsabilidade exclusiva do `worker.js`.
 
-  if(proxySession){proxySession.finishBoot();proxySession.startObserver({canObserve:()=>running&&epochOk()&&!enqueue.isRunning()})}
+  if(proxySession){proxySession.finishBoot();proxySession.startObserver({prepareInbox:()=>prepareProxyInbox(page),canObserve:()=>running&&epochOk()&&!enqueue.isRunning()})}
 
   let cityCache = { at: 0, value: null };
   let cityTimer = null;
-  const marketplaceEnforcer = startMarketplacePresenceEnforcer(page, { scope: `worker:${String(nome || "")}` });
+  const marketplaceEnforcer = proxySession?{stop:()=>{}}:startMarketplacePresenceEnforcer(page, { scope: `worker:${String(nome || "")}` });
   const updateCityCache = async () => {
     try {
       if (!running || !epochOk()) return;
@@ -8646,7 +8650,37 @@ async function startVirtusDeltaRuntime() {
   return await startVirtusDeltaStandaloneRuntime((a0 && typeof a0 === "object") ? a0 : {});
 }
 
+async function proxyMarketplaceTarget(page){
+ return page.evaluate(()=>{
+  const normalize=s=>String(s||'').replace(/\s+/g,' ').trim().toLowerCase();
+  const candidates=Array.from(document.querySelectorAll('a,button,[role="button"],[role="tab"]')).filter(el=>{
+   const text=normalize(el.getAttribute('aria-label')||el.innerText||el.textContent);
+   if(text!=='marketplace')return false;
+   const r=el.getBoundingClientRect(),style=getComputedStyle(el);
+   if(r.width<8||r.height<8||style.visibility==='hidden'||style.display==='none')return false;
+   const href=el.getAttribute('href')||'';
+   if(href)return /^\/messages(?:\/|\?|$)/.test(href)||/^https:\/\/(?:[a-z]+\.)?facebook\.com\/messages(?:\/|\?|$)/i.test(href);
+   const conversation=el.closest('[role="grid"][aria-label],[role="navigation"][aria-label]');
+   if(!conversation)return false;
+   const label=normalize(conversation.getAttribute('aria-label')).normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+   return /convers|chat|bate.papo|messag/.test(label);
+  });
+  candidates.sort((a,b)=>{const x=a.getBoundingClientRect(),y=b.getBoundingClientRect();return x.width*x.height-y.width*y.height});
+  for(const el of candidates){const r=el.getBoundingClientRect(),x=r.left+r.width/2,y=r.top+r.height/2,hit=document.elementFromPoint(x,y);if(hit&&(hit===el||el.contains(hit)))return {x,y}}
+  return null;
+ });
+}
+async function prepareProxyInbox(page){
+ return require('./virtusInboxVisit').visit({
+  ready:()=>page.waitForFunction(()=>document.readyState!=='loading'&&!!document.body,{timeout:120000}),
+  active:()=>isMarketplaceFilterActive(page),visible:async()=>!!(await proxyMarketplaceTarget(page)),
+  click:async()=>{const target=await proxyMarketplaceTarget(page);if(!target)throw Error('virtus_marketplace_target_disappeared');await page.mouse.click(target.x,target.y,{delay:clickDelayMs()})},
+  settled:()=>waitForMarketplaceUiStable(page,'proxy_marketplace_ready')
+ });
+}
+
 module.exports = {
+  prepareProxyInbox,
   startVirtusDeltaRuntime,
   startVirtusDeltaStandaloneRuntime,
   startVirtusDeltaWorkerRuntime,

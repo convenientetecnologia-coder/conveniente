@@ -17,3 +17,5 @@ test('piloto persistente habilita somente a conta escolhida com configuração g
  assert.equal(await create({nome:'outra-conta',dependencies}),null);assert.equal(probes,0);
  await assert.rejects(create({nome:'mario-fixture',dependencies}),/transport_not_ready/);assert.equal(probes,1);
 });
+
+test('Proxy Sim global aceita outras contas sem a antiga trava do piloto',async()=>{class Client{async capabilities(){return {virtusTurns:false}}}await assert.rejects(create({nome:'outra-conta',dependencies:{pilot:null,config:{virtus:{proxyEnabled:true}},cp2:{ensureConfig:async()=>{},readConfig:()=>({})},Client}}),/transport_not_ready/)});

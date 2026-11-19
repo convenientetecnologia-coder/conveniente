@@ -5,7 +5,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
  const pilot=dependencies.pilot===undefined?readPilot():dependencies.pilot;
  const accountPilot=pilot?.enabled===true&&pilot.accountId===nome;
  if(config.virtus?.proxyEnabled!==true&&!accountPilot)return null;
- if(!dependencies.allowPilot&&!accountPilot&&process.env.VIRTUS_PROXY_PILOT_ACCOUNT!==nome)throw Error('virtus_proxy_pilot_not_enabled_for_account');
+ if(config.virtus?.proxyEnabled!==true&&!dependencies.allowPilot&&!accountPilot&&process.env.VIRTUS_PROXY_PILOT_ACCOUNT!==nome)throw Error('virtus_proxy_pilot_not_enabled_for_account');
  if(!dependencies.allowPilot){const fs=require('node:fs'),path=require('node:path');let desired={};try{desired=JSON.parse(fs.readFileSync(path.join(__dirname,'../dados/desired.json'),'utf8'))}catch{}const engine=String(desired._autoMode?.engine||desired.autoMode?.engine||desired.engine||'delta').toLowerCase();if(engine==='legacy')throw Error('virtus_proxy_requires_delta_engine');}
  const cp2=dependencies.cp2||require('./carrierV2/accountOperation');
  await cp2.ensureConfig();
@@ -24,7 +24,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
   const bootGate=new Promise(resolve=>bootResolve=resolve);
   const ready=new Promise((resolve,reject)=>{bootReady=resolve;bootReject=reject});
   const boot=()=>{const task=turn.run('warm',async()=>{bootReady();await bootGate});task.catch(bootReject);return ready};
-  let browser=null,timer=null,stopped=false,lastNetworkAt=0,observerBusy=false,activeLease=null,expectedSend=null,outgoingEvidence=null,humanHeld=false,humanResolve=null,humanTask=null;
+  let browser=null,timer=null,stopped=false,lastNetworkAt=0,observerBusy=false,lastInbox=null,activeLease=null,expectedSend=null,outgoingEvidence=null,humanHeld=false,humanResolve=null,humanTask=null;
   const api={turn,proxyServer:'127.0.0.1:'+port,boot,
    attach(value){
     browser=value;browser.__ctVirtusProxy=api;
@@ -35,7 +35,8 @@ async function create({nome,onState=()=>{},dependencies={}}){
    },
    finishBoot(){bootResolve()},
    noteNetwork(){lastNetworkAt=Date.now()},
-   snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld,pilot:accountPilot}},
+   noteInbox(result){lastInbox={...result,at:Date.now()};onState(api.snapshot())},
+   snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld,pilot:accountPilot,lastInbox}},
    async enterHuman(){
     if(humanTask)return humanTask.ready;
     humanHeld=true;api.finishBoot();let readyResolve,readyReject;const ready=new Promise((r,j)=>{readyResolve=r;readyReject=j});
@@ -81,12 +82,13 @@ async function create({nome,onState=()=>{},dependencies={}}){
     if(!outgoingEvidence)throw Error('virtus_send_server_ack_unconfirmed');
     activeLease.confirm();expectedSend=null;return outgoingEvidence;
    },
-   startObserver({canObserve=()=>true}={}){
+   startObserver({canObserve=()=>true,prepareInbox=async()=>{}}={}){
     if(timer)return;
     const tick=async()=>{
       if(stopped||humanHeld||observerBusy||!browser?.isConnected()||!canObserve())return;
       observerBusy=true;
       try{await api.run('observe',async()=>{
+        api.noteInbox(await prepareInbox());
         const start=Date.now();let sawNetwork=lastNetworkAt>0;
         while(Date.now()-start<30000&&!stopped){
           if(lastNetworkAt>=start)sawNetwork=true;

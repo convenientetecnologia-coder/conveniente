@@ -20360,9 +20360,19 @@ async function nurseTick() {
       }
       const want = desired.perfis[nome] || {};
       const ctrl = ctrlExisting || null;
-      if(ctrl?.browser?.__ctVirtusProxy?.snapshot().offlinePlanned){
-        await appendIssueNurseDebounced(nome,'mil_action','virtus_proxy_waiting_turn','virtus_proxy_waiting_turn');
-        continue;
+      const proxySession=ctrl?.browser?.__ctVirtusProxy;
+      if(proxySession){
+        if(want.active===true&&!ctrl.virtus&&!ctrl._virtusStarting&&!ctrl.configurando&&!ctrl.humanControl&&!want.humanHold&&!isRobeBusy(nome)){
+          ctrl._virtusStarting=true;
+          const initialize=()=>startVirtusByEngine(ctrl.browser,nome,autoMode,{epoch:ctrl.virtusEpoch||0});
+          const start=proxySession.snapshot().offlinePlanned?proxySession.run('observe',initialize):Promise.resolve().then(initialize);
+          ctrl.virtus=start;ctrl.trabalhando=true;
+          start.catch(error=>{ctrl.virtus=null;ctrl.trabalhando=false;try{logger.error('[VIRTUS_PROXY][START_FAILED]',{nome,error:error.message})}catch{}}).finally(()=>{ctrl._virtusStarting=false});
+        }
+        if(ctrl._virtusStarting||proxySession.snapshot().offlinePlanned){
+          await appendIssueNurseDebounced(nome,'mil_action','virtus_proxy_waiting_turn','virtus_proxy_waiting_turn');
+          continue;
+        }
       }
 
       // Reconciliador: mesmo em modo humano/hold, precisamos atualizar flags conforme a UI real,

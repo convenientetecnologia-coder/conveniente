@@ -1,0 +1,7 @@
+'use strict';const test=require('node:test'),assert=require('node:assert/strict'),{visit}=require('./virtusInboxVisit');
+function fixture({visible=true,active=false,activates=true}={}){let now=0,clicks=0;return {opts:{ready:async()=>{},active:async()=>active,visible:async()=>visible,click:async()=>{clicks++;if(activates)active=true},settled:async()=>{},clock:()=>now,sleep:async ms=>{now+=ms},presenceMs:500,activationMs:500,pollMs:100},clicks:()=>clicks}}
+test('Marketplace ausente devolve resultado finito sem clicar',async()=>{const f=fixture({visible:false});assert.equal((await visit(f.opts)).state,'marketplace_absent');assert.equal(f.clicks(),0)});
+test('Marketplace já ativo nunca reclica',async()=>{const f=fixture({active:true});assert.equal((await visit(f.opts)).clicked,false);assert.equal(f.clicks(),0)});
+test('Marketplace disponível recebe um clique e exige seleção estável',async()=>{const f=fixture();assert.equal((await visit(f.opts)).state,'marketplace_ready');assert.equal(f.clicks(),1)});
+test('clique sem confirmação não vira sucesso nem dispara cliques repetidos',async()=>{const f=fixture({activates:false});await assert.rejects(visit(f.opts),/activation_unconfirmed/);assert.equal(f.clicks(),1)});
+test('DOM não pronto impede qualquer clique',async()=>{const f=fixture();f.opts.ready=async()=>{throw Error('document_not_ready')};await assert.rejects(visit(f.opts),/document_not_ready/);assert.equal(f.clicks(),0)});
