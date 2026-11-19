@@ -24,7 +24,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
   const bootGate=new Promise(resolve=>bootResolve=resolve);
   const ready=new Promise((resolve,reject)=>{bootReady=resolve;bootReject=reject});
   const boot=()=>{const task=turn.run('warm',async()=>{bootReady();await bootGate});task.catch(bootReject);return ready};
-  let browser=null,timer=null,stopped=false,lastNetworkAt=0,observerBusy=false,startupFinished=false,healthCheck=null,lastInbox=null,activeLease=null,expectedSend=null,outgoingEvidence=null,humanHeld=false,humanResolve=null,humanTask=null;
+  let browser=null,timer=null,stopped=false,lastNetworkAt=0,observerBusy=false,observerOptions=null,observerLastTickAt=0,observerSkipReason=null,observerVersion=0,startupFinished=false,healthCheck=null,lastInbox=null,activeLease=null,expectedSend=null,outgoingEvidence=null,humanHeld=false,humanResolve=null,humanTask=null;
   const api={turn,proxyServer:'127.0.0.1:'+port,boot,
    attach(value){
     browser=value;browser.__ctVirtusProxy=api;
@@ -37,7 +37,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
    noteNetwork(){lastNetworkAt=Date.now()},
    setHealthCheck(fn){healthCheck=fn},
    noteInbox(result){lastInbox={...result,at:Date.now()};onState(api.snapshot())},
-   snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld,pilot:accountPilot,lastInbox,startupFinished}},
+   snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld,pilot:accountPilot,lastInbox,startupFinished,observer:{registered:!!observerOptions,lastTickAt:observerLastTickAt,skipReason:observerSkipReason,guard:observerOptions?.describeGuard?.()||null}}},
    async enterHuman(){
     if(humanTask)return humanTask.ready;
     humanHeld=true;api.finishBoot();let readyResolve,readyReject;const ready=new Promise((r,j)=>{readyResolve=r;readyReject=j});
@@ -84,13 +84,17 @@ async function create({nome,onState=()=>{},dependencies={}}){
     if(!outgoingEvidence)throw Error('virtus_send_server_ack_unconfirmed');
     activeLease.confirm();expectedSend=null;return outgoingEvidence;
    },
-   startObserver({canObserve=()=>true,prepareInbox=async()=>{}}={}){
-    if(timer)return;
+   stopObserver(version){if(version!==undefined&&version!==observerVersion)return;observerOptions=null;(dependencies.clearObserverInterval||clearInterval)(timer);timer=null},
+   startObserver({canObserve=()=>true,prepareInbox=async()=>{},describeGuard=()=>null}={}){
+    observerOptions={canObserve,prepareInbox,describeGuard};const version=++observerVersion;
+    if(timer)return version;
     const tick=async()=>{
-      if(stopped||humanHeld||observerBusy||!browser?.isConnected()||!canObserve())return;
+      const options=observerOptions;observerLastTickAt=Date.now();
+      observerSkipReason=stopped?'closed':humanHeld?'human':observerBusy?'busy':!browser?.isConnected()?'browser_disconnected':!options?'unregistered':!options.canObserve()?'runtime_guard':null;
+      if(observerSkipReason)return;
       observerBusy=true;
       try{await api.run('observe',async()=>{
-        api.noteInbox(await prepareInbox());
+        api.noteInbox(await options.prepareInbox());
         const start=Date.now();let sawNetwork=lastNetworkAt>0;
         while(Date.now()-start<30000&&!stopped){
           if(lastNetworkAt>=start)sawNetwork=true;
@@ -101,9 +105,9 @@ async function create({nome,onState=()=>{},dependencies={}}){
       })}catch(error){onState({...api.snapshot(),error:String(error.message||error)})}
       finally{observerBusy=false}
     };
-    timer=setInterval(()=>tick().catch(()=>{}),30000);timer.unref?.();
+    timer=(dependencies.setObserverInterval||setInterval)(()=>tick().catch(error=>onState({...api.snapshot(),error:String(error.message||error)})),30000);timer.unref?.();return version;
    },
-   async close(){if(stopped)return;stopped=true;clearInterval(timer);humanResolve?.();bootResolve();await turn.close()}
+   async close(){if(stopped)return;stopped=true;api.stopObserver();humanResolve?.();bootResolve();await turn.close()}
   };
   return api;
  }catch(error){await rail.close();throw error}

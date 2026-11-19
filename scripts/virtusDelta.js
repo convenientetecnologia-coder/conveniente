@@ -6984,7 +6984,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   // Este runtime NÃO possui mais o "Ouvido" (CDP Network.webSocketFrameReceived).
   // A escuta de rede + fila/ingest stateless são responsabilidade exclusiva do `worker.js`.
 
-  if(proxySession){proxySession.finishBoot();proxySession.startObserver({prepareInbox:()=>prepareProxyInbox(page,cfg.proxyHealthCheck),canObserve:()=>running&&epochOk()&&!enqueue.isRunning()})}
+  let proxyObserverVersion;
+  if(proxySession){proxySession.finishBoot();proxyObserverVersion=proxySession.startObserver({prepareInbox:()=>prepareProxyInbox(page,cfg.proxyHealthCheck),canObserve:()=>running&&epochOk()&&!enqueue.isRunning(),describeGuard:()=>({running,epochOk:epochOk(),queueRunning:enqueue.isRunning(),queueDepth:enqueue.getDepth(),queuePaused:enqueue.isPaused()})})}
 
   let cityCache = { at: 0, value: null };
   let cityTimer = null;
@@ -8619,6 +8620,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     enqueueForceCollectLinkAndCity,
     stop: async () => {
       running = false;
+      if(proxySession)proxySession.stopObserver(proxyObserverVersion);
       cityCollectSettledHandler = null;
       try { marketplaceEnforcer.stop(); } catch (_) {}
       try { if (cityTimer) clearInterval(cityTimer); } catch (_) {}

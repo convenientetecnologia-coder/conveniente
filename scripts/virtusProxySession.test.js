@@ -2,9 +2,9 @@
 test('Proxy Não não provisiona nem abre canal',async()=>{let touched=false;assert.equal(await create({nome:'fixture',dependencies:{config:{virtus:{proxyEnabled:false}},cp2:{ensureConfig:()=>{touched=true}}}}),null);assert.equal(touched,false)});
 test('Proxy Sim exige capacidade anunciada antes de criar comutador',async()=>{let opened=false;class Client{async capabilities(){return {virtusTurns:false}}}await assert.rejects(create({nome:'fixture',dependencies:{allowPilot:true,config:{virtus:{proxyEnabled:true}},cp2:{ensureConfig:async()=>{},readConfig:()=>({})},Client,rails:{createDirectSwitch:()=>{opened=true}}}}),/transport_not_ready/);assert.equal(opened,false)});
 test('session usa requireProxy e só conecta durante turno concedido',async()=>{const calls=[];const rail={listen:async()=>12345,close:async()=>{},flip:h=>calls.push(h?'online':'offline'),trafficSnapshot:()=>({})};class Client{async capabilities(){return {virtusTurns:true}}}const session=await create({nome:'fixture',dependencies:{allowPilot:true,config:{virtus:{proxyEnabled:true}},Client,cp2:{ensureConfig:async()=>{},readConfig:()=>({}),begin:async opts=>{assert.equal(opts.purpose,'virtus');return {hop:{port:1},snapshot:()=>({healthy:true}),close:async()=>calls.push('released')}}},rails:{createDirectSwitch:opts=>{assert.equal(opts.requireProxy,true);return rail},proveThroughRail:async()=>'{"ip":"fixture"}',readExit:p=>p}}});assert.deepEqual(calls,[]);const events={};const page={url:()=> 'https://www.facebook.com/messages',on:(name,fn)=>events[name]=fn,setOfflineMode:async offline=>{if(!offline)session.noteNetwork()},waitForFunction:async()=>{}};session.attach({pages:async()=>[page],on:()=>{},once:()=>{}});await session.run('observe',async()=>calls.push('collect'));assert.deepEqual(calls,['online','collect','offline','released']);await session.turn.close()});
-async function operationalFixture(){
+async function operationalFixture(observerDependencies={}){
  const calls=[],rail={listen:async()=>1,close:async()=>{},flip:h=>calls.push(h?'connect':'disconnect'),trafficSnapshot:()=>({directUp:0,directDown:0})};class Client{async capabilities(){return {virtusTurns:true}}}
- const session=await create({nome:'test',dependencies:{allowPilot:true,confirmationTimeoutMs:20,config:{virtus:{proxyEnabled:true}},Client,cp2:{ensureConfig:async()=>{},readConfig:()=>({}),begin:async()=>({hop:{port:1},snapshot:()=>({healthy:true}),possibleSideEffect:async()=>calls.push('mark'),confirm:()=>calls.push('confirmed'),close:async()=>calls.push('release')})},rails:{createDirectSwitch:()=>rail,proveThroughRail:async()=>'{"ip":"fixture"}',readExit:x=>x}}});
+ const session=await create({nome:'test',dependencies:{...observerDependencies,allowPilot:true,confirmationTimeoutMs:20,config:{virtus:{proxyEnabled:true}},Client,cp2:{ensureConfig:async()=>{},readConfig:()=>({}),begin:async()=>({hop:{port:1},snapshot:()=>({healthy:true}),possibleSideEffect:async()=>calls.push('mark'),confirm:()=>calls.push('confirmed'),close:async()=>calls.push('release')})},rails:{createDirectSwitch:()=>rail,proveThroughRail:async()=>'{"ip":"fixture"}',readExit:x=>x}}});
  const page={url:()=> 'https://www.facebook.com/messages',on:()=>{},setOfflineMode:async offline=>{if(!offline)session.noteNetwork()},waitForFunction:async()=>{}};session.attach({pages:async()=>[page],on:()=>{},once:()=>{},isConnected:()=>true});return {session,calls};
 }
 test('humano aguarda cadeira e a devolve somente ao retomar',async()=>{const {session,calls}=await operationalFixture();await session.enterHuman();assert.equal(session.snapshot().humanHeld,true);assert.equal(calls.includes('release'),false);await session.leaveHuman();assert.equal(calls.at(-1),'release');assert.equal(session.snapshot().humanHeld,false);await session.close()});
@@ -19,3 +19,16 @@ test('piloto persistente habilita somente a conta escolhida com configuração g
 });
 
 test('Proxy Sim global aceita outras contas sem a antiga trava do piloto',async()=>{class Client{async capabilities(){return {virtusTurns:false}}}await assert.rejects(create({nome:'outra-conta',dependencies:{pilot:null,config:{virtus:{proxyEnabled:true}},cp2:{ensureConfig:async()=>{},readConfig:()=>({})},Client}}),/transport_not_ready/)});
+
+test('novo runtime substitui callbacks do observador sem duplicar timer e stop antigo não cancela o novo',async()=>{
+ const ticks=[];let clears=0,oldCalls=0,newCalls=0;
+ const {session}=await operationalFixture({setObserverInterval:fn=>{ticks.push(fn);return {unref(){}}},clearObserverInterval:()=>clears++});
+ session.run=async(_intent,fn)=>fn();
+ const old=session.startObserver({canObserve:()=>false,prepareInbox:async()=>{oldCalls++;throw Error('old')}});
+ await ticks[0]();assert.equal(oldCalls,0);
+ const current=session.startObserver({canObserve:()=>true,prepareInbox:async()=>{newCalls++;throw Error('expected_fixture_abort')}});
+ assert.equal(ticks.length,1);await ticks[0]();assert.equal(newCalls,1);assert.equal(oldCalls,0);
+ session.stopObserver(old);assert.equal(clears,0);await ticks[0]();assert.equal(newCalls,2);
+ session.stopObserver(current);assert.equal(clears,1);
+ session.startObserver({canObserve:()=>false});assert.equal(ticks.length,2);await session.close();
+});
