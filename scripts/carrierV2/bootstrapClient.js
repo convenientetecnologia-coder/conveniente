@@ -1,5 +1,6 @@
 'use strict';
 const fs=require('node:fs'),path=require('node:path');
+require('node:dns').setDefaultResultOrder('ipv4first');
 let cached=null,until=0,pending=null;
 async function load(){
  const {readCtConfig}=require('../ctConfig');const c=readCtConfig();
