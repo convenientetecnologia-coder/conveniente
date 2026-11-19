@@ -581,6 +581,7 @@ async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', p
         if (!evidence && (purpose === 'publish' || purpose === 'renew')) evidence = require('./robePublishEvidence').watch(page, {operation:purpose});
         return { ok: true, provider: carrierOperation ? 'carrier_v2' : 'phone', alreadyArmed: true, ...mobileProof };
       },
+      trafficSnapshot() { return rail.trafficSnapshot(); },
       bytesToProxy() { return rail.bytesToProxy(); },
       async markPublishClick() {
         if(carrierOperation)await carrierOperation.possibleSideEffect();

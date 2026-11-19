@@ -2581,6 +2581,10 @@ async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetrie
     // O botão de baixo da tela é o da etapa atual.
     // Publicar só ganha quando ele mesmo está na tela. Avançar ganha quando é ele.
     const action = await findFooterAction(page, step === 1 ? 2500 : 1200);
+    if (action) {
+      const rail = page.browser && page.browser().__ctRobeRail;
+      stepLog.appendJSONL(nome, 'robe', {step:'composer_stage_ready', action:action.kind, sequence:sequence.slice(), traffic:rail?.trafficSnapshot?.() || null});
+    }
     if (action && action.kind === 'publicar') {
       if (typeof onBeforePublish === 'function') {
         await onBeforePublish();
