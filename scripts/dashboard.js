@@ -3880,6 +3880,7 @@ async function execSetCtConfig(cmd) {
   }
   const { writeCtConfig } = require('./ctConfig');
   const r = writeCtConfig({
+    ...(payload.carrierV2 !== undefined ? { carrierV2: payload.carrierV2 } : {}),
     ctBaseUrl,
     logIngestSecret,
     textVerifiedApiKey,
@@ -4712,7 +4713,7 @@ async function tick(reason = 'interval') {
     // Pede de novo enquanto faltar endereco do CT, Textverified,
     // Anti-Captcha ou o proxy da Oxylabs.
     const cfg = readCtConfig();
-    const needsConfig = !cfg.ctBaseUrl || !(cfg.logIngestSecret || process.env.LOG_INGEST_SECRET) || !cfg.textVerifiedApiKey || !cfg.textVerifiedApiUsername || !cfg.antiCaptchaApiKey || !cfg.oxylabsProxyUser || !cfg.oxylabsProxyPassword;
+    const needsConfig = !cfg.ctBaseUrl || !cfg.textVerifiedApiKey || !cfg.textVerifiedApiUsername || !cfg.antiCaptchaApiKey || !cfg.oxylabsProxyUser || !cfg.oxylabsProxyPassword;
     // Verifica se precisa solicitar config Groq (API key/model ausentes OU modelo divergente do esperado)
     // Importante: sem segredos no report — apenas boolean/modelo/metadata.
     const groqCfg = readGroqConfig(); // usado em runtime (OCR)

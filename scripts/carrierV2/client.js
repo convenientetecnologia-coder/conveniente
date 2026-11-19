@@ -2,14 +2,15 @@
 const crypto=require('node:crypto'),net=require('node:net'),{once}=require('node:events'),WebSocket=require('ws');
 const {CarrierSession}=require('./session');
 class OperationClient {
-  constructor({baseUrl,token,edgeGeneration=crypto.randomUUID(),allowLoopbackTest=false,fetchImpl=fetch,requestTimeoutMs=10000,protocolTimeoutMs=10000}){
+  constructor({baseUrl,serverId,token,edgeGeneration=crypto.randomUUID(),allowLoopbackTest=false,fetchImpl=fetch,requestTimeoutMs=10000,protocolTimeoutMs=10000}){
     const url=new URL(baseUrl);if(url.protocol!=='https:'&&!(allowLoopbackTest&&url.protocol==='http:'&&url.hostname==='127.0.0.1'))throw Error('cp2_tls_required');
-    if(!token)throw Error('cp2_dedicated_token_required');
-    this.url=url;this.token=token;this.edgeGeneration=edgeGeneration;this.fetch=fetchImpl;this.operations=new Map();
+    if(!serverId&&!token)throw Error('cp2_server_id_required');
+    if(serverId&&!/^[a-f0-9-]{36}$/i.test(serverId))throw Error('cp2_server_id_invalid');
+    this.url=url;this.serverId=serverId;this.token=token;this.edgeGeneration=edgeGeneration;this.fetch=fetchImpl;this.operations=new Map();
     if(!Number.isSafeInteger(requestTimeoutMs)||requestTimeoutMs<1||!Number.isSafeInteger(protocolTimeoutMs)||protocolTimeoutMs<1)throw Error('invalid_client_timeout');
     this.requestTimeoutMs=requestTimeoutMs;this.protocolTimeoutMs=protocolTimeoutMs;
   }
-  headers(){return {'content-type':'application/json',authorization:'Bearer '+this.token,'x-edge-generation':this.edgeGeneration}}
+  headers(){return {'content-type':'application/json','x-edge-generation':this.edgeGeneration,...(this.serverId?{'x-server-id':this.serverId}:{authorization:'Bearer '+this.token})}}
   async request(path,body,signal){
     const url=new URL(this.url);url.pathname=this.url.pathname.replace(/\/$/,'')+'/v2/operations'+path;
     const response=await this.fetch(url,{method:body===undefined?'GET':'POST',headers:this.headers(),body:body===undefined?undefined:JSON.stringify(body),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(this.requestTimeoutMs)]):AbortSignal.timeout(this.requestTimeoutMs)});

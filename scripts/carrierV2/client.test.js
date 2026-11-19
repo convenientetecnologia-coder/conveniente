@@ -7,9 +7,9 @@ test('release com resposta perdida consulta terminal sem repetir ação de negó
  c.request=async path=>{paths.push(path);if(path.endsWith('/release')){const error=Error('carrier_ack_timeout');error.retryable=true;throw error}return {state:'released',businessResult:'confirmed'}};
  const final=await c.release(op,'confirmed');assert.equal(final.state,'released');assert.equal(paths.filter(p=>p.endsWith('/release')).length,1);assert.equal(paths.some(p=>/ready|side-effect/.test(p)),false);
 });
-test('não permite rede HTTP remota nem operação sem token',()=>{
+test('não permite rede HTTP remota nem operação sem identificação',()=>{
  assert.throws(()=>new OperationClient({baseUrl:'http://example.com/api/carrier-v2',token:'test'}),/tls_required/);
- assert.throws(()=>new OperationClient({baseUrl:'https://example.com/api/carrier-v2'}),/token_required/);
+ assert.throws(()=>new OperationClient({baseUrl:'https://example.com/api/carrier-v2'}),/server_id_required/);
 });
 function client(){const c=new OperationClient({baseUrl:'http://127.0.0.1/api/carrier-v2',token:'test',allowLoopbackTest:true});c.wait=async()=>{};return c;}
 test('fila não executa readiness, heartbeat ou efeito de negócio enquanto aguarda',async()=>{
@@ -39,3 +39,5 @@ test('cópias de protocolo e transporte CT/edge não divergem',{skip:!process.en
  const fs=require('node:fs'),path=require('node:path');
  for(const file of ['protocol.js','session.js'])assert.equal(fs.readFileSync(path.join(__dirname,file),'utf8'),fs.readFileSync(path.join(process.env.CT_SOURCE_ROOT,'lib/carrierV2',file),'utf8'));
 });
+
+test('HTTP e WS usam ID de servidor sem Authorization mesmo com token antigo',()=>{const c=new OperationClient({baseUrl:'https://example.com/api/carrier-v2',serverId:'11111111-1111-1111-1111-111111111111',token:'old'});assert.equal(c.headers()['x-server-id'],c.serverId);assert.equal(c.headers().authorization,undefined)});

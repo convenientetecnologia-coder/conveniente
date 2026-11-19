@@ -131,6 +131,7 @@ function readCtConfig() {
     path: CT_CONFIG_PATH,
     ctBaseUrl: ctBaseUrl || "",
     logIngestSecret: logIngestSecret || "",
+    carrierV2: j.carrierV2 || null,
     textVerifiedApiKey: textVerifiedApiKey || "",
     textVerifiedApiUsername: textVerifiedApiUsername || "",
     textVerifiedBaseUrl: textVerifiedBaseUrl || "",
@@ -148,6 +149,7 @@ function pickInboundCtConfig(src) {
   if (!src || typeof src !== "object") return null;
   const text = (value) => String(value == null ? "" : value).trim();
   const patch = {};
+  if (src.carrierV2 && typeof src.carrierV2 === 'object') patch.carrierV2 = src.carrierV2;
   const base = text(src.ctBaseUrl);
   if (base) patch.ctBaseUrl = base;
   const apiKey = text(src.textVerifiedApiKey);
@@ -217,6 +219,7 @@ function applyInboundCtConfig(src) {
 }
 
 function writeCtConfig({
+  carrierV2,
   ctBaseUrl,
   logIngestSecret,
   textVerifiedApiKey,
@@ -240,6 +243,7 @@ function writeCtConfig({
     const now = Date.now();
     const next = {
       ...(curRaw && typeof curRaw === "object" ? curRaw : {}),
+      ...(carrierV2 !== undefined ? { carrierV2 } : {}),
       ctBaseUrl: ctBaseSanitized || "",
       logIngestSecret: (logIngestSecret !== undefined) ? String(logIngestSecret || "").trim() : (cur.logIngestSecret || ""),
       textVerifiedApiKey: (textVerifiedApiKey !== undefined) ? String(textVerifiedApiKey || "").trim() : (cur.textVerifiedApiKey || ""),
