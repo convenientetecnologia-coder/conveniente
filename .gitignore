@@ -1,4 +1,6 @@
 node_modules/
+dados/carrier_v2_private/
+dados/carrier_v2_operations/
 
 # logs / temporários
 *.log
@@ -90,3 +92,7 @@ dados/FASE*.txt
 dados/GABARITO_*.txt
 dados/RAIOX_*.md
 dados/RELATORIO_*.txt
+# Ambiente local e evidências do transporte (não distribuir)
+dados/carrier_v2_lab/
+_backup_auto/
+.cursor/
