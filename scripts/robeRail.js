@@ -507,6 +507,7 @@ async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', p
           ? require('./robePublishEvidence').watch(page, { operation: purpose }) : null;
         try {
           const cp2=require('./carrierV2/accountOperation');
+          await cp2.ensureConfig();
           if(cp2.readConfig()&&['publish','renew','id'].includes(purpose)){
             page.once('close',()=>carrierAbort.abort(Error('isolated_page_closed')));
             carrierOperation=await cp2.begin({nome,purpose,signal:carrierAbort.signal,isReady:async()=>!destroyed&&browser.isConnected()&&!page.isClosed(),onWait:status=>{try{stepLog.appendJSONL(nome,'robe',{step:'carrier_v2_wait',purpose,state:status.state,operationId:status.operationId})}catch{}}});

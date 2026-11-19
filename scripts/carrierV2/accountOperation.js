@@ -1,7 +1,9 @@
 'use strict';
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),{OperationClient}=require('./client'),clock=require('./clock');
 const ROOT=path.join(__dirname,'..','..','dados','carrier_v2_operations'),CONFIG=path.join(__dirname,'..','..','dados','carrier_v2_private','config.json');
-function readConfig(){if(!fs.existsSync(CONFIG))return null;const c=JSON.parse(fs.readFileSync(CONFIG,'utf8'));return c.enabled===true?c:null}
+let provisionedConfig=null;
+function readConfig(){if(provisionedConfig)return provisionedConfig;if(!fs.existsSync(CONFIG))return null;const c=JSON.parse(fs.readFileSync(CONFIG,'utf8'));return c.enabled===true?c:null}
+async function ensureConfig(){const local=readConfig();try{provisionedConfig=await require('./bootstrapClient').read();return provisionedConfig||local}catch(error){if(local)return local;throw error}}
 function location(nome,type){return path.join(ROOT,crypto.createHash('sha256').update(nome+'\0'+type).digest('hex')+'.json')}
 function write(file,row){const tmp=file+'.'+process.pid+'.tmp';let fd;try{fd=fs.openSync(tmp,'wx',0o600);fs.writeFileSync(fd,JSON.stringify(row));fs.fsyncSync(fd);fs.closeSync(fd);fd=null;fs.renameSync(tmp,file)}finally{if(fd!==null&&fd!==undefined)fs.closeSync(fd);if(fs.existsSync(tmp))fs.unlinkSync(tmp)}}
 const locks=new Set();
@@ -50,4 +52,4 @@ async function begin(options){
   }
  }
 }
-module.exports={readConfig,begin,getWaiting:nome=>waiting.get(nome)||null};
+module.exports={readConfig,ensureConfig,begin,getWaiting:nome=>waiting.get(nome)||null};
