@@ -43,9 +43,18 @@ class CarrierSession extends EventEmitter {
       if(id||this.admitted||!this.takeoverState)throw Error('unexpected_takeover_ack');
       const state=this.takeoverState;this.takeoverState=null;clearTimeout(this.takeoverTimer);
       Promise.resolve().then(()=>this.takeover.consume(state.command,body)).then(async result=>{
-        this.fencedContext=p.context(result.commit);await this.send(F.TAKEOVER_COMMIT,0,result.commit);
-        this.admitted=true;this.resolveReady(this.hello);this.emit('ready',this.hello);
+        this.fencedContext=p.context(result.commit);
+        if(result.commit.retirementToken){
+          this.retirementCommit=result.commit;
+          this.retirementTimer=setTimeout(()=>this.fail(Error('retirement_ack_timeout')),this.takeoverTimeoutMs);
+          await this.send(F.TAKEOVER_COMMIT,0,result.commit);
+        }else{await this.send(F.TAKEOVER_COMMIT,0,result.commit);this.admitted=true;this.resolveReady(this.hello);this.emit('ready',this.hello)};
       }).catch(error=>this.fail(error));return;
+    }
+    if(kind===F.RETIREMENT_ACK){
+      if(id||this.admitted||!this.retirementCommit||!this.takeover.acceptRetirement)throw Error('unexpected_retirement_ack');
+      const commit=this.retirementCommit;this.retirementCommit=null;clearTimeout(this.retirementTimer);
+      Promise.resolve().then(()=>this.takeover.acceptRetirement(commit,body)).then(()=>{if(this.closed)return;this.admitted=true;this.resolveReady(this.hello);this.emit('ready',this.hello)}).catch(error=>this.fail(error));return;
     }
     if(!this.admitted)throw Error('takeover_commit_required');
     if(kind===F.PING){this.send(F.PONG,0,{protocolVersion:2,carrierGeneration:this.hello.carrierGeneration}).catch(e=>this.fail(e));return}
@@ -97,7 +106,7 @@ class CarrierSession extends EventEmitter {
     this.send(F.OPEN,id,binding).catch(e=>flow.destroy(e));return flow;
   }
   fail(error){
-    if(this.closed)return;this.closed=true;this.failure=error;clearTimeout(this.helloTimer);clearTimeout(this.takeoverTimer);this.rejectReady(error);
+    if(this.closed)return;this.closed=true;this.failure=error;clearTimeout(this.helloTimer);clearTimeout(this.takeoverTimer);clearTimeout(this.retirementTimer);this.rejectReady(error);
     for(const row of this.pending.values()){clearTimeout(row.timer);row.reject(error)}this.pending.clear();
     for(const flow of this.flows.values())flow.destroy(error);this.flows.clear();
     try{this.ws.terminate()}catch{}this.emit('disconnected',{error,generation:this.hello?.carrierGeneration});

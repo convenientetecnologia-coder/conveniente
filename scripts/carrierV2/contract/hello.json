@@ -112,11 +112,7 @@
         "properties": {
           "phoneId": {
             "type": "string",
-            "enum": [
-              "p001",
-              "p002",
-              "p003"
-            ]
+            "pattern": "^p[0-9]{3}$"
           },
           "port": {
             "type": "integer",
@@ -149,6 +145,12 @@
         "type": "string",
         "format": "uuid"
       }
+    },
+    "retirementCheckpoint": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192,
+      "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$"
     }
   },
   "required": [

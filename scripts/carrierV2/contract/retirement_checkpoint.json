@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocolVersion": {
+      "type": "integer",
+      "const": 2
+    },
+    "contractRevision": {
+      "type": "integer",
+      "const": 2
+    },
+    "instanceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "resourceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "authorityEpoch": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "executorFence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "carrierGeneration": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "retirementRevision": {
+      "type": "integer",
+      "const": 1
+    },
+    "authorityKeyId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "challenge": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "checkpointSeq": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "retiredThroughFence": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "closedGenerationsDigest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "closureReceiptDigest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "previousCheckpointDigest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "required": [
+    "protocolVersion",
+    "contractRevision",
+    "instanceId",
+    "resourceId",
+    "authorityEpoch",
+    "executorFence",
+    "carrierGeneration",
+    "retirementRevision",
+    "authorityKeyId",
+    "challenge",
+    "checkpointSeq",
+    "retiredThroughFence",
+    "closedGenerationsDigest",
+    "closureReceiptDigest",
+    "previousCheckpointDigest"
+  ],
+  "additionalProperties": false
+}

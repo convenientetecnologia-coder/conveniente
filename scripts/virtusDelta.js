@@ -4976,6 +4976,7 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     }
     const composerIntegrityDegraded = !composerIntegrityOk;
     if (composerIntegrityDegraded) {
+      if(page.browser().__ctVirtusProxy)return {ok:false,error:'composer_integrity_unconfirmed',delivery_confidence:'unconfirmed'};
       // Política operacional: nunca abandonar envio por mismatch de composer.
       // Mantemos best-effort com evidência forense e seguimos para o Enter.
       logInfo(
@@ -5028,6 +5029,7 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
       } catch (_) {}
     }
     if (!initial) {
+      if(page.browser().__ctVirtusProxy)return {ok:false,error:'composer_text_not_registered',delivery_confidence:'unconfirmed'};
       const clicked = await clickSendButtonIfPresent(page);
       logInfo(`[virtusDelta][reply] composer_empty thread_key=${t} send_button=${clicked ? "sim" : "nao"}`);
       // Contrato de aço: sem texto no composer não há send confirmado → não mentir ok.
@@ -5041,11 +5043,13 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     }
 
     try { await page.keyboard.up("Shift"); } catch (_) {}
+    if(page.browser().__ctVirtusProxy)await page.browser().__ctVirtusProxy.beforeSend({threadKey:t,text:expectedComposer});
     try { await page.keyboard.press("Enter"); } catch (_) {}
     logInfo(`[virtusDelta][reply] enter_sent thread_key=${t}`);
-    const emptyAfterEnter = await waitLexicalComposerEmpty(page, { timeoutMs: 2200, pollMs: 80 });
+    const emptyAfterEnter = await waitLexicalComposerEmpty(page, { timeoutMs: page.browser().__ctVirtusProxy?45000:2200, pollMs: 150 });
     let after = String(emptyAfterEnter && emptyAfterEnter.text_preview || "").trim();
     if (!(emptyAfterEnter && emptyAfterEnter.ok)) {
+      if(page.browser().__ctVirtusProxy)return {ok:false,error:'virtus_send_unconfirmed_no_replay',delivery_confidence:'unconfirmed'};
       const clickedStrict = await clickStrictPhysicalSendButton(page);
       const clickedFallback = clickedStrict ? true : await clickSendButtonIfPresent(page);
       logInfo(
@@ -5108,6 +5112,7 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
       } catch (_) {}
     }
 
+    if(page.browser().__ctVirtusProxy)await page.browser().__ctVirtusProxy.confirmSend();
     return { ok: true, item_link: itemLink || null, delivery_confidence: "confirmed_local", status: "send_ok" };
   } finally {
     try { if (page) page.__virtusDeltaReplyInFlight = false; } catch (_) {}
@@ -5470,9 +5475,12 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
   let running = true;
   let sweepIdleHook = null;
-  const enqueue = createSerialQueue({
+  const proxySession=browser.__ctVirtusProxy||null;
+  const serialQueue = createSerialQueue({
     onJobIdle: () => { try { if (typeof sweepIdleHook === "function") sweepIdleHook(); } catch {} }
   });
+  const enqueue=(fn,intent='observe')=>serialQueue(()=>proxySession?proxySession.run(intent,fn):fn());
+  for(const key of ['getDepth','getMaxDepth','getMeta','isRunning','isPaused','setPaused'])enqueue[key]=serialQueue[key];
   const replyDispatchStateByClientId = new Map(); // client_message_id -> { state, at, thread_key }
   const REPLY_DISPATCH_ID_TTL_MS = Math.max(
     60_000,
@@ -6970,6 +6978,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   // FUSÃO OPERACIONAL (FASE 1):
   // Este runtime NÃO possui mais o "Ouvido" (CDP Network.webSocketFrameReceived).
   // A escuta de rede + fila/ingest stateless são responsabilidade exclusiva do `worker.js`.
+
+  if(proxySession){proxySession.finishBoot();proxySession.startObserver({canObserve:()=>running&&epochOk()&&!enqueue.isRunning()})}
 
   let cityCache = { at: 0, value: null };
   let cityTimer = null;
@@ -8496,7 +8506,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           try { await faxinaAposCicloPesado("delta_reply"); } catch (_) {}
         }
       }
-    });
+    },'reply');
   };
 
   const enqueueDeltaGreetingFlow = ({ thread_key, mensagens_cliente }) => {
@@ -8522,7 +8532,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       } finally {
         try { await faxinaAposCicloPesado("delta_greeting"); } catch (_) {}
       }
-    });
+    },'reply');
   };
 
   return {

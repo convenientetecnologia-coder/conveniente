@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocolVersion": {
+      "type": "integer",
+      "const": 2
+    },
+    "contractRevision": {
+      "type": "integer",
+      "const": 2
+    },
+    "instanceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "resourceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "authorityEpoch": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "executorFence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "carrierGeneration": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "checkpointDigest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "receipt": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192,
+      "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$"
+    }
+  },
+  "required": [
+    "protocolVersion",
+    "contractRevision",
+    "instanceId",
+    "resourceId",
+    "authorityEpoch",
+    "executorFence",
+    "carrierGeneration",
+    "checkpointDigest",
+    "receipt"
+  ],
+  "additionalProperties": false
+}

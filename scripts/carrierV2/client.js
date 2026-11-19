@@ -16,9 +16,14 @@ class OperationClient {
     const response=await this.fetch(url,{method:body===undefined?'GET':'POST',headers:this.headers(),body:body===undefined?undefined:JSON.stringify(body),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(this.requestTimeoutMs)]):AbortSignal.timeout(this.requestTimeoutMs)});
     const data=await response.json();if(!response.ok||data.ok!==true){const e=Error(data.error||'cp2_http_failure');e.retryable=!!data.retryable;e.nextPollAfterMs=data.nextPollAfterMs;throw e}return data;
   }
+  async capabilities(){
+    const url=new URL(this.url);url.pathname=this.url.pathname.replace(/\/$/,'')+'/capabilities';
+    const response=await this.fetch(url,{headers:this.headers(),signal:AbortSignal.timeout(this.requestTimeoutMs)});const data=await response.json();
+    if(!response.ok||data.ok!==true)throw Error(data.error||'cp2_capabilities_unavailable');return data;
+  }
   lease(row){return {leaseId:row.leaseId,leaseGeneration:row.leaseGeneration,carrierGeneration:row.carrierGeneration}}
-  async acquire({operationId=crypto.randomUUID(),accountId,type,eligiblePhoneIds,signal,onWait=()=>{},isReady=async()=>true}){
-    const request={operationId,accountId,type,eligiblePhoneIds};let status;
+  async acquire({operationId=crypto.randomUUID(),accountId,type,intent,operationSequence,eligiblePhoneIds,signal,onWait=()=>{},isReady=async()=>true}){
+    const request={operationId,accountId,type,eligiblePhoneIds,...(type==='virtus'?{intent:intent||'observe',...(operationSequence===undefined?{}:{operationSequence})}:{})};let status;
     // O chamador conserva operationId antes deste método. O cancelamento não
     // presume que um timeout de enqueue significa que o pedido não foi salvo.
     try{

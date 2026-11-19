@@ -34,6 +34,12 @@
     "receiptDigest": {
       "type": "string",
       "pattern": "[0-9a-f]{64}"
+    },
+    "retirementToken": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192,
+      "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$"
     }
   },
   "required": [

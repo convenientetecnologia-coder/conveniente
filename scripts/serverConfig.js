@@ -180,6 +180,7 @@ const DEFAULTS = Object.freeze({
     reservePer8GbMb: 768,
     provisionSpikeMb: 1536
   },
+  virtus: { proxyEnabled: false },
   robe: {
     windowStartMin: 360,
     windowEndMin: 1380,
@@ -549,6 +550,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const cap = (r.capacity && typeof r.capacity === "object") ? r.capacity : {};
   const memRaw = (r.memory && typeof r.memory === "object") ? r.memory : {};
   const robe = (r.robe && typeof r.robe === "object") ? r.robe : {};
+  const virtus = (r.virtus && typeof r.virtus === "object") ? r.virtus : {};
   const net = (r.networkRotation && typeof r.networkRotation === "object") ? r.networkRotation : {};
   const daily = (r.dailyWindow && typeof r.dailyWindow === "object") ? r.dailyWindow : {};
   const renew = (r.marketplaceRenew && typeof r.marketplaceRenew === "object") ? r.marketplaceRenew : {};
@@ -715,6 +717,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       reservePer8GbMb,
       provisionSpikeMb
     },
+    virtus: { proxyEnabled: virtus.proxyEnabled === true },
     robe: {
       windowStartMin,
       windowEndMin,
@@ -874,6 +877,7 @@ function validateServerConfigPayload(payload) {
   const p = (payload && typeof payload === "object") ? payload : {};
   const cap = (p.capacity && typeof p.capacity === "object") ? p.capacity : null;
   const robe = (p.robe && typeof p.robe === "object") ? p.robe : null;
+  const virtus = (p.virtus && typeof p.virtus === "object") ? p.virtus : null;
   const mem = (p.memory && typeof p.memory === "object") ? p.memory : null;
   const net = (p.networkRotation && typeof p.networkRotation === "object") ? p.networkRotation : null;
   const daily = (p.dailyWindow && typeof p.dailyWindow === "object") ? p.dailyWindow : null;
@@ -893,7 +897,7 @@ function validateServerConfigPayload(payload) {
     if (typeof p.pais === "string") return { id: p.pais };
     return null;
   })();
-  if (!cap && !robe && !mem && !net && !daily && !renew && !anuncio && !termClean && !log && !countryIn && p.proxyMode === undefined) {
+  if (!cap && !virtus && !robe && !mem && !net && !daily && !renew && !anuncio && !termClean && !log && !countryIn && p.proxyMode === undefined) {
     return { ok: false, error: "payload_sem_campos_reconhecidos" };
   }
 
@@ -904,6 +908,8 @@ function validateServerConfigPayload(payload) {
   const existingRaw = (existingProbe.raw && typeof existingProbe.raw === "object") ? existingProbe.raw : {};
 
   const errors = [];
+  if (p.virtus !== undefined && (!virtus || Array.isArray(p.virtus))) errors.push("virtus_invalido");
+  if (virtus && virtus.proxyEnabled !== undefined && typeof virtus.proxyEnabled !== "boolean") errors.push("virtus.proxyEnabled_invalido");
   if (p.proxyMode !== undefined) {
     const mode = String(p.proxyMode || "").trim();
     if (mode && mode !== "gen" && mode !== "phone") errors.push("proxyMode_invalido");
@@ -1152,6 +1158,7 @@ function validateServerConfigPayload(payload) {
     ...DEFAULTS,
     ...existingRaw,
     capacity: { ...DEFAULTS.capacity, ...(existingRaw.capacity || {}), ...(cap || {}) },
+    virtus: { ...DEFAULTS.virtus, ...(existingRaw.virtus || {}), ...(virtus || {}) },
     robe: { ...DEFAULTS.robe, ...(existingRaw.robe || {}), ...(robe || {}) },
     memory: { ...DEFAULTS.memory, ...(existingRaw.memory || {}), ...(mem || {}) },
     networkRotation: { ...DEFAULTS.networkRotation, ...(existingRaw.networkRotation || {}), ...(net || {}) },
@@ -1250,6 +1257,7 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       reservePer8GbMb: v.normalized.memory.reservePer8GbMb,
       provisionSpikeMb: v.normalized.memory.provisionSpikeMb
     },
+    virtus: { proxyEnabled: v.normalized.virtus.proxyEnabled },
     robe: {
       windowStartMin: v.normalized.robe.windowStartMin,
       windowEndMin: v.normalized.robe.windowEndMin,

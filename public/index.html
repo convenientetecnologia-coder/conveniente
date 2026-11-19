@@ -1585,6 +1585,11 @@
 
         <div class="srv-cfg-panel" data-srv-cfg-panel="virtus">
           <div class="form-row">
+            <label>Virtus — Proxy</label>
+            <select id="srvVirtusProxy"><option value="0">Não — conexão normal</option><option value="1">Sim — proxy por turnos</option></select>
+            <div class="muted" style="margin-top:6px;">Mantém o navegador aberto. Usa uma cadeira para verificar mensagens ou responder; aguarda desconectado entre os turnos. Respostas prontas têm prioridade. Sem saída direta se o proxy falhar. A mudança de modo exige reabrir a conta.</div>
+          </div>
+          <div class="form-row">
             <label>Virtus — motor de execução</label>
             <select id="srvVirtusEngine">
               <option value="delta">Virtus Delta (CDP + WS)</option>
@@ -1665,6 +1670,7 @@
       const v4DirectedPercentEl = box.querySelector('#srvRobeV4DirectedPercent');
       const v4ExactPercentEl = box.querySelector('#srvRobeV4ExactPercent');
       const virtusEngineEl = box.querySelector('#srvVirtusEngine');
+      const virtusProxyEl = box.querySelector('#srvVirtusProxy');
       const countryIdEl = box.querySelector('#srvCountryId');
       const itemTitlesPackEl = box.querySelector('#srvItemTitlesPack');
       const useItemDescriptionInAdsEl = box.querySelector('#srvUseItemDescriptionInAds');
@@ -1924,6 +1930,7 @@
         if (v4ExactPercentEl) {
           v4ExactPercentEl.value = Number(robe.v4ExactNeighborhoodPercent != null ? robe.v4ExactNeighborhoodPercent : 90);
         }
+        if (virtusProxyEl) virtusProxyEl.value = cfg.virtus?.proxyEnabled === true ? '1' : '0';
         if (virtusEngineEl) virtusEngineEl.value = String(cfg.virtusEngine || 'delta') === 'delta' ? 'delta' : 'legacy';
         if (countryIdEl) {
           const cid = String((cfg.country && cfg.country.id) || 'br').trim().toLowerCase();
@@ -2346,6 +2353,7 @@
                 return uniqueCities(globalCitiesSelected);
               })()
             },
+            virtus: { proxyEnabled: String(virtusProxyEl?.value || '0') === '1' },
             virtusEngine: String((virtusEngineEl && virtusEngineEl.value) || 'delta') === 'delta' ? 'delta' : 'legacy'
           };
           setBtnLoading(saveBtn, true, 'Salvando...');

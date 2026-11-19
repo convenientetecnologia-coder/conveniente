@@ -2575,6 +2575,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
   let browser = null;
   let pruneTimer = null;
   let directSwitch = null;
+  let virtusProxySession = null;
   try {
     const genLaunch = null;
     const gatewayResolved = { enabled: false };
@@ -2610,7 +2611,9 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try { if (fs.existsSync(chromeLogFile)) fs.unlinkSync(chromeLogFile); } catch {}
 
     // FLAGS “OURO” ONLY! A lista mora em buildAccountChromeLaunchArgs (Virtus e Robe).
-    const proxyServer = '';
+    virtusProxySession = await require('./virtusProxySession').create({nome,onState:state=>{try{require('./stepLog').appendJSONL(nome,'virtus-proxy',state)}catch{}}});
+    if(virtusProxySession)await virtusProxySession.boot();
+    const proxyServer = virtusProxySession?.proxyServer || '';
     try {
       require('./phoneProxyMode').note('phone_proxy_chrome', {
         nome: String(nome || ''),
@@ -2619,7 +2622,8 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
         proxyServer
       });
     } catch {}
-    const launchArgs = buildAccountChromeLaunchArgs(proxyServer, { directNetwork: true });
+    const launchArgs = buildAccountChromeLaunchArgs(proxyServer, { directNetwork: !virtusProxySession });
+    if(virtusProxySession)launchArgs.push('--disable-quic','--proxy-bypass-list=<-loopback>');
     if (proxyServer) {
       try { require('./connectLane.js').markArmed(true, 'proxy_launch'); } catch {}
     }
@@ -2710,6 +2714,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       throw new Error('Browser não iniciou após 3 tentativas. Veja logs acima e o arquivo chrome_launch.log do perfil.');
     }
     browser = browserTry;
+    if(virtusProxySession){virtusProxySession.attach(browser);const bootTimeout=setTimeout(()=>virtusProxySession.finishBoot(),120000);bootTimeout.unref?.();browser.once('disconnected',()=>clearTimeout(bootTimeout))}
     if (directSwitch) {
       browser.__ctDirectSwitch = directSwitch;
       browser.on('disconnected', () => {
@@ -2802,6 +2807,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try { await safeCloseBrowser(browser); } catch {}
     try { if (directSwitch) await directSwitch.close(); } catch {}
     try { await require('./phoneProxyMode').releaseSession(nome); } catch {}
+    try {if(virtusProxySession)await virtusProxySession.close()}catch{}
     logger.error('[BROWSER][ERRO FATAL ao abrir Puppeteer/browser]', {}, err);
     throw err;
   }

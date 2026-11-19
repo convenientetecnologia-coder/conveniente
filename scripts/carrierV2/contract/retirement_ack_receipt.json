@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocolVersion": {
+      "type": "integer",
+      "const": 2
+    },
+    "contractRevision": {
+      "type": "integer",
+      "const": 2
+    },
+    "instanceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "resourceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "authorityEpoch": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "executorFence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "carrierGeneration": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "retirementRevision": {
+      "type": "integer",
+      "const": 1
+    },
+    "checkpointSeq": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "receiptKeyId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "checkpointDigest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  },
+  "required": [
+    "protocolVersion",
+    "contractRevision",
+    "instanceId",
+    "resourceId",
+    "authorityEpoch",
+    "executorFence",
+    "carrierGeneration",
+    "retirementRevision",
+    "checkpointSeq",
+    "receiptKeyId",
+    "checkpointDigest"
+  ],
+  "additionalProperties": false
+}

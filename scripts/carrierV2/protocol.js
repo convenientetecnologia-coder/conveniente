@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { TextDecoder } = require('node:util');
-const names = 'HELLO OPEN DATA END PING PONG OPEN_OK OPEN_ERR ACTIVATE ACTIVATE_ACK HEARTBEAT HEARTBEAT_ACK RELEASE RELEASE_ACK REVOKE CANCEL STATUS STATUS_ACK PHASE ERROR WINDOW TAKEOVER TAKEOVER_ACK TAKEOVER_COMMIT'.split(' ');
+const names = 'HELLO OPEN DATA END PING PONG OPEN_OK OPEN_ERR ACTIVATE ACTIVATE_ACK HEARTBEAT HEARTBEAT_ACK RELEASE RELEASE_ACK REVOKE CANCEL STATUS STATUS_ACK PHASE ERROR WINDOW TAKEOVER TAKEOVER_ACK TAKEOVER_COMMIT RETIREMENT_ACK'.split(' ');
 const F = Object.freeze(Object.fromEntries(names.map((name, i) => [name, i + 1])));
 const schemas = new Map();
 class ProtocolError extends Error { constructor(code = 'protocol_error') { super(code); this.code = code; } }

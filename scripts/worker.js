@@ -881,6 +881,7 @@ async function __deltaWsLivenessTick() {
     let pick = null;
     for (const [nome, ctrl] of controllers.entries()) {
       if (!nome || !ctrl || !ctrl.browser) continue;
+      if(ctrl.browser.__ctVirtusProxy?.snapshot().offlinePlanned)continue;
       try {
         if (!ctrl.browser.isConnected || !ctrl.browser.isConnected()) continue;
       } catch {
@@ -995,6 +996,7 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
     autoMode.engine = engFromDesired;
   }
   const eng = engFromDesired || currentVirtusEngine(autoMode);
+  if(browser.__ctVirtusProxy&&eng!=='delta')throw Error('virtus_proxy_requires_delta_engine');
   try {
     const now = Date.now();
     robeMeta[nome] = robeMeta[nome] || {};
@@ -15747,6 +15749,7 @@ const handlers = {
       }
 
       ctrl.humanControl = true;
+      if(ctrl.browser?.__ctVirtusProxy)await ctrl.browser.__ctVirtusProxy.enterHuman();
       try { await snapshotStatusAndWrite({ force: true }); } catch {}
       try { await issues.append(nome, 'invoke_human_set', 'humanControl=true'); } catch {}
       try {
@@ -16022,6 +16025,7 @@ const handlers = {
       const flagsBefore = await readAccountFlags(nome).catch(()=>({}));
       try { provisionAudit.append({ ts: Date.now(), event: 'human_resume_flags_before', nome: String(nome||''), flags: { loginRequired: !!flagsBefore.loginRequired, loginRemediateFailed: !!flagsBefore.loginRemediateFailed, banned: !!flagsBefore.banned, marketplaceDisabled: !!flagsBefore.marketplaceDisabled, marketplacePhoneConfirm: !!flagsBefore.marketplacePhoneConfirm, captchaCheckpoint: !!flagsBefore.captchaCheckpoint, twoFactor: !!flagsBefore.twoFactor, idVirtus: !!flagsBefore.idVirtus, appealSubmitted: !!flagsBefore.appealSubmitted, identityRequired: !!flagsBefore.identityRequired } }); } catch {}
 
+      if(ctrl.browser?.__ctVirtusProxy)await ctrl.browser.__ctVirtusProxy.leaveHuman();
       ctrl.humanControl = false;
       try { await snapshotStatusAndWrite({ force: true }); } catch {}
       try { await browserHelper.disableGlassForWorkBrowser(ctrl.browser, nome, { source: 'human_resume' }); } catch {}
@@ -17677,6 +17681,7 @@ perfis.push({
   manifestStatus,
   closingReason: robeMeta[nome]?.closingReason || null,
   proxyWaiting: require('./carrierV2/accountOperation').getWaiting(nome),
+  virtusProxy: controllers.get(nome)?.browser?.__ctVirtusProxy?.snapshot() || null,
   openBackoffMs: robeMeta[nome]?.openBackoffMs || null,
   lastSwapAt: robeMeta[nome]?.lastSwapAt || null,
   lastSwapPeer: robeMeta[nome]?.lastSwapPeer || null,
@@ -20355,6 +20360,10 @@ async function nurseTick() {
       }
       const want = desired.perfis[nome] || {};
       const ctrl = ctrlExisting || null;
+      if(ctrl?.browser?.__ctVirtusProxy?.snapshot().offlinePlanned){
+        await appendIssueNurseDebounced(nome,'mil_action','virtus_proxy_waiting_turn','virtus_proxy_waiting_turn');
+        continue;
+      }
 
       // Reconciliador: mesmo em modo humano/hold, precisamos atualizar flags conforme a UI real,
       // senão o sistema fica "engessado" em estados antigos (ex.: loginRemediateFailed) e gera falso positivo.
@@ -29488,6 +29497,7 @@ async function __deltaAttachCdpEar(nome, page) {
         const directionNormalized = String(ev && ev.direction || '').trim().toLowerCase();
         try {
           if (senderIdNormalized && accountUserIdNormalized && senderIdNormalized === accountUserIdNormalized) {
+            try{ctrl.browser?.__ctVirtusProxy?.recordOutgoing({threadKey,text:texto,messageId:metaIds?.msgId,messageAt:metaTsMs})}catch{}
             continue;
           }
           if (
@@ -30124,6 +30134,7 @@ async function __deltaAttachCdpEar(nome, page) {
       try {
         __deltaIncFrameTelemetry('telemetry_frames_total', 1);
         ctrl.deltaNetworkEvidenceAt = Date.now();
+        try{ctrl.browser?.__ctVirtusProxy?.noteNetwork()}catch{}
         try { __deltaClearWsStaleHold(nome); } catch {}
         const response = event && event.response ? event.response : {};
         const requestId = String(event && event.requestId || '').trim();
