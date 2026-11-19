@@ -2714,7 +2714,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       throw new Error('Browser não iniciou após 3 tentativas. Veja logs acima e o arquivo chrome_launch.log do perfil.');
     }
     browser = browserTry;
-    if(virtusProxySession){virtusProxySession.attach(browser);const bootTimeout=setTimeout(()=>virtusProxySession.finishBoot(),120000);bootTimeout.unref?.();browser.once('disconnected',()=>clearTimeout(bootTimeout))}
+    if(virtusProxySession){virtusProxySession.attach(browser);const bootTimeout=setTimeout(()=>{if(!virtusProxySession.snapshot().startupFinished){virtusProxySession.noteInbox({ok:false,state:'startup_timeout'});virtusProxySession.close().catch(()=>{})}},240000);bootTimeout.unref?.();browser.once('disconnected',()=>clearTimeout(bootTimeout))}
     if (directSwitch) {
       browser.__ctDirectSwitch = directSwitch;
       browser.on('disconnected', () => {

@@ -6869,6 +6869,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     if (typeof blindarPaginaDaConta !== "function") throw new Error("virtusDelta_boot_no_gate");
     await blindarPaginaDaConta(page, bootNome, { source: "virtusDelta_boot_existing" });
   }
+  if(proxySession&&cfg.proxyHealthCheck)proxySession.setHealthCheck(()=>cfg.proxyHealthCheck(page));
   attachDeltaNavigationFirewall(page, { profileName: ACCOUNT_LOGIN || nome });
   try {
     page.__ctVirtusQueuePause = (on) => { try { enqueue.setPaused(!!on); } catch (_) {} };
@@ -6957,7 +6958,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     await __injectAntiSelectionCss(page, { profileName: ACCOUNT_LOGIN || nome, reason: "boot_worker" });
   } catch (_) {}
   if(proxySession){
-    const inbox=await prepareProxyInbox(page);
+    const inbox=await prepareProxyInbox(page,cfg.proxyHealthCheck);
     proxySession.noteInbox(inbox);
     logInfo('[virtusDelta][proxy_inbox] '+JSON.stringify(inbox));
   } else if (DELTA_MARKETPLACE_AUTOFILTER_ENABLED) {
@@ -6983,7 +6984,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   // Este runtime NÃO possui mais o "Ouvido" (CDP Network.webSocketFrameReceived).
   // A escuta de rede + fila/ingest stateless são responsabilidade exclusiva do `worker.js`.
 
-  if(proxySession){proxySession.finishBoot();proxySession.startObserver({prepareInbox:()=>prepareProxyInbox(page),canObserve:()=>running&&epochOk()&&!enqueue.isRunning()})}
+  if(proxySession){proxySession.finishBoot();proxySession.startObserver({prepareInbox:()=>prepareProxyInbox(page,cfg.proxyHealthCheck),canObserve:()=>running&&epochOk()&&!enqueue.isRunning()})}
 
   let cityCache = { at: 0, value: null };
   let cityTimer = null;
@@ -8650,12 +8651,22 @@ async function startVirtusDeltaRuntime() {
   return await startVirtusDeltaStandaloneRuntime((a0 && typeof a0 === "object") ? a0 : {});
 }
 
+async function proxyMarketplaceListActive(page){
+ return page.evaluate(()=>{
+  const norm=s=>String(s||'').replace(/\s+/g,' ').trim().toLowerCase();
+  return Array.from(document.querySelectorAll('h1,[role="heading"],[role="grid"][aria-label]')).some(el=>{
+   const r=el.getBoundingClientRect();if(r.width<2||r.height<2)return false;
+   return norm(el.getAttribute('aria-label')||el.textContent)==='marketplace';
+  });
+ });
+}
 async function proxyMarketplaceTarget(page){
  return page.evaluate(()=>{
   const normalize=s=>String(s||'').replace(/\s+/g,' ').trim().toLowerCase();
   const candidates=Array.from(document.querySelectorAll('a,button,[role="button"],[role="tab"]')).filter(el=>{
    const text=normalize(el.getAttribute('aria-label')||el.innerText||el.textContent);
-   if(text!=='marketplace')return false;
+   const labelChild=Array.from(el.querySelectorAll('span')).some(n=>normalize(n.textContent)==='marketplace');
+   if(text!=='marketplace'&&!labelChild)return false;
    const r=el.getBoundingClientRect(),style=getComputedStyle(el);
    if(r.width<8||r.height<8||style.visibility==='hidden'||style.display==='none')return false;
    const href=el.getAttribute('href')||'';
@@ -8670,10 +8681,11 @@ async function proxyMarketplaceTarget(page){
   return null;
  });
 }
-async function prepareProxyInbox(page){
+async function prepareProxyInbox(page,healthCheck){
+ if(healthCheck){const health=await healthCheck(page);if(!health.ok)return {ok:false,state:'blocked',health:health.state,reason:health.reason};}
  return require('./virtusInboxVisit').visit({
   ready:()=>page.waitForFunction(()=>document.readyState!=='loading'&&!!document.body,{timeout:120000}),
-  active:()=>isMarketplaceFilterActive(page),visible:async()=>!!(await proxyMarketplaceTarget(page)),
+  active:()=>proxyMarketplaceListActive(page),visible:async()=>!!(await proxyMarketplaceTarget(page)),
   click:async()=>{const target=await proxyMarketplaceTarget(page);if(!target)throw Error('virtus_marketplace_target_disappeared');await page.mouse.click(target.x,target.y,{delay:clickDelayMs()})},
   settled:()=>waitForMarketplaceUiStable(page,'proxy_marketplace_ready')
  });

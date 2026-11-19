@@ -881,7 +881,7 @@ async function __deltaWsLivenessTick() {
     let pick = null;
     for (const [nome, ctrl] of controllers.entries()) {
       if (!nome || !ctrl || !ctrl.browser) continue;
-      if(ctrl.browser.__ctVirtusProxy?.snapshot().offlinePlanned)continue;
+      if(ctrl.browser.__ctVirtusProxy)continue;
       try {
         if (!ctrl.browser.isConnected || !ctrl.browser.isConnected()) continue;
       } catch {
@@ -1017,6 +1017,20 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
     });
   } catch {}
   const baseCfg = {
+    proxyHealthCheck: browser.__ctVirtusProxy?async page=>{
+      const health=await require('./virtusOnlineHealth').check(page);
+      const field={pin:'messengerPin',captcha:'captchaCheckpoint',identity:'idVirtus',login:'loginRequired',banned:'banned'}[health.state];
+      // Persist observations here. Terminal/human workflows must not recursively
+      // stop the runner that is still initializing inside this very turn.
+      if(field){
+        await manifestStore.update(nome,man=>{man=man||{};man.accountFlags=man.accountFlags||{};man.accountFlags[field]=true;man.accountFlags[field+'Reason']=health.reason||health.state;man.accountFlags[field+'Source']='virtus_proxy_turn';man.proxyHealth={state:health.state,reason:health.reason,at:Date.now()};return man});
+        invalidateAccountFlagsCache(nome);
+      }else if(health.ok){
+        await manifestStore.update(nome,man=>{man=man||{};man.proxyHealth={state:'ready',at:Date.now()};if(man.accountFlags?.messengerPinSource==='virtus_proxy_turn')man.accountFlags.messengerPin=false;return man});
+        invalidateAccountFlagsCache(nome);
+      }
+      return health;
+    }:null,
     restrictTab: 0,
     epoch: cfg.epoch || 0,
     slowMode: (autoMode && autoMode.mode !== 'full'),
@@ -19058,6 +19072,7 @@ async function autoLoginRemediateTick() {
     let hasRuntimeAutoEligible = false;
     for (const [nome, ctrl] of controllers.entries()) {
       if (!nome || !ctrl) continue;
+      if(ctrl.browser?.__ctVirtusProxy)continue;
       const flags = await readAccountFlags(nome).catch(() => ({}));
       const lrFlag = !!(flags && flags.loginRequired === true);
       const st = robeMeta[nome] && robeMeta[nome].autoLoginRemediate ? robeMeta[nome].autoLoginRemediate : null;
@@ -20369,10 +20384,10 @@ async function nurseTick() {
           ctrl.virtus=start;ctrl.trabalhando=true;
           start.catch(error=>{ctrl.virtus=null;ctrl.trabalhando=false;try{logger.error('[VIRTUS_PROXY][START_FAILED]',{nome,error:error.message})}catch{}}).finally(()=>{ctrl._virtusStarting=false});
         }
-        if(ctrl._virtusStarting||proxySession.snapshot().offlinePlanned){
-          await appendIssueNurseDebounced(nome,'mil_action','virtus_proxy_waiting_turn','virtus_proxy_waiting_turn');
-          continue;
-        }
+        // Proxy account health belongs exclusively to its leased turn.
+        // The legacy nurse must not click/reload concurrently with that visit.
+        await appendIssueNurseDebounced(nome,'mil_action','virtus_proxy_turn_managed','virtus_proxy_turn_managed');
+        continue;
       }
 
       // Reconciliador: mesmo em modo humano/hold, precisamos atualizar flags conforme a UI real,
