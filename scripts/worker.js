@@ -30170,6 +30170,7 @@ async function __deltaAttachCdpEar(nome, page) {
         }
         const opcode = Number(response.opcode ?? -1);
         const payloadData = response.payloadData || '';
+        if((opcode===1||opcode===2)&&payloadData.length>0){try{ctrl.browser?.__ctVirtusProxy?.noteSyncNetwork()}catch{}}
         // Sensor forense 1: entrada bruta CDP (Lightspeed) → forensic_triagem.log (teto 10MB)
         try {
           if (DELTA_FORENSIC_FRAME) {

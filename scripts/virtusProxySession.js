@@ -24,17 +24,26 @@ async function create({nome,onState=()=>{},dependencies={}}){
   const bootGate=new Promise(resolve=>bootResolve=resolve);
   const ready=new Promise((resolve,reject)=>{bootReady=resolve;bootReject=reject});
   const boot=()=>{const task=turn.run('warm',async()=>{bootReady();await bootGate});task.catch(bootReject);return ready};
-  let browser=null,timer=null,stopped=false,lastNetworkAt=0,observerBusy=false,observerOptions=null,observerLastTickAt=0,observerSkipReason=null,observerVersion=0,startupFinished=false,healthCheck=null,lastInbox=null,activeLease=null,expectedSend=null,outgoingEvidence=null,humanHeld=false,humanResolve=null,humanTask=null;
+  let browser=null,timer=null,stopped=false,lastNetworkAt=0,lastSyncNetworkAt=0,connectedAt=Date.now(),observerBusy=false,observerOptions=null,observerLastTickAt=0,observerSkipReason=null,observerVersion=0,startupFinished=false,healthCheck=null,lastInbox=null,activeLease=null,expectedSend=null,outgoingEvidence=null,humanHeld=false,humanResolve=null,humanTask=null;
   const api={turn,proxyServer:'127.0.0.1:'+port,boot,
    attach(value){
     browser=value;browser.__ctVirtusProxy=api;
-    const watch=page=>{if(page.__ctVirtusProxyObserved)return;page.__ctVirtusProxyObserved=true;page.on('response',res=>{try{const u=new URL(res.url());if(/(^|\.)facebook\.com$|(^|\.)messenger\.com$/.test(u.hostname)&&res.status()>=200&&res.status()<400&&!res.fromCache()&&!res.fromServiceWorker())api.noteNetwork()}catch{}})};
+    const watch=page=>{
+     if(page.__ctVirtusProxyObserved)return;page.__ctVirtusProxyObserved=true;
+     const pending=new Set();page.__ctVirtusPendingInbox=pending;
+     const relevant=request=>{try{const u=new URL(request.url());return /(^|\.)facebook\.com$|(^|\.)messenger\.com$/.test(u.hostname)&&/\/api\/graphql|\/ajax\/mercury|\/messaging|\/graphql/.test(u.pathname)}catch{return false}};
+     page.on('request',request=>{if(relevant(request))pending.add(request)});
+     page.on('requestfinished',request=>pending.delete(request));page.on('requestfailed',request=>pending.delete(request));
+     page.on('response',res=>{try{const u=new URL(res.url());if(/(^|\.)facebook\.com$|(^|\.)messenger\.com$/.test(u.hostname)&&res.status()>=200&&res.status()<400&&!res.fromCache()&&!res.fromServiceWorker()){api.noteNetwork();if(relevant(res.request()))api.noteSyncNetwork()}}catch{}});
+    };
     browser.pages().then(pages=>pages.forEach(watch)).catch(()=>{});
     browser.on('targetcreated',target=>target.page().then(page=>{if(page)watch(page)}).catch(()=>{}));
     browser.once('disconnected',()=>{api.close().catch(()=>{})});
    },
    finishBoot(){startupFinished=true;bootResolve()},
    noteNetwork(){lastNetworkAt=Date.now()},
+   noteSyncNetwork(){lastSyncNetworkAt=Date.now()},
+   visitNetwork(page){return {connectedAt,lastNetworkAt:lastSyncNetworkAt,pending:page?.__ctVirtusPendingInbox?.size||0}},
    setHealthCheck(fn){healthCheck=fn},
    noteInbox(result){lastInbox={...result,at:Date.now()};onState(api.snapshot())},
    snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld,pilot:accountPilot,lastInbox,startupFinished,observer:{registered:!!observerOptions,lastTickAt:observerLastTickAt,skipReason:observerSkipReason,guard:observerOptions?.describeGuard?.()||null}}},
@@ -50,7 +59,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
     return turn.run(intent,async lease=>{
       activeLease=lease;
       try{
-        const reconnectAt=Date.now();
+        const reconnectAt=Date.now();connectedAt=reconnectAt;
         const pages=await browser.pages();
         for(const page of pages)try{await page.setOfflineMode(false)}catch{}
         // Reconnection must have a ready document before any account action.
@@ -94,7 +103,8 @@ async function create({nome,onState=()=>{},dependencies={}}){
       if(observerSkipReason)return;
       observerBusy=true;
       try{await api.run('observe',async()=>{
-        api.noteInbox(await options.prepareInbox());
+        const prepared=await options.prepareInbox();api.noteInbox(prepared);
+        if(prepared?.ok===false)return prepared;
         const start=Date.now();let sawNetwork=lastNetworkAt>0;
         while(Date.now()-start<30000&&!stopped){
           if(lastNetworkAt>=start)sawNetwork=true;
@@ -102,7 +112,8 @@ async function create({nome,onState=()=>{},dependencies={}}){
           await new Promise(r=>setTimeout(r,500));
         }
         if(!sawNetwork)throw Error('virtus_reconnect_not_confirmed');
-      })}catch(error){onState({...api.snapshot(),error:String(error.message||error)})}
+        return prepared;
+      })}catch(error){api.noteInbox({ok:false,state:'incomplete',reason:String(error.message||error),details:error.details||null});onState({...api.snapshot(),error:String(error.message||error)})}
       finally{observerBusy=false}
     };
     timer=(dependencies.setObserverInterval||setInterval)(()=>tick().catch(error=>onState({...api.snapshot(),error:String(error.message||error)})),30000);timer.unref?.();return version;

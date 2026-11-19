@@ -6869,6 +6869,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     if (typeof blindarPaginaDaConta !== "function") throw new Error("virtusDelta_boot_no_gate");
     await blindarPaginaDaConta(page, bootNome, { source: "virtusDelta_boot_existing" });
   }
+  if(proxySession)page.__ctVirtusProxySession=proxySession;
   if(proxySession&&cfg.proxyHealthCheck)proxySession.setHealthCheck(()=>cfg.proxyHealthCheck(page));
   attachDeltaNavigationFirewall(page, { profileName: ACCOUNT_LOGIN || nome });
   try {
@@ -8685,12 +8686,12 @@ async function proxyMarketplaceTarget(page){
 }
 async function prepareProxyInbox(page,healthCheck){
  if(healthCheck){const health=await healthCheck(page);if(!health.ok)return {ok:false,state:'blocked',health:health.state,reason:health.reason};}
- return require('./virtusInboxVisit').visit({
+ try{return await require('./virtusInboxVisit').visit({
   ready:()=>page.waitForFunction(()=>document.readyState!=='loading'&&!!document.body,{timeout:120000}),
   active:()=>proxyMarketplaceListActive(page),visible:async()=>!!(await proxyMarketplaceTarget(page)),
   click:async()=>{const target=await proxyMarketplaceTarget(page);if(!target)throw Error('virtus_marketplace_target_disappeared');await page.mouse.click(target.x,target.y,{delay:clickDelayMs()})},
-  settled:()=>waitForMarketplaceUiStable(page,'proxy_marketplace_ready')
- });
+  settled:()=>require('./virtusInboxReady').wait({probe:()=>require('./virtusInboxReady').snapshot(page),network:()=>page.__ctVirtusProxySession?.visitNetwork(page)||{}})
+ });}catch(error){return {ok:false,state:'incomplete',reason:String(error.message||error),details:error.details||null};}
 }
 
 module.exports = {
