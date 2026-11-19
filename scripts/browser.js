@@ -1288,47 +1288,9 @@ function _auditBlindar(event, extra) {
 }
 
 async function applyProxyAuthIfEnabled(page, nome) {
-  const mode = require('./proxyMode').read();
-  try {
-    if (mode === 'phone') {
-      const held = require('./phoneProxyMode').heldAuth(nome);
-      if (held && held.username && held.password && typeof page.authenticate === 'function') {
-        await page.authenticate({
-          username: String(held.username),
-          password: String(held.password)
-        });
-        return { enabled: true };
-      }
-    }
-    if (mode === 'gen') {
-      let genHeld = require('./proxyGen').auth(nome);
-      if (!genHeld) genHeld = await require('./proxyGen').takeForLaunch(nome);
-      if (genHeld && genHeld.username && genHeld.password && typeof page.authenticate === 'function') {
-        await page.authenticate({
-          username: String(genHeld.username),
-          password: String(genHeld.password)
-        });
-      }
-      return { enabled: true };
-    }
-  } catch (e) {
-    if (String(e && e.message || '').indexOf('phone_proxy_required:') === 0) throw e;
-    if (mode === 'gen') throw e;
-  }
-  const manifest = await manifestStore.read(nome).catch(() => null);
-  const resolved = gatewayProxy.resolveProxyForProfile({ profileName: nome, manifest: manifest || {} });
-  if (gatewayProxy.isStrictProxyRequired() && (!resolved || resolved.enabled !== true)) {
-    const reason = String((resolved && resolved.reason) || 'proxy_unresolved').trim() || 'proxy_unresolved';
-    throw new Error(`gateway_proxy_required:${reason}`);
-  }
-  if (!(resolved && resolved.enabled === true && resolved.auth && typeof page.authenticate === 'function')) {
-    return { enabled: false };
-  }
-  await page.authenticate({
-    username: String(resolved.auth.username || ''),
-    password: String(resolved.auth.password || '')
-  });
-  return { enabled: true };
+  // Virtus e o contexto do Robe não autenticam proxy no navegador.
+  // O navegador isolado do Robe autentica o túnel no robeRail.
+  return { enabled: false };
 }
 
 async function _blindarOnce(page, nome) {
@@ -1506,10 +1468,7 @@ async function bindAccountIdentity(browser, nome, opts = {}) {
 
   const manifest = await manifestStore.read(who).catch(() => null);
   try { await syncStealthFromManifest(who, manifest || {}); } catch {}
-  const gatewayResolved = gatewayProxy.resolveProxyForProfile({
-    profileName: who,
-    manifest: manifest || {}
-  });
+  const gatewayResolved = { enabled: false };
 
   const setDefaults = async (p) => {
     try {
@@ -2524,7 +2483,7 @@ function accountChromeIsHeadless() {
   return !!(headlessRequested && headlessAllowed);
 }
 
-function buildAccountChromeLaunchArgs(proxyServer) {
+function buildAccountChromeLaunchArgs(proxyServer, { directNetwork = false } = {}) {
   const launchLang = String(browserLanguageVoice().navigatorLanguage || 'pt-BR');
   const launchArgs = [
     '--no-first-run',
@@ -2559,6 +2518,16 @@ function buildAccountChromeLaunchArgs(proxyServer) {
       }
       launchArgs.push(...cleaned);
     }
+  }
+  if (directNetwork) {
+    const direct = launchArgs.filter(arg => !/^--(?:proxy-|no-proxy-server|host-resolver-rules)/i.test(arg));
+    direct.push('--no-proxy-server');
+    return direct;
+  }
+  if (proxy) {
+    const routed = launchArgs.filter(arg => !/^--(?:proxy-|no-proxy-server|host-resolver-rules)/i.test(arg));
+    routed.push(`--proxy-server=${proxy}`);
+    return routed;
   }
   return launchArgs;
 }
@@ -2607,26 +2576,9 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
   let pruneTimer = null;
   let directSwitch = null;
   try {
-    const proxyMode = require('./proxyMode').read();
-    let genLaunch = null;
-    if (proxyMode === 'gen') {
-      genLaunch = await require('./proxyGen').takeForLaunch(nome);
-    }
+    const genLaunch = null;
+    const gatewayResolved = { enabled: false };
     const coords = resolvePatchCoordsForProfile(manifest && manifest.nome ? manifest.nome : nome, manifest);
-    const gatewayResolved = genLaunch ? null : gatewayProxy.resolveProxyForProfile({
-      profileName: manifest && manifest.nome ? manifest.nome : nome,
-      manifest
-    });
-    const strictGateway = gatewayProxy.isStrictProxyRequired();
-    if (!genLaunch && strictGateway && (!gatewayResolved || gatewayResolved.enabled !== true)) {
-      const reason = String(gatewayResolved && gatewayResolved.reason || "proxy_unresolved").trim() || "proxy_unresolved";
-      throw new Error(`gateway_proxy_required:${reason}`);
-    }
-    try {
-      if (gatewayResolved && gatewayResolved.enabled) {
-        await gatewayProxy.persistManifestAssignment(manifest && manifest.nome ? manifest.nome : nome, gatewayResolved);
-      }
-    } catch {}
 
     // GUARDA: RAM, userDataDir correto
     ensureUserDataDirUnderChrome(manifest);
@@ -2658,17 +2610,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try { if (fs.existsSync(chromeLogFile)) fs.unlinkSync(chromeLogFile); } catch {}
 
     // FLAGS “OURO” ONLY! A lista mora em buildAccountChromeLaunchArgs (Virtus e Robe).
-    let proxyServer = genLaunch
-      ? String(genLaunch.proxyServer || '')
-      : ((gatewayResolved && gatewayResolved.enabled && gatewayResolved.proxyServer)
-        ? String(gatewayResolved.proxyServer)
-        : '');
-    if (!proxyServer && require('./phoneProxyMode').isEnabled() && proxyMode !== 'gen') {
-      directSwitch = require('./robeRail').createDirectSwitch();
-      const switchPort = await directSwitch.listen();
-      if (!switchPort) throw new Error('phone_proxy_required:switch');
-      proxyServer = `127.0.0.1:${switchPort}`;
-    }
+    const proxyServer = '';
     try {
       require('./phoneProxyMode').note('phone_proxy_chrome', {
         nome: String(nome || ''),
@@ -2677,7 +2619,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
         proxyServer
       });
     } catch {}
-    const launchArgs = buildAccountChromeLaunchArgs(proxyServer);
+    const launchArgs = buildAccountChromeLaunchArgs(proxyServer, { directNetwork: true });
     if (proxyServer) {
       try { require('./connectLane.js').markArmed(true, 'proxy_launch'); } catch {}
     }

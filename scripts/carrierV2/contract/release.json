@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocolVersion": {
+      "type": "integer",
+      "const": 2
+    },
+    "carrierGeneration": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "operationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "leaseId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "leaseGeneration": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "serverId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "businessResult": {
+      "type": "string",
+      "enum": [
+        "not_started",
+        "confirmed",
+        "failed",
+        "unknown"
+      ]
+    }
+  },
+  "required": [
+    "protocolVersion",
+    "carrierGeneration",
+    "operationId",
+    "leaseId",
+    "leaseGeneration",
+    "serverId",
+    "businessResult"
+  ],
+  "additionalProperties": false
+}

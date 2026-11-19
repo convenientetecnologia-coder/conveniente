@@ -1115,7 +1115,7 @@ module.exports = (app, workerClient, fileStore) => {
       // ATENÇÃO: Toda alteração de desired.json DEVE ser feita por await fileStore.patchDesired para garantir atomicidade! Não manipule desired manualmente.
       await fileStore.withDesiredFileLockUpdate(desired => {
         desired.perfis = desired.perfis || {};
-        desired.perfis[nome] = { ...(desired.perfis[nome] || {}), active: false, virtus: 'off' };
+        desired.perfis[nome] = { ...(desired.perfis[nome] || {}), active: false, virtus: 'off', provisioningPending: true };
         return desired;
       });
 

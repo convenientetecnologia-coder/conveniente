@@ -508,6 +508,7 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
       try {
         await marketplaceRenewPlan.markDoneToday(n, {
           count,
+          renewed: r.renewed === true || r.reason === 'renewed',
           source: mode === 'manual' ? 'human_overlay_manual' : 'worker_auto'
         });
       } catch {}
@@ -980,6 +981,12 @@ async function __deltaWsLivenessTick() {
 }
 
 function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
+  if (isAccountProvisioningPending(nome) || controllers.get(nome)?.configurando === true || isProfileHumanHeld(nome)) {
+    const deferredCtrl = controllers.get(nome);
+    if (deferredCtrl && !deferredCtrl.virtus) deferredCtrl.trabalhando = false;
+    try { provisionAudit.append({ ts: Date.now(), event: 'virtus_start_deferred_for_configure', nome }); } catch {}
+    return null;
+  }
   // Fonte de verdade operacional: desired.json (persistido pelo /api/server-config).
   // Isso evita corrida entre "salvar engine" e o tick de snapshot que atualiza autoMode.
   const engResolved = resolveDesiredVirtusEngineRuntime();
@@ -4038,13 +4045,13 @@ async function _installOverlayOnPage(nome, page) {
                 if (typeof window.__ctHumanOverlayRenewListings === 'function') {
                   const r = await window.__ctHumanOverlayRenewListings();
                   if (r && r.ok) {
-                    const n = Number(r.renewedCount || 0) || 0;
+
                     try {
                       $('hint').textContent = (r.reason === 'none_renewable')
                         ? 'Nenhum classificado renovável neste momento.'
                         : (r.error === 'renew_already_in_flight')
                           ? 'Renovação já em andamento.'
-                          : (`Renovação concluída: ${n} classificado(s).`);
+                          : 'Renovação concluída.';
                     } catch {}
                   } else {
                     const err = String((r && r.error) ? r.error : 'unknown');
@@ -8922,7 +8929,7 @@ async function activateOnce(nome, source = '', operator = '') {
           }, 2000);
         }
         const phoneCadastroHold = _isStockProvisionOpen && (() => {
-          try { return require('./phoneProxyMode').isEnabled() && require('./proxyMode').read() !== 'gen'; }
+          try { return require('./phoneProxyMode').isEnabled() && require('./proxyMode').read() === 'phone'; }
           catch { return false; }
         })();
         controllers.set(nome, {
@@ -8952,7 +8959,7 @@ async function activateOnce(nome, source = '', operator = '') {
         // NÃO invocar humano às cegas: primeiro navegar + revalidar (pode ter virado identidade).
         try {
           const flags = await readAccountFlags(nome).catch(()=>({}));
-          if (flags && flags.loginRemediateFailed === true) {
+          if (flags && flags.loginRemediateFailed === true && !isAccountProvisioningPending(nome)) {
             const ctrl = controllers.get(nome);
             if (ctrl) {
               ctrl.trabalhando = false;
@@ -9021,7 +9028,7 @@ async function activateOnce(nome, source = '', operator = '') {
                   if (!needsEntry && p0) {
                     try { needsEntry = await pageLooksLikeChromeNetError(p0); } catch { needsEntry = false; }
                   }
-                  const phoneCadastroOpen = ctrl.awaitingPhoneCadastro === true;
+                  const phoneCadastroOpen = ctrl.awaitingPhoneCadastro === true || isAccountProvisioningPending(nome);
                   if (phoneCadastroOpen && ctrl.browser) {
                     const guard = ctrl.browser._suppressBlankKillUntil = ctrl.browser._suppressBlankKillUntil || {};
                     guard[nome] = Math.max(Number(guard[nome] || 0) || 0, Date.now() + 120000);
@@ -9035,7 +9042,7 @@ async function activateOnce(nome, source = '', operator = '') {
                     });
                   }
                 } catch {}
-                if (_isBulkOpen || _isManualOpen) {
+                if ((_isBulkOpen || _isManualOpen) && !isAccountProvisioningPending(nome)) {
                   try { await probeHumanStateOnOpen(nome, ctrl, { source: _isBulkOpen ? 'open_all' : 'open_manual' }); } catch {}
                 }
               }
@@ -9051,7 +9058,7 @@ async function activateOnce(nome, source = '', operator = '') {
               // Landing já passou. Suppress 60s + maxAge 120s deixava about:blank
               // e facebook.com/messages morto empilharem. newPage ainda arma 25s sozinho.
               try {
-                if (ctrl.browser && Number(ctrl.browser._convenienteGateInFlight || 0) === 0 && ctrl.awaitingPhoneCadastro !== true) {
+                if (ctrl.browser && Number(ctrl.browser._convenienteGateInFlight || 0) === 0 && ctrl.awaitingPhoneCadastro !== true && !isAccountProvisioningPending(nome)) {
                   if (ctrl.browser._suppressBlankKillUntil) delete ctrl.browser._suppressBlankKillUntil[nome];
                   if (ctrl.browser._aboutBlankMaxAgeMs) delete ctrl.browser._aboutBlankMaxAgeMs[nome];
                 }
@@ -12134,9 +12141,14 @@ async function fotosGcTick() {
 setInterval(fotosGcTick, 90_000);
 setTimeout(fotosGcTick, 8000);
 
-async function stopVirtus(nome) {
+async function stopVirtus(nome, { configure = false } = {}) {
 const ctrl = controllers.get(nome);
 if (!ctrl) return;
+if (configure) {
+  await require('./runtimeStop').stopForConfigure([ctrl.virtus, ctrl.deltaForcedVirtus], 10000);
+  ctrl.virtus = null;
+  ctrl.deltaForcedVirtus = null;
+}
 try {
   // Compat: startVirtus/startVirtusDeltaRuntime retornam Promise (async). Precisamos resolver antes de chamar stop().
   const v = (ctrl.virtus && typeof ctrl.virtus.then === 'function')
@@ -12397,6 +12409,21 @@ function resolveChromeUserDataRoot() {
   return path.join(os.homedir(), '.config', 'google-chrome');
 }
 
+function isAccountProvisioningPending(nome) {
+  const desired = readJsonFile(desiredPath, { perfis: {} });
+  return desired?.perfis?.[nome]?.provisioningPending === true;
+}
+
+async function completeAccountProvisioning(nome, source) {
+  if (!isAccountProvisioningPending(nome)) return;
+  await manifestStore.update(nome, m => ({ ...m, configuredAt: Date.now() }));
+  await fileStore.withDesiredFileLockUpdate(d => {
+    if (d.perfis?.[nome]) delete d.perfis[nome].provisioningPending;
+    return d;
+  });
+  try { provisionAudit.append({ ts: Date.now(), event: 'account_provisioning_ready', nome, source }); } catch {}
+}
+
 function automationAllowed(ctrl, { operator, ignoreTrabalhando } = {}) {
   // Política enterprise:
   // - Locks globais (configure/login_remediate/open_all_map/close_all) podem bloquear automação.
@@ -12430,6 +12457,7 @@ async function start_work({ nome, operator }) {
     logger.info('[HANDLER] start_work chamada', { nome });
 
     const ctrl = controllers.get(nome);
+    if (isAccountProvisioningPending(nome)) return { ok: false, error: 'account_configure_pending' };
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.())
       return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
 
@@ -13625,7 +13653,8 @@ const handlers = {
 
         // Sempre pausar Virtus do próprio alvo antes de reinjetar cookies
         try { provisionAudit.append({ ts: Date.now(), event: 'configure_stop_virtus', nome: String(nome||''), operator: op || null }); } catch {}
-        try { await stopVirtus(nome); } catch {}
+        await stopVirtus(nome, { configure: true });
+        try { provisionAudit.append({ ts: Date.now(), event: 'configure_stop_virtus_done', nome, operator: op || null }); } catch {}
 
         // Operação de configuração é crítica: mantém Virtus OFF enquanto configura
         try {
@@ -13639,7 +13668,7 @@ const handlers = {
         try { provisionAudit.append({ ts: Date.now(), event: 'configure_inject_cookies_begin', nome: String(nome||''), operator: op || null }); } catch {}
         let cadastroPhone = false;
         try {
-          const phoneOn = require('./phoneProxyMode').isEnabled() && require('./proxyMode').read() !== 'gen';
+          const phoneOn = require('./phoneProxyMode').isEnabled() && require('./proxyMode').read() === 'phone';
           if (phoneOn) {
             await require('./phoneProxyMode').openForCadastro(nome, ctrl.browser);
             cadastroPhone = true;
@@ -14089,6 +14118,7 @@ const handlers = {
         } catch {}
 
         // Sucesso: limpa flags e segue.
+        await completeAccountProvisioning(nome, 'configure_success');
         try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed']); } catch {}
         try { provisionAudit.append({ ts: Date.now(), event: 'configure_success', nome: String(nome||''), operator: op || null, closedForRamCount: closedForRam.length, isStockProvision: !!isStockProvision }); } catch {}
         logger.info('[HANDLER] configure ok', { nome, closedForRamCount: closedForRam.length });
@@ -14543,7 +14573,7 @@ const handlers = {
         pushStep({ step: 'headroom_recover_failed' });
       }
 
-      // 4) Entrada: login e senha. Cookie só se faltar um dos dois.
+      // 4) Padrão: cookies primeiro. Senha primeiro somente quando configurado explicitamente.
       let sessionRestored = false;
       let credentialAttempted = false;
       const pcGate = require('./pcSessionLogin.js');
@@ -14556,7 +14586,7 @@ const handlers = {
       // Senha primeiro não pode pular a digitação só porque o arranque já marcou trabalhando.
       if (ctrl.trabalhando && !(authMode === 'password_first' && hasFreshCreds)) {
         pushStep({ step: 'attempt1_inject_cookies_skipped', reason: 'already_posting' });
-      } else if (hasFreshCreds) {
+      } else if (authMode === 'password_first' && hasFreshCreds) {
         if (!(await beginCredentialAttempt())) {
           return { ok: false, error: 'login_attempt_budget', steps, closedForRam, pausedVirtus };
         }
@@ -14581,12 +14611,12 @@ const handlers = {
         }
       } else if (pSession) {
         try {
-          pushStep({ step: 'emergency_cookie_missing_credentials' });
+          pushStep({ step: 'attempt1_restore_cookies' });
           const restored = await pcGate.tryExistingPcSession(pSession, nome);
           sessionRestored = !!(restored && restored.in === true);
-          pushStep({ step: 'emergency_cookie_done', in: sessionRestored, reason: restored && restored.reason ? String(restored.reason) : null });
+          pushStep({ step: 'attempt1_restore_cookies_done', in: sessionRestored, reason: restored && restored.reason ? String(restored.reason) : null });
         } catch (e) {
-          pushStep({ step: 'emergency_cookie_fail', error: (e && e.message) || String(e) });
+          pushStep({ step: 'attempt1_restore_cookies_fail', error: (e && e.message) || String(e) });
         }
       } else {
         pushStep({ step: 'attempt1_no_page' });
@@ -14992,6 +15022,7 @@ const handlers = {
       }
 
       if (success) {
+        await completeAccountProvisioning(nome, 'login_remediate_success');
         pushStep({ step: 'login_remediate_success' });
         try { await clearAccountFlags(nome, ['loginRemediateFailed', 'loginRequired']); } catch {}
         try {
@@ -17505,7 +17536,7 @@ const marketplaceRenewStatus = await (async () => {
 const effectiveRenovadosLastCount = marketplaceRenewStatus && marketplaceRenewStatus.marketplaceRenewDoneToday === true
   ? Math.max(0, Number(marketplaceRenewStatus.marketplaceRenewLastCount || 0) || 0)
   : 0;
-const effectiveRenovadosAt = effectiveRenovadosLastCount > 0 ? renovadosAt : null;
+const effectiveRenovadosAt = marketplaceRenewStatus && marketplaceRenewStatus.marketplaceRenewDoneToday === true ? renovadosAt : null;
 const loginRemediateFailed = man ? !!(man.accountFlags && man.accountFlags.loginRemediateFailed === true) : !!robeMeta[nome]?.loginRemediateFailed;
 const loginRemediateFailedAt = man ? ((man.accountFlags && man.accountFlags.loginRemediateFailedAt) || null) : null;
 const loginRemediateFailedReason = man ? ((man.accountFlags && man.accountFlags.loginRemediateFailedReason) || null) : (robeMeta[nome]?.loginRemediateFailedReason || null);
@@ -17573,7 +17604,8 @@ perfis.push({
   cidade: p.cidade,
   uaPresetId: p.uaPresetId,
   active: controllers.has(nome),
-  trabalhando: !!(controllers.get(nome)?.trabalhando),
+  trabalhando: !isAccountProvisioningPending(nome) && controllers.get(nome)?.configurando !== true && !!(controllers.get(nome)?.trabalhando),
+  provisioningPending: isAccountProvisioningPending(nome),
   virtusEngineDesired: desiredEngineRuntime,
   virtusEngineRuntime: (() => {
     try {
@@ -17589,7 +17621,7 @@ perfis.push({
     }
   })(),
   // Observabilidade enterprise (p/ pausas determinísticas durante provisionamento)
-  virtusOnline: !!(controllers.get(nome)?.virtus),
+  virtusOnline: !isAccountProvisioningPending(nome) && controllers.get(nome)?.configurando !== true && !!(controllers.get(nome)?.virtus),
   sendLockActive: (() => {
     try {
       const sl = controllers.get(nome) && controllers.get(nome).browser && controllers.get(nome).browser._sendLock;
@@ -17644,6 +17676,7 @@ perfis.push({
   reopenAt: robeMeta[nome]?.reopenAt || null,
   manifestStatus,
   closingReason: robeMeta[nome]?.closingReason || null,
+  proxyWaiting: require('./carrierV2/accountOperation').getWaiting(nome),
   openBackoffMs: robeMeta[nome]?.openBackoffMs || null,
   lastSwapAt: robeMeta[nome]?.lastSwapAt || null,
   lastSwapPeer: robeMeta[nome]?.lastSwapPeer || null,
@@ -18938,6 +18971,7 @@ function _pruneWindow(arr, winMs) {
 
 function queueAutoLoginRemediate(nome, { reason = '', source = '', immediate = false, force = false } = {}) {
   try {
+    if (isAccountProvisioningPending(nome)) return false;
     if (!AUTO_LR_CFG.enabled) return false;
     if (!nome) return false;
     robeMeta[nome] = robeMeta[nome] || {};
@@ -19448,6 +19482,7 @@ function maybeBypassReopenWaitForOpenAll(nome, desiredHint = null) {
 
 async function waitHeavyNavBootLanding(nome, ctrl) {
   try {
+    if (isAccountProvisioningPending(nome)) return { skipped: true, reason: 'configure_owns_navigation' };
     if (!connectLane.isEnabled()) return { skipped: true };
     if (!ctrl || !ctrl.browser) return { ok: false, reason: 'no_browser' };
     const listed = await listPagesBounded(ctrl.browser, 3500);
@@ -24847,6 +24882,7 @@ function __deltaIsRecentInsertUpsertMirrorDuplicate(st, text, op, nowMs = Date.n
 }
 async function __deltaResolveVirtusRunner(nome, { need = 'greeting' } = {}) {
   try {
+    if (isAccountProvisioningPending(nome) || controllers.get(nome)?.configurando === true) return null;
     const ctrl = controllers.get(nome);
     if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return null;
     // Nunca bootar/usar mãos com humano invocado (browser do operador).

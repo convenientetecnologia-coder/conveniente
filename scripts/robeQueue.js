@@ -13,14 +13,20 @@
  */
 
 'use strict';
+const {AsyncLocalStorage}=require('node:async_hooks');
 
 class RobeQueue {
-  constructor() {
+  constructor({maxProxyWaiters=2}={}) {
+    if(!Number.isInteger(maxProxyWaiters)||maxProxyWaiters<1)throw Error('invalid_proxy_waiter_limit');
+    this.maxProxyWaiters=maxProxyWaiters;
     this.fila = [];            // [ { nome, cb, timestampQueue } ]
     this.executando = null;    // { nome, startedAt }
     this._tickRunning = false;
     this._pausePredicate = null;
     this._idleHook = null;
+    this._scope = new AsyncLocalStorage();
+    this._suspended = new Map();
+    this._resuming = [];
   }
 
   setPausePredicate(fn) {
@@ -58,7 +64,7 @@ class RobeQueue {
   }
 
   isActive(nome) {
-    return !!(this.executando && this.executando.nome === nome);
+    return !!((this.executando && this.executando.nome === nome)||this._suspended.has(nome));
   }
 
   activeCount() {
@@ -67,8 +73,21 @@ class RobeQueue {
 
   queueList() {
     const filaWaiting = this.fila.map((ent) => ent.nome);
-    if (this.executando) return [this.executando.nome, ...filaWaiting];
-    return filaWaiting;
+    if (this.executando) return [this.executando.nome, ...this._suspended.keys(), ...filaWaiting];
+    return [...this._suspended.keys(), ...filaWaiting];
+  }
+
+  async withoutActiveSlot(action) {
+    const token=this._scope.getStore();
+    if(!token||this.executando!==token)return action(async()=>{});
+    this.executando=null;this._suspended.set(token.nome,token);this._tickRunning=false;this.tick();
+    let result,error,resumePromise;
+    const resume=()=>resumePromise||(resumePromise=new Promise(resolve=>{this._resuming.push({token,resolve});this.tick()}));
+    try{result=await action(resume)}catch(e){error=e}
+    // Reacquire the worker slot before browser/business continuation, including
+    // its cleanup/error handlers. Waiting accounts never own the global slot.
+    await resume();
+    if(error)throw error;return result;
   }
 
   clear() {
@@ -83,6 +102,11 @@ class RobeQueue {
     setImmediate(async () => {
       let started = false;
       try {
+        // Suspended callbacks must regain their slot even while new launches
+        // are paused, so cancellation can close browsers/release operations.
+        if(!this.executando&&this._resuming.length){
+          const next=this._resuming.shift();this._suspended.delete(next.token.nome);this.executando=next.token;this._tickRunning=false;next.resolve();started=true;return;
+        }
         try {
           const paused = !!(this._pausePredicate && this._pausePredicate());
           if (paused) {
@@ -97,11 +121,15 @@ class RobeQueue {
           if (!this.executando) this._emitIdle();
           return;
         }
+        // Prepared browsers carry drafts in memory. Bound them locally rather
+        // than opening every queued account while mobile capacity is full.
+        if(this._suspended.size>=this.maxProxyWaiters)return;
 
         const next = this.fila.shift();
         if (!next) return;
 
-        this.executando = { nome: next.nome, startedAt: Date.now() };
+        const token={ nome: next.nome, startedAt: Date.now() };
+        this.executando = token;
         started = true;
         if (process.env.ROBEQUEUE_DEBUG === '1') {
           console.log('[ROBE-QUEUE] Iniciando execução de', next.nome, {
@@ -110,11 +138,11 @@ class RobeQueue {
           });
         }
         try {
-          await Promise.resolve(next.cb());
+          await this._scope.run(token,()=>Promise.resolve(next.cb()));
         } catch (e) {
           try { console.warn('[ROBE-QUEUE] erro no cb', e && e.message); } catch {}
         } finally {
-          this.executando = null;
+          if(this.executando===token)this.executando = null;
         }
         this._tickRunning = false;
         this._emitIdle();
@@ -129,3 +157,4 @@ class RobeQueue {
 
 const robeQueueSingleton = new RobeQueue();
 module.exports = robeQueueSingleton;
+module.exports.RobeQueue = RobeQueue;

@@ -2548,8 +2548,8 @@ async function closeAccountWorkPage(browser, work) {
   }
 }
 
-async function waitPublishLeftProxy(rail) {
-  const base = typeof rail.bytesToProxy === 'function' ? rail.bytesToProxy() : 0;
+async function waitPublishLeftProxy(rail, base) {
+  if (!Number.isFinite(base)) return { ok: false, bytes: 0, reason: 'missing_publish_baseline' };
   const started = Date.now();
   let last = base;
   let quietSince = 0;
@@ -2571,7 +2571,7 @@ async function waitPublishLeftProxy(rail) {
   return { ok: false, bytes: end - base };
 }
 
-async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetries = 3, waitAfterAdvanceMs = 400, onBeforePublish = null } = {}) {
+async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetries = 3, waitAfterAdvanceMs = 400, onBeforePublish = null, onPublishClick = null } = {}) {
   const sequence = [];
   let publishClicked = false;
   let publishTries = 0;
@@ -2586,6 +2586,7 @@ async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetrie
         await onBeforePublish();
       }
       await sleep(600);
+      if (typeof onPublishClick === 'function') await onPublishClick();
       await clickOnce(page, action.handle);
       sequence.push('publicar');
       publishClicked = true;
@@ -4399,19 +4400,31 @@ async function waitPublishedEvidence(page, titulo, {maxMs=15000}={}) {
   return false;
 }
 
-async function verifyOnSellerByTitle(page, titulo, {timeout=20000}={}) {
+async function verifyOnSellerByTitle(page, titulo, {timeout=20000, listingId=null, returnDetails=false}={}) {
   try {
     await connectLane.withHeavyNav({ kind: 'robe_verify_selling_goto' }, async () => {
       await page.goto('https://www.facebook.com/marketplace/you/selling', { waitUntil: 'domcontentloaded', timeout: 45000 });
     });
     await sleep(800);
+    if (listingId) {
+      const until = Date.now() + Math.max(1000, Number(timeout) || 20000);
+      while (Date.now() < until) {
+        const state = await require('./robePublishEvidence').readSellerListingState(page, listingId).catch(() => null);
+        if (state && state.found) return returnDetails ? state : state.active === true;
+        await sleep(500);
+      }
+      return returnDetails ? { found: false, listingId } : false;
+    }
     // Busca pelo título
-    const found = await page.evaluate((t) => {
+    const found = await page.evaluate((t, id) => {
+      if (id) return Array.from(document.querySelectorAll('a[href]')).some(el => {
+        try { return new URL(el.href, location.href).pathname.match(/\/marketplace\/item\/(\d+)/)?.[1] === String(id); } catch { return false; }
+      });
       const norm = s => (s||'').toLowerCase();
       const want = norm(t).slice(0, 30);
       const cards = Array.from(document.querySelectorAll('a, div')).slice(0, 800);
       return cards.some(el => norm(el.innerText || el.textContent || '').includes(want));
-    }, titulo);
+    }, titulo, listingId);
     return !!found;
   } catch { return false; }
 }
@@ -4488,11 +4501,7 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
   // 2) Watcher de GraphQL só como sinal — nunca valida sucesso antes do dwell
   const gql = setupGraphqlPublishWatcher(page);
   const rail = page.browser && page.browser().__ctRobeRail;
-  const phoneOn = (() => {
-    try { return require('./phoneProxyMode').isEnabled() && require('./proxyMode').read() !== 'gen'; }
-    catch { return false; }
-  })();
-  let phoneGate = null;
+  let publishByteBaseline = null;
   stepLog.appendJSONL(nome, 'robe', { step: 'exact_btn_flow_start' });
   let flowRes;
   let proved = null;
@@ -4500,106 +4509,40 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
     flowRes = await clickFlowExactRetry(page, nome, {
       maxSteps: 24,
       publishMaxRetries: 3,
-      onBeforePublish: (rail || phoneOn) ? async () => {
-        if (phoneOn) {
-          const sw = page.browser && page.browser().__ctDirectSwitch;
-          if (!sw || typeof sw.flip !== 'function' || !sw.port()) {
-            const err = new Error('proxy_mobile_unavailable');
-            err.PROXY_PUBLISH = true;
-            throw err;
-          }
-          const hop = await require('./phoneProxyMode').hopForPublish(nome);
-          const before = sw.bytesToProxy();
-          sw.flip(hop);
-          await sleep(1500);
-          let raw = '';
-          try { raw = await require('./robeRail').proveThroughRail(sw.port()); }
-          catch (e) {
-            try { sw.flip(null); } catch {}
-            try { await require('./phoneProxyMode').releaseSession(nome); } catch {}
-            const err = new Error('proxy_mobile_unavailable');
-            err.PROXY_PUBLISH = true;
-            throw err;
-          }
-          let parsed = null;
-          try { parsed = JSON.parse(raw); } catch {}
-          if (!parsed) {
-            const blob = String(raw || '').match(/\{[\s\S]*\}/);
-            if (blob) { try { parsed = JSON.parse(blob[0]); } catch {} }
-          }
-          const seen = require('./robeRail').readExit(parsed);
-          if (!seen.ip || seen.asn === 'AS262481') {
-            try { sw.flip(null); } catch {}
-            try { await require('./phoneProxyMode').releaseSession(nome); } catch {}
-            const err = new Error('proxy_mobile_unavailable');
-            err.PROXY_PUBLISH = true;
-            throw err;
-          }
-          phoneGate = { before, sw, bytes() { return Math.max(0, sw.bytesToProxy() - before); }, async stop() { try { sw.flip(null); } catch {} } };
-          proved = { ok: true, asn: seen.asn, country: seen.country, ip: seen.ip, reason: 'phone_proxy' };
-          try {
-            stepLog.appendJSONL(nome, 'robe', { step: 'robe_rail_proved', asn: seen.asn, country: seen.country, ip: seen.ip, via: 'phone_tab' });
-          } catch {}
-          return;
-        }
+      onBeforePublish: rail ? async () => {
+        // Chegou ao Publicar habilitado: a composição já terminou.
+        await flowAlertFlags.clearRobePostError(nome);
         proved = await rail.armAndProve(page);
         if (!proved || proved.ok !== true) {
           const err = new Error('proxy_mobile_unavailable');
           err.PROXY_PUBLISH = true;
           throw err;
         }
-      } : null
+      } : null,
+      onPublishClick: async () => {
+        if (rail && typeof rail.bytesToProxy === 'function') publishByteBaseline = rail.bytesToProxy();
+        if (rail && typeof rail.markPublishClick === 'function') await rail.markPublishClick();
+      }
     });
   } catch (e) {
     if (rail && rail.backToDirect) {
       try { await rail.backToDirect(); } catch {}
     }
-    try { if (phoneGate) await phoneGate.stop(); } catch {}
-    try { if (phoneOn) await require('./phoneProxyMode').releaseSession(nome); } catch {}
     throw e;
   }
-  if (phoneOn && flowRes && flowRes.publishClicked === true) {
-    const started = Date.now();
-    let last = 0;
-    let quiet = 0;
-    while (Date.now() - started < 15000) {
-      const now = phoneGate ? phoneGate.bytes() : 0;
-      if (now >= 2048 && now === last) {
-        if (!quiet) quiet = Date.now();
-        if (Date.now() - quiet >= 800) break;
-      } else {
-        quiet = 0;
-        last = now;
-      }
-      await sleep(100);
-    }
-    const bytes = phoneGate ? phoneGate.bytes() : 0;
-    stepLog.appendJSONL(nome, 'robe', {
-      step: 'publish_left_proxy',
-      ok: bytes >= 2048,
-      bytes,
-      asn: proved && proved.asn || null,
-      ip: proved && proved.ip || null,
-      via: 'phone_tab'
-    });
-    try { if (phoneGate) await phoneGate.stop(); } catch {}
-    phoneGate = null;
-    try { await require('./phoneProxyMode').releaseSession(nome); } catch {}
-    if (bytes < 2048) {
-      gql.cleanup && gql.cleanup();
-      return { ok: false, reason: 'publish_not_left_proxy', publishClicked: true, proxySent: true, bytes };
-    }
-  }
   if (rail && flowRes && flowRes.publishClicked === true && proved && proved.ok === true) {
-    const left = await waitPublishLeftProxy(rail);
+    const left = await waitPublishLeftProxy(rail, publishByteBaseline);
+    const transport = typeof rail.waitPublishTransport === 'function' ? await rail.waitPublishTransport() : { ok: true };
     stepLog.appendJSONL(nome, 'robe', {
       step: 'publish_left_proxy',
       ok: !!left.ok,
       bytes: left.bytes || 0,
+      transport,
       asn: proved.asn || null,
       ip: proved.ip || null
     });
-    if (left.ok || (left.bytes || 0) >= 2048) {
+    // A resposta de criação é a confirmação; volume mínimo de bytes não é sucesso.
+    if (transport.ok === true && transport.listingIds?.length) {
       try { await rail.destroy({ killFirst: true }); } catch {}
       gql.cleanup && gql.cleanup();
       return {
@@ -4609,13 +4552,14 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
         proxySent: true,
         robeClosed: true,
         bytes: left.bytes || 0,
+        listingId: transport.listingIds && transport.listingIds[0] || null,
         asn: proved.asn || null,
         ip: proved.ip || null
       };
     }
     try { if (rail.backToDirect) await rail.backToDirect(); } catch {}
     gql.cleanup && gql.cleanup();
-    return { ok: false, reason: 'publish_not_left_proxy', publishClicked: true, proxySent: true, bytes: left.bytes || 0 };
+    return { ok: false, reason: 'publish_not_left_proxy', publishClicked: true, proxyRequired: true, proxySent: false, bytes: left.bytes || 0 };
   }
   if (rail && rail.backToDirect) {
     try { await rail.backToDirect(); } catch {}
@@ -4787,6 +4731,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
   let page = null;
   let robeRailHandle = null;
   let accountBrowser = null;
+  let postPublishSource = null;
   let published = false;
   let sawBeforeUnloadDialog = false;
   let abortedByCooldown = false;
@@ -4870,7 +4815,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       }
     }
 
-    if (require('./mobilePublishProxy').readSettings().enabled === true && !require('./phoneProxyMode').isEnabled()) {
+    if (require('./mobilePublishProxy').readSettings().enabled === true) {
       try {
         accountBrowser = browser;
         robeRailHandle = await require('./robeRail').openRobeRail({
@@ -5386,30 +5331,25 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_try_race', try: i+1 });
       pubRes = await publishAndWatch(page, titulo, nome, { watchOverlayMs: 12000 });
       if (pubRes && pubRes.robeClosed === true) {
+        // Transporte confirmado não depende de aprovação comercial do anúncio.
+        try { await flowAlertFlags.clearProxyPublishError(nome); } catch {}
+        published = true;
         robeRailHandle = null;
         page = null;
         if (!accountBrowser) throw new Error('publish_not_confirmed');
-        const opened = await openAccountWorkPage(accountBrowser, nome);
-        page = opened.work;
-        let found = false;
-        for (let n = 0; n < 3 && !found; n++) {
-          try {
-            found = await verifyOnSellerByTitle(page, titulo, { timeout: 20000 });
-          } catch {}
-          if (!found) await sleep(2000);
-        }
-        try { await dismissListingError(page); } catch {}
-        stepLog.appendJSONL(nome, 'robe', {
-          attempt: attId,
-          step: 'virtus_selling_check',
-          found: !!found,
-          bytes: pubRes.bytes || 0
+        const pages = await accountBrowser.pages().catch(() => []);
+        page = pages.find(pg => /facebook\.com\/messages/i.test(pg.url())) || pages[0] || { browser: () => accountBrowser };
+        postPublishSource = page;
+        await manifestStore.update(nome, m => {
+          m = m || {};
+          m.lastRobeSubmission = { listingId: pubRes.listingId, confirmedAt: Date.now(), via: 'phone_proxy', approvalState: 'not_checked' };
+          return m;
         });
-        if (!found) {
-          try { await closeAccountWorkPage(accountBrowser, page); } catch {}
-          page = null;
-          throw new Error('publish_not_confirmed');
-        }
+        stepLog.appendJSONL(nome, 'robe', {
+          attempt: attId, step: 'publish_submission_confirmed',
+          listingId: pubRes.listingId, confirmation: 'facebook_create_response_via_proxy',
+          approvalState: 'not_checked'
+        });
         published = true;
         break;
       }
@@ -5502,8 +5442,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
           err: String((eId && eId.message) || eId).slice(0, 220)
         });
       }
-      // Pós-ID: renovação desacoplada (se due e ainda não renovou hoje). Nunca invalida publish_ok.
-      if (!(postPublishIdResult && postPublishIdResult.marketplacePhoneConfirm === true)) {
+      // Não inicia outra etapa quando o ID exige intervenção ou falhou.
+      const blockAfterId = postPublishIdResult && (postPublishIdResult.marketplacePhoneConfirm === true || postPublishIdResult.humanRequired === true || postPublishIdResult.ok === false);
+      if (blockAfterId) stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'post_publish_renew', skipped: true, reason: 'id_not_completed' });
+      // O gate de horário da renovação roda antes de abrir o navegador isolado.
+      if (!blockAfterId) {
         try {
           await robePostPublishRenew.runRobeAutoRenewSafe({
             page,
@@ -5517,11 +5460,13 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
         stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'post_publish_anuncio', skipped: true, reason: 'marketplace_phone_confirm' });
       } else {
         try {
-          const anuncioRes = await anuncioFlow.runAuto({
-            page,
-            nome,
-            deadlineAt: Date.now() + (anuncioFlow.BUDGET_TOTAL_MS || (15 * 60 * 1000))
-          });
+          const deadline = Date.now() + (anuncioFlow.BUDGET_TOTAL_MS || (15 * 60 * 1000));
+          const runAnuncio = work => anuncioFlow.runAuto({ page: work, nome, deadlineAt: deadline });
+          const anuncioEnabled = require('./serverConfig').readServerConfigEffective().anuncio?.enabled === true;
+          const anuncioRes = page === postPublishSource && anuncioEnabled
+            ? await require('./isolatedAccountFlow').run({ page, nome, kind: 'anuncio', deadlineAt: deadline }, runAnuncio)
+            : await runAnuncio(page);
+
           try { await flowAlertFlags.settleAnuncioError(nome, anuncioRes); } catch {}
           stepLog.appendJSONL(nome, 'robe', {
             attempt: attId,
@@ -5551,7 +5496,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     }
 
     if (!preserveCreatePageForHuman) {
-      try { await closeAccountWorkPage(accountBrowser, page); } catch {}
+      try { if (page !== postPublishSource) await closeAccountWorkPage(accountBrowser, page); } catch {}
       page = null;
     }
 
@@ -5582,6 +5527,18 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
   // - em falha/abort sem publicação, apenas liberamos a reserva para não travar o pool.
   // Isso evita "esgotar" fotos por retentativas/erros técnicos.
   } catch (e) {
+    if (e && (e.message === 'publish_duplicate' || e.message === 'publish_rejected')) {
+      const outcome = e.message;
+      stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_business_outcome', outcome, published: false });
+      try { await flowAlertFlags.clearRobePostError(nome); } catch {}
+      try { await flowAlertFlags.clearProxyPublishError(nome); } catch {}
+      try {
+        if (page) postPublishIdResult = await require('./robePostAttemptChecks').run({ page, nome, titulo: '', attId });
+      } finally {
+        if (fotoNome) await fotos.releaseReservation(nome, fotoNome).catch(() => {});
+      }
+      return { ok: false, skipped: true, reason: outcome, published: false, postPublishId: postPublishIdResult, log: stepLogArr };
+    }
     logger.error('Erro em fluxo Robe', { nome }, e);
     if (e && e.LIMIT_POSTING === true) {
       limitPostingHit = true;
@@ -5763,8 +5720,10 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
 
       if (page) {
         try {
-          if (accountBrowser) await closeAccountWorkPage(accountBrowser, page);
-          else await safeClosePage(page, { nome, reason: 'robe_end' });
+          if (page !== postPublishSource) {
+            if (accountBrowser) await closeAccountWorkPage(accountBrowser, page);
+            else await safeClosePage(page, { nome, reason: 'robe_end' });
+          }
           logger.info(`[ROBE] Aba fechada no finalmente`, { nome });
         } catch {}
       }

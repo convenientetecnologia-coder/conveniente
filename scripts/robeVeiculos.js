@@ -713,7 +713,7 @@ async function clickOnce(page, handle) {
   await page.evaluate((el) => { el.click(); }, handle);
 }
 
-async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetries = 3, waitAfterAdvanceMs = 400, onBeforePublish = null } = {}) {
+async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetries = 3, waitAfterAdvanceMs = 400, onBeforePublish = null, onPublishClick = null } = {}) {
   const sequence = [];
   let publishClicked = false;
   let publishTries = 0;
@@ -726,6 +726,7 @@ async function clickFlowExactRetry(page, nome, { maxSteps = 24, publishMaxRetrie
         await onBeforePublish();
       }
       await sleep(600);
+      if (typeof onPublishClick === 'function') await onPublishClick();
       await clickOnce(page, action.handle);
       sequence.push('publicar');
       publishClicked = true;
@@ -1907,14 +1908,28 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
       maxSteps: 24,
       publishMaxRetries: 3,
       onBeforePublish: rail ? async () => {
+        await flowAlertFlags.clearRobePostError(nome);
         proved = await rail.armAndProve(page);
         if (!proved || proved.ok !== true) {
           const err = new Error('proxy_mobile_unavailable');
           err.PROXY_PUBLISH = true;
           throw err;
         }
-      } : null
+      } : null,
+      onPublishClick: async () => { if (rail && rail.markPublishClick) await rail.markPublishClick(); }
     });
+    if (rail && flowRes.publishClicked && rail.waitPublishTransport) {
+      const transport = await rail.waitPublishTransport();
+      if (!transport.ok) {
+        const err = new Error('publish_transport_not_confirmed');
+        err.PROXY_PUBLISH = true;
+        throw err;
+      }
+      if (!transport.listingIds?.length) throw new Error('publish_response_missing_listing_id');
+      await rail.destroy({ killFirst: true });
+      gql.cleanup && gql.cleanup();
+      return { ok: true, publishClicked: true, proxySent: true, robeClosed: true, listingId: transport.listingIds[0], reason: 'submission_confirmed' };
+    }
   } finally {
     if (rail && rail.backToDirect) {
       try { await rail.backToDirect(); } catch {}
@@ -2384,6 +2399,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
   let marketplaceDisabledAbort = false;
   let page = null;
   let robeRailHandle = null;
+  let accountBrowser = null;
+  let postPublishSource = null;
   let published = false;
   let postFlowStarted = false;
   let sawBeforeUnloadDialog = false;
@@ -2460,9 +2477,10 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     }
 
     // Nova aba + patchPage (sem minimizar/off-screen)
-    if (require('./mobilePublishProxy').readSettings().enabled === true && !require('./phoneProxyMode').isEnabled()) {
+    if (require('./mobilePublishProxy').readSettings().enabled === true) {
       try {
         const virtusBrowser = browser;
+        accountBrowser = browser;
         robeRailHandle = await require('./robeRail').openRobeRail({
           nome,
           cookies: manifest.cookies,
@@ -2756,6 +2774,21 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     for (let i = 0; i < 2 && !published; i++) {
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_try_race', try: i+1 });
       pubRes = await publishAndWatch(page, titulo, nome, { watchOverlayMs: 12000 });
+      if (pubRes?.robeClosed === true && pubRes.proxySent === true && pubRes.listingId) {
+        robeRailHandle = null;
+        browser = accountBrowser;
+        const pages = await accountBrowser.pages();
+        page = pages.find(pg => /facebook\.com\/messages/i.test(pg.url())) || pages[0];
+        if (!page) throw new Error('post_publish_source_missing');
+        postPublishSource = page;
+        await manifestStore.update(nome, m => {
+          m = m || {};
+          m.lastRobeSubmission = { listingId: pubRes.listingId, confirmedAt: Date.now(), via: 'phone_proxy', approvalState: 'not_checked' };
+          return m;
+        });
+        published = true;
+        break;
+      }
       if (pubRes && pubRes.proxyRequired === true && pubRes.proxySent !== true) {
         const err = new Error(String(pubRes.reason || 'proxy_publish_blocked'));
         err.PROXY_PUBLISH = true;
@@ -2809,6 +2842,16 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // Confirmar localização usada (após publicar — mantém)
     try { await confirmUsedByLocationScope(cidadePerfil, localUsada, postingLocationScope); } catch {}
 
+    // Fecha o navegador de postagem antes de abrir os navegadores de ID/renovação.
+    if (robeRailHandle) {
+      await robeRailHandle.destroy();
+      robeRailHandle = null;
+      browser = accountBrowser;
+      const accountPages = await browser.pages();
+      page = accountPages.find(pg => /facebook\.com\/messages/i.test(pg.url())) || accountPages[0];
+      postPublishSource = page;
+    }
+
     // Pós-publish: dismiss upsell + verificação ID documento (1x/dia). Nunca invalida publish_ok.
     if (page) {
       try {
@@ -2845,8 +2888,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
           err: String((eId && eId.message) || eId).slice(0, 220)
         });
       }
-      // Pós-ID: renovação desacoplada (se due e ainda não renovou hoje). Nunca invalida publish_ok.
-      if (!(postPublishIdResult && postPublishIdResult.marketplacePhoneConfirm === true)) {
+      // Não inicia outra etapa quando o ID exige intervenção ou falhou.
+      const blockAfterId = postPublishIdResult && (postPublishIdResult.marketplacePhoneConfirm === true || postPublishIdResult.humanRequired === true || postPublishIdResult.ok === false);
+      if (blockAfterId) stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'post_publish_renew', skipped: true, reason: 'id_not_completed' });
+      // O gate de horário da renovação roda antes de abrir o navegador isolado.
+      if (!blockAfterId) {
         try {
           await robePostPublishRenew.runRobeAutoRenewSafe({
             page,
@@ -2860,11 +2906,13 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'post_publish_anuncio', skipped: true, reason: 'marketplace_phone_confirm' });
       } else {
         try {
-          const anuncioRes = await anuncioFlow.runAuto({
-            page,
-            nome,
-            deadlineAt: Date.now() + (anuncioFlow.BUDGET_TOTAL_MS || (15 * 60 * 1000))
-          });
+          const deadline = Date.now() + (anuncioFlow.BUDGET_TOTAL_MS || (15 * 60 * 1000));
+          const runAnuncio = work => anuncioFlow.runAuto({ page: work, nome, deadlineAt: deadline });
+          const anuncioEnabled = require('./serverConfig').readServerConfigEffective().anuncio?.enabled === true;
+          const anuncioRes = page === postPublishSource && anuncioEnabled
+            ? await require('./isolatedAccountFlow').run({ page, nome, kind: 'anuncio', deadlineAt: deadline }, runAnuncio)
+            : await runAnuncio(page);
+
           try { await flowAlertFlags.settleAnuncioError(nome, anuncioRes); } catch {}
           stepLog.appendJSONL(nome, 'robe', {
             attempt: attId,
@@ -2894,7 +2942,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     }
 
     if (!preserveCreatePageForHuman) {
-      try { await safeClosePage(page); } catch {}
+      try { if (page !== postPublishSource) await safeClosePage(page); } catch {}
       page = null;
     }
 
@@ -3051,7 +3099,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     }
     // ABORTO ABSOLUTO: Não executa nada pós-fluxo ao detectar limit_posting
     if (limitPostingHit) {
-      try { if (page) await safeClosePage(page, { nome, reason: 'limit_posting_vehicle' }); } catch {}
+      try { if (page && page !== postPublishSource) await safeClosePage(page, { nome, reason: 'limit_posting_vehicle' }); } catch {}
       try { await sweepAboutBlankPages(browser, { nome }); } catch {}
       return { ok: false, error: LIMIT_POSTING_REASON, limitPosting: true };
     }
@@ -3063,7 +3111,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       try { await sweepAboutBlankPages(browser, { keepPage: page, nome }); } catch {}
       logger.info(`[ROBE][startRobe] FIM (veículos): preserve_create_page`, { nome });
     } else if (marketplaceDisabledAbort) {
-      try { if (page) await safeClosePage(page, { nome, reason: 'marketplace_disabled_vehicle' }); } catch {}
+      try { if (page && page !== postPublishSource) await safeClosePage(page, { nome, reason: 'marketplace_disabled_vehicle' }); } catch {}
       page = null;
       try { await sweepAboutBlankPages(browser, { keepPage: null, nome }); } catch {}
       try {
@@ -3093,7 +3141,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
 
       if (page) {
         try {
-          await safeClosePage(page, { nome, reason: 'robe_vehicle_end' });
+          if (page !== postPublishSource) await safeClosePage(page, { nome, reason: 'robe_vehicle_end' });
           logger.info(`[ROBE] Aba fechada no finalmente`, { nome });
         } catch {}
       }

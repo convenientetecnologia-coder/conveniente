@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocolVersion": {
+      "type": "integer",
+      "const": 2
+    },
+    "contractRevision": {
+      "type": "integer",
+      "const": 2
+    },
+    "carrierGeneration": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "command": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 60000
+    }
+  },
+  "required": [
+    "protocolVersion",
+    "contractRevision",
+    "carrierGeneration",
+    "command"
+  ],
+  "additionalProperties": false
+}

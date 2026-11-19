@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocolVersion": {
+      "type": "integer",
+      "const": 2
+    },
+    "contractRevision": {
+      "type": "integer",
+      "const": 2
+    },
+    "instanceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "resourceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "executorFence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "carrierGeneration": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "authorityEpoch": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "previousGenerations": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "string",
+        "format": "uuid"
+      }
+    },
+    "challenge": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "authorityKeyId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "issuedAt": {
+      "type": "number",
+      "minimum": 0
+    },
+    "expiresAt": {
+      "type": "number",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "protocolVersion",
+    "contractRevision",
+    "instanceId",
+    "resourceId",
+    "executorFence",
+    "carrierGeneration",
+    "authorityEpoch",
+    "previousGenerations",
+    "challenge",
+    "authorityKeyId",
+    "issuedAt",
+    "expiresAt"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,97 @@
+'use strict';
+const crypto=require('node:crypto'),net=require('node:net'),{once}=require('node:events'),WebSocket=require('ws');
+const {CarrierSession}=require('./session');
+class OperationClient {
+  constructor({baseUrl,token,edgeGeneration=crypto.randomUUID(),allowLoopbackTest=false,fetchImpl=fetch,requestTimeoutMs=10000,protocolTimeoutMs=10000}){
+    const url=new URL(baseUrl);if(url.protocol!=='https:'&&!(allowLoopbackTest&&url.protocol==='http:'&&url.hostname==='127.0.0.1'))throw Error('cp2_tls_required');
+    if(!token)throw Error('cp2_dedicated_token_required');
+    this.url=url;this.token=token;this.edgeGeneration=edgeGeneration;this.fetch=fetchImpl;this.operations=new Map();
+    if(!Number.isSafeInteger(requestTimeoutMs)||requestTimeoutMs<1||!Number.isSafeInteger(protocolTimeoutMs)||protocolTimeoutMs<1)throw Error('invalid_client_timeout');
+    this.requestTimeoutMs=requestTimeoutMs;this.protocolTimeoutMs=protocolTimeoutMs;
+  }
+  headers(){return {'content-type':'application/json',authorization:'Bearer '+this.token,'x-edge-generation':this.edgeGeneration}}
+  async request(path,body,signal){
+    const url=new URL(this.url);url.pathname=this.url.pathname.replace(/\/$/,'')+'/v2/operations'+path;
+    const response=await this.fetch(url,{method:body===undefined?'GET':'POST',headers:this.headers(),body:body===undefined?undefined:JSON.stringify(body),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(this.requestTimeoutMs)]):AbortSignal.timeout(this.requestTimeoutMs)});
+    const data=await response.json();if(!response.ok||data.ok!==true){const e=Error(data.error||'cp2_http_failure');e.retryable=!!data.retryable;e.nextPollAfterMs=data.nextPollAfterMs;throw e}return data;
+  }
+  lease(row){return {leaseId:row.leaseId,leaseGeneration:row.leaseGeneration,carrierGeneration:row.carrierGeneration}}
+  async acquire({operationId=crypto.randomUUID(),accountId,type,eligiblePhoneIds,signal,onWait=()=>{},isReady=async()=>true}){
+    const request={operationId,accountId,type,eligiblePhoneIds};let status;
+    // O chamador conserva operationId antes deste método. O cancelamento não
+    // presume que um timeout de enqueue significa que o pedido não foi salvo.
+    try{
+      let attempts=0;
+      for(;;){
+        if(signal?.aborted)throw signal.reason||Error('operation_canceled');
+        try{status=status?await this.request('/'+operationId,undefined,signal):await this.request('',request,signal);attempts=0}catch(e){
+          if(!e.retryable&&e.name!=='TimeoutError'&&e.name!=='TypeError')throw e;
+          onWait({operationId,state:'waiting_authority',reason:e.message});
+          await this.wait(Math.min(30000,Math.max(1000,e.nextPollAfterMs||1000)*2**Math.min(attempts++,4)),signal);continue;
+        }
+        if(status.state==='granted')break;
+        if(['released','canceled','expired','failed','unknown'].includes(status.state)){const e=Error('cp2_terminal:'+status.state);e.result=status;throw e}
+        if(status.state==='active')break;
+        onWait(status);await this.wait(Math.max(1000,Math.min(30000,status.nextPollAfterMs||3000)),signal);
+      }
+      if(!await isReady()){await this.request('/'+operationId+'/cancel',{...this.lease(status),businessResult:'not_started'});throw Error('operation_context_lost')}
+      let ready;
+      for(let n=0;n<3;n++){
+        try{ready=await this.request('/'+operationId+'/ready',this.lease(status),signal);break}catch(e){if(!e.retryable||n===2)throw e;await this.wait(Math.max(1000,e.nextPollAfterMs||1000),signal)}
+      }
+      if(ready.state!=='active'||!ready.binding)throw Error('cp2_activation_unconfirmed');
+      const op={operationId,status:ready,binding:ready.binding,result:'not_started',route:null,heartbeatError:null};this.operations.set(operationId,op);return op;
+    }catch(error){
+      // Cancel é idempotente. Se a resposta se perder, autoridade mantém capacidade
+      // contada até fechar; nunca repetir uma ação de negócio para "recuperar".
+      if(status&&status.state!=='queued')try{await this.request('/'+operationId+'/cancel',{...this.lease(status),businessResult:status.state==='granted'?'not_started':'unknown'})}catch{}
+      else try{await this.request('/'+operationId+'/cancel-queued',{expectedState:'queued'})}catch{}
+      throw error;
+    }
+  }
+  wait(ms,signal){return new Promise((resolve,reject)=>{
+    const done=()=>{clearTimeout(timer);signal?.removeEventListener('abort',abort);resolve()};
+    const abort=()=>{clearTimeout(timer);signal?.removeEventListener('abort',abort);reject(signal.reason||Error('operation_canceled'))};
+    const timer=setTimeout(done,ms*(0.9+Math.random()*0.2));if(signal?.aborted)abort();else signal?.addEventListener('abort',abort,{once:true});
+  })}
+  async heartbeat(op){const response=await this.request('/'+op.operationId+'/heartbeat',this.lease(op.status));const ack=response.acknowledgment;
+    if(response.state!=='active'||ack?.source!=='carrier'||ack?.kind!=='heartbeat_ack'||!require('./protocol').sameIdentity(op.binding,ack)||require('./protocol').contextKeys.some(k=>op.binding[k]!==ack[k]))throw Error('cp2_lease_not_active');op.status=response;return response}
+  async phase(op,phase){return this.request('/'+op.operationId+'/phase',{...this.lease(op.status),phase})}
+  async possibleSideEffect(op){await this.request('/'+op.operationId+'/possible-side-effect',this.lease(op.status));op.result='unknown'}
+  async openRoute(op,{heartbeatMs=10000}={}){
+    const url=new URL(this.url);url.protocol=url.protocol==='https:'?'wss:':'ws:';url.pathname=this.url.pathname.replace(/\/$/,'')+'/edge';url.searchParams.set('operationId',op.operationId);
+    const ws=new WebSocket(url,'conveniente.carrier.v2.r2',{headers:this.headers(),maxPayload:65536,perMessageDeflate:false,handshakeTimeout:10000});
+    const session=new CarrierSession(ws,{authenticated:true,requestTimeoutMs:this.protocolTimeoutMs,peerRole:'CT',replyRole:'authority'});await session.ready;
+    const sockets=new Set(),flows=new Set();let closing=false,inflightHeartbeat=false;
+    const close=async()=>{if(closing)return;closing=true;clearInterval(timer);for(const s of sockets)s.destroy();for(const f of flows)f.destroy();session.close();await new Promise(resolve=>server.close(resolve))};
+    const server=net.createServer({pauseOnConnect:true},socket=>{
+      sockets.add(socket);socket.on('close',()=>sockets.delete(socket));socket.on('error',()=>{});
+      if(closing||op.heartbeatError){socket.destroy();return}
+      let flow;try{flow=session.open(op.binding)}catch{socket.destroy();return}flows.add(flow);flow.on('close',()=>flows.delete(flow));
+      flow.on('error',error=>{op.transportError=error.code||error.message;socket.destroy()});socket.on('close',()=>flow.destroy());
+      flow.ready.then(()=>{if(socket.destroyed){flow.destroy();return}socket.pipe(flow).pipe(socket);socket.resume()}).catch(()=>socket.destroy());
+    });
+    server.listen(0,'127.0.0.1');await once(server,'listening');
+    const timer=setInterval(async()=>{
+      if(inflightHeartbeat||closing)return;inflightHeartbeat=true;
+      try{await this.heartbeat(op)}catch(error){op.heartbeatError=error;await close()}finally{inflightHeartbeat=false}
+    },heartbeatMs);timer.unref();
+    op.route={port:server.address().port,host:'127.0.0.1',close,session};return op.route;
+  }
+  async release(op,result=op.result){
+    if(op.route)await op.route.close();
+    let status;
+    for(let attempt=0;attempt<3;attempt++){
+      try{status=await this.request('/'+op.operationId+'/release',{...this.lease(op.status),businessResult:result});break}catch(error){
+        if(!error.retryable&&error.name!=='TimeoutError'&&error.name!=='TypeError')throw error;
+        // Retrying closure is safe; never replay the business action. A GET
+        // may show the terminal ACK already consumed after HTTP response loss.
+        try{const observed=await this.request('/'+op.operationId);if(['released','canceled','expired'].includes(observed.state)){status=observed;break}}catch{}
+        if(attempt===2)throw error;await this.wait(1000);
+      }
+    }
+    if(!['released','canceled','expired'].includes(status.state))throw Error('cp2_release_unconfirmed');
+    this.operations.delete(op.operationId);return status;
+  }
+}
+module.exports={OperationClient};

@@ -96,7 +96,7 @@ function writeJsonAtomic(file, obj) {
   } catch { return false; }
 }
 function isImageFile(name) {
-  return /\.(jpe?g|png)$/i.test(String(name || ''));
+  return /\.(jpe?g|jfif|png)$/i.test(String(name || ''));
 }
 
 // Serialização simples para evitar corridas entre chamadas
@@ -774,7 +774,7 @@ async function clearAccountHistory(nomeConta) {
 
 /**
  * Inventário enterprise de fotos (raiz Desktop/fotos + subpastas p/m/g).
- * Conta só arquivos de imagem (jpg/jpeg/png). Pastas ausentes = 0.
+ * Conta só arquivos de imagem (jpg/jpeg/jfif/png). Pastas ausentes = 0.
  */
 let __fotosInvCache = null;
 let __fotosInvCacheAt = 0;

@@ -57,7 +57,7 @@ function aggregateRenovadosFromPerfis(perfis) {
   for (const p of list) {
     if (!p) continue;
     const n = Math.floor(Number(p.renovadosLastCount || 0) || 0);
-    if (!(n > 0)) continue;
+    if (!(n > 0) && !(p.marketplaceRenewDoneToday === true && p.renovadosAt)) continue;
     renovados += 1;
     renovados_qtd += n;
   }

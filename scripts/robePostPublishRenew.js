@@ -117,6 +117,7 @@ async function runRobeAutoRenew({
       try {
         await marketplaceRenewPlan.markDoneToday(profileName, {
           count: renewedCount,
+          renewed: r.renewed === true || r.reason === 'renewed',
           source: 'robe_post_publish_auto'
         });
       } catch {}

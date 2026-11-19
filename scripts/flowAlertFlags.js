@@ -177,7 +177,7 @@ async function setRenewError(nome, { reason = '', text = '' } = {}) {
       m.accountFlags = m.accountFlags || {};
       m.accountFlags.renewError = true;
       m.accountFlags.renewErrorAt = now;
-      m.accountFlags.renewErrorReason = String(reason || 'renew_error').slice(0, 140);
+      m.accountFlags.renewErrorReason = require('./flowFailureKind').reason(reason || 'renew_error', text).slice(0, 140);
       m.accountFlags.renewErrorText = String(text || '').slice(0, 400);
       return m;
     });

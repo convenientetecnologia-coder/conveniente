@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocolVersion": {
+      "type": "integer",
+      "const": 2
+    },
+    "contractRevision": {
+      "type": "integer",
+      "const": 2
+    },
+    "instanceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "resourceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "executorFence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "carrierGeneration": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "authorityEpoch": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "receiptKeyId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "authorityKeyId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "challenge": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "closedGenerations": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "string",
+        "format": "uuid"
+      }
+    },
+    "previousDigest": {
+      "type": "string",
+      "pattern": "[0-9a-f]{64}"
+    },
+    "closed": {
+      "type": "boolean",
+      "const": true
+    },
+    "activeFlows": {
+      "type": "integer",
+      "const": 0
+    },
+    "pendingConnects": {
+      "type": "integer",
+      "const": 0
+    },
+    "closingFlows": {
+      "type": "integer",
+      "const": 0
+    },
+    "closedAt": {
+      "type": "number",
+      "minimum": 0
+    },
+    "evidence": {
+      "type": "string",
+      "enum": [
+        "process_owner_terminated",
+        "executor_teardown",
+        "no_previous_transport"
+      ]
+    }
+  },
+  "required": [
+    "protocolVersion",
+    "contractRevision",
+    "instanceId",
+    "resourceId",
+    "executorFence",
+    "carrierGeneration",
+    "authorityEpoch",
+    "receiptKeyId",
+    "authorityKeyId",
+    "challenge",
+    "closedGenerations",
+    "previousDigest",
+    "closed",
+    "activeFlows",
+    "pendingConnects",
+    "closingFlows",
+    "closedAt",
+    "evidence"
+  ],
+  "additionalProperties": false
+}

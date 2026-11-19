@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocolVersion": {
+      "type": "integer",
+      "const": 2
+    },
+    "carrierGeneration": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "carrier",
+        "CT",
+        "authority"
+      ]
+    },
+    "features": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      }
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "maxMessage": {
+          "type": "integer",
+          "const": 65536
+        },
+        "maxData": {
+          "type": "integer",
+          "const": 32768
+        },
+        "fleetMax": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "phoneOperations": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "maxFlows": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "operationFlows": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "queueChunks": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "controlQueue": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "historyLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "operationsHistoryLimit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "minReservedFlows": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 20
+        }
+      },
+      "required": [
+        "maxMessage",
+        "maxData",
+        "fleetMax",
+        "phoneOperations",
+        "maxFlows",
+        "operationFlows",
+        "queueChunks",
+        "controlQueue",
+        "historyLimit",
+        "operationsHistoryLimit",
+        "minReservedFlows"
+      ],
+      "additionalProperties": false
+    },
+    "phones": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "phoneId",
+          "port"
+        ],
+        "properties": {
+          "phoneId": {
+            "type": "string",
+            "enum": [
+              "p001",
+              "p002",
+              "p003"
+            ]
+          },
+          "port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+          }
+        }
+      }
+    },
+    "contractRevision": {
+      "type": "integer",
+      "const": 2
+    },
+    "instanceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "resourceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "authorityEpoch": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "previousGenerations": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "string",
+        "format": "uuid"
+      }
+    }
+  },
+  "required": [
+    "protocolVersion",
+    "carrierGeneration",
+    "role",
+    "features",
+    "limits",
+    "contractRevision",
+    "instanceId",
+    "resourceId",
+    "authorityEpoch",
+    "previousGenerations"
+  ],
+  "additionalProperties": false
+}

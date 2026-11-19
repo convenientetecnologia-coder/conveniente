@@ -101,7 +101,7 @@ function isIdentityRetryText(text) {
 function isIdentityDocIntroText(text) {
   const n = norm(text);
   if (!n.includes('identidade') && !n.includes('identity')) return false;
-  return n.includes('com um documento') || n.includes('reconhecimento facial') || n.includes('facial recognition') || (n.includes('30 dias') && n.includes('documento'));
+  return n.includes('com um documento') || n.includes('reconhecimento facial') || n.includes('facial recognition');
 }
 
 function isAdvanceLabel(text) {
@@ -310,7 +310,7 @@ function idPngExists() {
 function deadlineLeft(deadlineAt) {
   const d = Number(deadlineAt) || 0;
   if (!d) return BUDGET_TOTAL_MS;
-  return Math.max(0, d - Date.now());
+  return Math.max(0, require('./carrierV2/clock').effective(d) - Date.now());
 }
 
 function assertBudget(deadlineAt, where) {
@@ -448,7 +448,7 @@ async function setMarketplaceDocFlag(nome, { reason = '', text = '' } = {}) {
       m.accountFlags = m.accountFlags || {};
       m.accountFlags.marketplaceDocError = true;
       m.accountFlags.marketplaceDocErrorAt = now;
-      m.accountFlags.marketplaceDocErrorReason = String(reason || 'marketplace_doc_error').slice(0, 140);
+      m.accountFlags.marketplaceDocErrorReason = require('./flowFailureKind').reason(reason || 'marketplace_doc_error', text).slice(0, 140);
       m.accountFlags.marketplaceDocErrorText = String(text || '').slice(0, 400);
       return m;
     });
@@ -615,7 +615,7 @@ async function waitClickByText(page, patterns, { maxMs = 90000, deadlineAt, with
 
 async function detectIdWizardScreen(page) {
   try {
-    return await page.evaluate(() => {
+    const screen = await page.evaluate(() => {
       const normLocal = (s) => {
         try {
           return String(s || '')
@@ -629,6 +629,10 @@ async function detectIdWizardScreen(page) {
         }
       };
       const body = normLocal(document.body && (document.body.innerText || document.body.textContent) || '');
+      const networkCode = body.match(/\berr_(?:timed_out|connection_[a-z_]+|tunnel_[a-z_]+|proxy_[a-z_]+|name_not_resolved)\b/);
+      if (networkCode && (body.includes('nao e possivel acessar esse site') || body.includes('this site') || String(document.URL || '').startsWith('chrome-error:'))) {
+        return 'network_error:' + networkCode[0].toUpperCase();
+      }
       const hasAria = (re) =>
         !!Array.from(document.querySelectorAll('[aria-label]')).find((el) =>
           re.test(normLocal(el.getAttribute('aria-label') || ''))
@@ -685,8 +689,18 @@ async function detectIdWizardScreen(page) {
       });
       if (cnhChoice) return 'doc_type';
       if (body.includes('carregue uma foto do seu documento') || body.includes('carregue uma foto do documento')) return 'upload_photo';
+      // A política de retenção de 30 dias também aparece na tela Continuar.
+      // O controle real visível tem precedência sobre esse texto informativo.
+      const continueVisible = Array.from(document.querySelectorAll('[role="button"],button')).some(el => {
+        const label = normLocal(el.getAttribute('aria-label') || el.innerText || el.textContent);
+        if (label !== 'continuar' && label !== 'continue') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 2 && rect.height > 2 && !el.closest('[aria-hidden="true"]') &&
+          !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+      });
+      if (continueVisible && (body.includes('verificacao de identidade') || body.includes('identity verification'))) return 'continuar';
       if (
-        (body.includes('com um documento') || body.includes('reconhecimento facial') || body.includes('facial recognition') || (body.includes('30 dias') && body.includes('documento'))) &&
+        (body.includes('com um documento') || body.includes('reconhecimento facial') || body.includes('facial recognition')) &&
         (body.includes('identidade') || body.includes('identity'))
       ) {
         return 'identity_doc_intro';
@@ -713,10 +727,7 @@ async function detectIdWizardScreen(page) {
         const hasThing = label.includes('identidade') || label.includes('identity') || label.includes('documento') || label.includes('document');
         return hasThing && docVerb.test(label);
       });
-      const bodySaysDocument = docVerb.test(body) &&
-        (body.includes('documento') || body.includes('document') || body.includes('foto')) &&
-        (body.includes('identidade') || body.includes('identity'));
-      if (buttonSaysDocument || bodySaysDocument) {
+      if (buttonSaysDocument) {
         return 'carregar_doc';
       }
       if (
@@ -748,9 +759,37 @@ async function detectIdWizardScreen(page) {
       }
       return 'unknown';
     });
-  } catch {
+    if (screen.startsWith('network_error:')) {
+      const isolated = require('./isolatedAccountFlow').context(page, 'id');
+      const prefix = isolated && isolated.proxyRequired && isolated.rail.isProxyArmed ? 'identity_proxy_navigation_failed:' : 'identity_navigation_failed:';
+      throw new Error(prefix + screen.slice('network_error:'.length));
+    }
+    return screen;
+  } catch (error) {
+    if (/^identity_(?:proxy_)?navigation_failed:/.test(String(error && error.message))) throw error;
     return 'unknown';
   }
+}
+
+async function recordIdFailure(page, nome, source, error) {
+  try {
+    const snapshot = await page.evaluate(() => ({
+      url: location.href,
+      readyState: document.readyState,
+      text: String(document.body && document.body.innerText || '').slice(-7000),
+      controls: Array.from(document.querySelectorAll('button,[role="button"],[role="radio"],input')).map(el => ({
+        role: el.getAttribute('role'), aria: el.getAttribute('aria-label'),
+        text: String(el.innerText || '').slice(0, 100), type: el.type,
+        tabindex: el.getAttribute('tabindex'), disabled: el.disabled || el.getAttribute('aria-disabled'),
+        visible: !!(el.getBoundingClientRect().width && el.getBoundingClientRect().height)
+      }))
+    }));
+    const dir = path.join(__dirname, '..', 'dados', 'diag', 'id', String(nome));
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, `${Date.now()}_failure.json`);
+    fs.writeFileSync(file, JSON.stringify({ error, snapshot }, null, 2));
+    logEvt(nome, source, 'wizard_failure_snapshot', { error, file });
+  } catch {}
 }
 
 async function clickConfirmeSuaIdentidade(page) {
@@ -1453,6 +1492,23 @@ async function waitForScreenAfterConfirmIdentity(page, { deadlineAt, minMs = 800
   return { ready: readyScreens.has(scr), screen: scr };
 }
 
+async function recoverEmptyIdCheckpoint(page, { elapsedMs, deadlineAt } = {}) {
+  if (elapsedMs < 15000 || page.__ctIdEmptyReloaded || !pageIsMarketplaceDocCheckpoint(page) || deadlineLeft(deadlineAt) < 20000) return false;
+  const empty = await page.evaluate(() => {
+    const text = String(document.body && document.body.innerText || '').trim();
+    if (document.readyState !== 'complete' || text.length > 80 || /erro|error|tente|try again|bloquead|suspens|não foi|nao foi/i.test(text)) return false;
+    if (document.querySelector('input[type="file"]')) return false;
+    return !Array.from(document.querySelectorAll('button,[role="button"]')).some(el =>
+      /continuar|continue|avançar|avancar|next|enviar|submit|carregar|upload/i.test(el.getAttribute('aria-label') || el.innerText || ''));
+  }).catch(() => false);
+  if (!empty) return false;
+  page.__ctIdEmptyReloaded = true;
+  const ctx = page.__ctIdWizardContext || {};
+  logEvt(ctx.nome, ctx.source, 'wizard_empty_checkpoint_reload', { elapsedMs });
+  await page.reload({ waitUntil: 'domcontentloaded', timeout: Math.min(NAV_TIMEOUT_MS, deadlineLeft(deadlineAt)) });
+  return true;
+}
+
 async function waitForWizardScreen(page, wanted, { maxMs = 90000, deadlineAt } = {}) {
   const want = new Set(Array.isArray(wanted) ? wanted : [wanted]);
   const start = Date.now();
@@ -1461,6 +1517,7 @@ async function waitForWizardScreen(page, wanted, { maxMs = 90000, deadlineAt } =
     const scr = await detectIdWizardScreen(page);
     if (want.has(scr)) return scr;
     if (scr === 'success' || scr === 'pending_review') return scr;
+    if (scr === 'unknown') await recoverEmptyIdCheckpoint(page, { elapsedMs: Date.now() - start, deadlineAt });
     await sleep(2000);
   }
   return detectIdWizardScreen(page);
@@ -2339,13 +2396,13 @@ function classifyListedToday(text, hintsIn) {
  * mode=today (auto): só cards com data de HOJE (ou preferTitle sem data conflitante).
  * mode=firstAny (humano): qualquer ação; ainda reporta listedToday.
  */
-async function openActionNeededListing(page, { mode = 'today', preferTitle = '' } = {}) {
+async function openActionNeededListing(page, { mode = 'today', preferTitle = '', dryRun = false } = {}) {
   const prefer = String(preferTitle || '').trim();
   const hints = dateHintsSP();
 
   try {
     return await page.evaluate(
-      (modeIn, preferIn, hintsIn, actionSource) => {
+      (modeIn, preferIn, hintsIn, actionSource, dryRunIn) => {
         const normLocal = (s) => {
           try {
             return String(s || '')
@@ -2519,6 +2576,7 @@ async function openActionNeededListing(page, { mode = 'today', preferTitle = '' 
           listedLabel: pick.listedLabel || null,
           todayHint: `${hintsIn.todayDay}/${hintsIn.todayMonth}`
         };
+        if (dryRunIn) return { found: true, clicked: false, method: 'scan_only', ...meta };
 
         const badCardAria = (al) => {
           if (!al) return true;
@@ -2591,7 +2649,8 @@ async function openActionNeededListing(page, { mode = 'today', preferTitle = '' 
       mode,
       prefer,
       hints,
-      MARKETPLACE_ACTION_RE.source
+      MARKETPLACE_ACTION_RE.source,
+      dryRun
     );
   } catch (e) {
     return { found: false, error: 'open_evaluate_failed:' + String((e && e.message) || e).slice(0, 120) };
@@ -2701,85 +2760,11 @@ async function findFileInputEverywhere(page) {
 }
 
 async function isPendingReviewScreen(page) {
-  try {
-    return !!(await page.evaluate(() => {
-      const normLocal = (s) => {
-        try {
-          return String(s || '')
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase()
-            .replace(/\s+/g, ' ')
-            .trim();
-        } catch {
-          return String(s || '').toLowerCase().trim();
-        }
-      };
-      const hit = (t) => {
-        const hasId = t.includes('identidade') || t.includes('identity');
-        const reviewing = t.includes('em andamento') || t.includes('analis') || t.includes('enviad') || t.includes('submitted');
-        return (hasId && reviewing) ||
-        t.includes('normalmente analisamos suas informacoes') ||
-        t.includes('normalmente analisamos suas informações') ||
-        (t.includes('em andamento') && t.includes('48 horas'));
-      };
-      const body = normLocal(document.body && (document.body.innerText || document.body.textContent) || '');
-      if (hit(body)) return true;
-      const dialogs = Array.from(document.querySelectorAll('div[role="dialog"], [aria-modal="true"]'));
-      for (const d of dialogs) {
-        const t = normLocal(d.innerText || d.textContent || '');
-        if (hit(t)) return true;
-      }
-      // Botão Pronto no dialog de identidade = variante pós-envio
-      const pronto = Array.from(document.querySelectorAll('[aria-label],button,[role="button"]')).some((el) => {
-        const al = normLocal(el.getAttribute('aria-label') || '');
-        const tx = normLocal(el.innerText || '');
-        return al === 'pronto' || tx === 'pronto';
-      });
-      if (pronto && ((body.includes('identidade') || body.includes('identity')) || body.includes('em andamento'))) return true;
-      return false;
-    }));
-  } catch {
-    return false;
-  }
+  try { const e=await require('./idSubmissionEvidence').read(page); return e.confirmed && e.kind==='pending'; } catch { return false; }
 }
-
 async function isClassicSubmittedScreen(page) {
-  try {
-    return !!(await page.evaluate(() => {
-      const normLocal = (s) => {
-        try {
-          return String(s || '')
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase()
-            .replace(/\s+/g, ' ')
-            .trim();
-        } catch {
-          return String(s || '').toLowerCase().trim();
-        }
-      };
-      const hit = (t) =>
-        t.includes('suas informacoes foram enviadas') ||
-        t.includes('enviadas para verificacao') ||
-        t.includes('your information was submitted') ||
-        t.includes('your information has been submitted') ||
-        t.includes('enviamos suas informacoes') ||
-        t.includes('informacoes foram enviadas');
-      const body = normLocal(document.body && (document.body.innerText || document.body.textContent) || '');
-      if (hit(body)) return true;
-      const dialogs = Array.from(document.querySelectorAll('div[role="dialog"], [aria-modal="true"]'));
-      for (const d of dialogs) {
-        const t = normLocal(d.innerText || d.textContent || '');
-        if (hit(t)) return true;
-      }
-      return false;
-    }));
-  } catch {
-    return false;
-  }
+  try { const e=await require('./idSubmissionEvidence').read(page); return e.confirmed && e.kind==='submitted'; } catch { return false; }
 }
-
 /** Sucesso pós-envio: tela clássica OU “em andamento” (Pronto). */
 async function isSuccessScreen(page) {
   if (await isPendingReviewScreen(page)) return true;
@@ -2926,7 +2911,10 @@ async function finishAfterEnviar(page, { nome, source, deadlineAt } = {}) {
 }
 
 async function finishAlreadySubmitted(page, { nome, source, where, deadlineAt } = {}) {
-  logEvt(nome, source, 'already_submitted_after_' + String(where || 'step'), { ok: true });
+  const evidence=await require('./idSubmissionEvidence').read(page);
+  logEvt(nome, source, 'identity_submission_evidence', { confirmed:evidence.confirmed, kind:evidence.kind, reason:evidence.reason, controls:evidence.sample?.controls, text:evidence.sample?.text?.slice(0,1500) });
+  if(!evidence.confirmed)return {ok:false,error:'already_submitted_not_confirmed'};
+  logEvt(nome, source, 'already_submitted_after_' + String(where || 'step'), { ok: true, evidence: evidence.kind });
   // Mesmo atalho: pode ser “em andamento” (Pronto) ou clássico (Fechar)
   if (await isPendingReviewScreen(page)) {
     const pronto = await clickProntoIfPresent(page, {
@@ -2934,10 +2922,11 @@ async function finishAlreadySubmitted(page, { nome, source, where, deadlineAt } 
       deadlineAt: deadlineAt || Date.now() + 45000
     });
     logEvt(nome, source, 'wizard_pronto', { ok: !!pronto, alreadySubmitted: true });
+    if(!pronto){await recordIdFailure(page,nome,source,'pronto_not_clicked');return {ok:false,error:'pronto_not_clicked'}}
     await sleep(WAIT_STEP_MS);
   }
   await closeSuccessDialog(page, { deadlineAt: deadlineAt || Date.now() + 60000 });
-  return { ok: true, alreadySubmitted: true };
+  return { ok: true, alreadySubmitted: true, submissionEvidence: evidence.kind };
 }
 
 async function scrollSellingToTop(page) {
@@ -2970,7 +2959,18 @@ async function tryOpenActionNeededAtTop(
     await scrollSellingToTop(page);
     if (i > 0) await sleep(TOP_SCAN_GAP_MS);
 
-    scan = await openActionNeededListing(page, { mode, preferTitle: preferTitle || '' });
+    const isolated = require('./isolatedAccountFlow').context(page, 'id');
+    scan = null;
+    if (isolated && isolated.proxyRequired && !isolated.rail.isProxyArmed) {
+      const probe = await openActionNeededListing(page, { mode, preferTitle: preferTitle || '', dryRun: true });
+      if (probe && probe.found && probe.reason !== 'action_stale_not_today') {
+        await require('./isolatedAccountFlow').armIdentity(page);
+      } else {
+        scan = probe;
+      }
+    }
+    if (!scan) scan = await openActionNeededListing(page, { mode, preferTitle: preferTitle || '' });
+    if (scan && scan.error) throw new Error(scan.error);
     logEvt(nome, source, 'open_attempt', {
       found: !!(scan && scan.found),
       method: (scan && scan.method) || null,
@@ -3365,6 +3365,11 @@ async function runMarketplacePhoneVerification(page, { nome, source, deadlineAt,
 }
 
 async function submitEnviarOnPhone(page, nome, source, action, minBytes, network) {
+  const isolated = require('./isolatedAccountFlow').context(page, 'id');
+  if (isolated) {
+    if (isolated.proxyRequired && !isolated.rail.isProxyArmed) return { ok: false, error: 'identity_proxy_required' };
+    return action(); // Mantém a rota do navegador isolado durante todo o wizard.
+  }
   if (network === 'neorede') {
     logEvt(nome, source, 'wizard_enviar_neorede', {});
     const direct = await action();
@@ -3373,7 +3378,7 @@ async function submitEnviarOnPhone(page, nome, source, action, minBytes, network
   let phoneOn = false;
   try {
     const mode = require('./proxyMode').read();
-    phoneOn = require('./phoneProxyMode').isEnabled() && mode !== 'gen';
+    phoneOn = require('./phoneProxyMode').isEnabled() && mode === 'phone';
   } catch {}
   if (!phoneOn) return action();
   const sw = page.browser && page.browser().__ctDirectSwitch;
@@ -3470,6 +3475,7 @@ async function submitEnviarOnPhone(page, nome, source, action, minBytes, network
 }
 
 async function runIdDocWizard(page, { idPath, deadlineAt, nome, source, network } = {}) {
+  page.__ctIdWizardContext = { nome, source };
   assertBudget(deadlineAt, 'wizard_start');
 
   const maybeMarketplacePhoneConfirm = async (where, extra = {}) => {
@@ -3931,6 +3937,11 @@ async function reopenIdentityListing(page, { nome, source, deadlineAt, mode }) {
 }
 
 async function runIdDocWithFallback(page, { idPath, deadlineAt, nome, source, mode }) {
+  const isolated = require('./isolatedAccountFlow').context(page, 'id');
+  if (isolated) {
+    if (isolated.proxyRequired && !isolated.rail.isProxyArmed) return { ok: false, error: 'identity_proxy_required' };
+    return runIdDocWizard(page, { idPath, deadlineAt, nome, source, network: isolated.proxyRequired ? 'isolated' : 'neorede' });
+  }
   let wiz = await runIdDocWizard(page, { idPath, deadlineAt, nome, source, network: 'phone' });
   if (wiz && wiz.ok) return wiz;
   if (!phoneSendShouldRetry(wiz)) return wiz;
@@ -3950,6 +3961,19 @@ async function runIdDocWithFallback(page, { idPath, deadlineAt, nome, source, mo
 }
 
 async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
+  // O marcador é consultado antes de abrir qualquer navegador/aba de identidade.
+  if (await isDoneToday(nome)) return { ok: true, skipped: true, reason: 'already_done_today' };
+  if (!require('./isolatedAccountFlow').context(page, 'id')) {
+    try {
+      const isolatedDeadline = Number(deadlineAt) || Date.now() + BUDGET_TOTAL_MS;
+      return await require('./isolatedAccountFlow').run({ page, nome, kind: 'id', deadlineAt: isolatedDeadline },
+        isolatedPage => runRobeAutoId({ page: isolatedPage, nome, titulo, deadlineAt: isolatedDeadline }));
+    } catch (e) {
+      const error = String(e.message || e);
+      await setMarketplaceDocFlag(nome, { reason: error, text: error });
+      return { ok: false, marked: false, error };
+    }
+  }
   const startedAt = Date.now();
   const source = 'auto';
   const hardDeadline = Number(deadlineAt) || Date.now() + BUDGET_TOTAL_MS;
@@ -4067,6 +4091,7 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
     }
 
     const fail = { ok: false, error: (wiz && wiz.error) || 'wizard_failed' };
+    await recordIdFailure(page, nome, source, fail.error);
     logEvt(nome, source, 'wizard_failed', {
       error: fail.error,
       durationMs: Date.now() - startedAt
@@ -4143,6 +4168,17 @@ async function openIdentityFromVisibleListings(page, { nome, source, deadlineAt 
 }
 
 async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
+  if (!require('./isolatedAccountFlow').context(page, 'id')) {
+    try {
+      const isolatedDeadline = Number(deadlineAt) || Date.now() + BUDGET_TOTAL_MS;
+      return await require('./isolatedAccountFlow').run({ page, nome, kind: 'id', deadlineAt: isolatedDeadline },
+        isolatedPage => runHumanVerifyId({ page: isolatedPage, nome, deadlineAt: isolatedDeadline }));
+    } catch (e) {
+      const error = String(e.message || e);
+      await setMarketplaceDocFlag(nome, { reason: error, text: error });
+      return { ok: false, marked: false, error };
+    }
+  }
   const startedAt = Date.now();
   const source = 'human';
   const workDeadline = Number(deadlineAt) || Date.now() + BUDGET_TOTAL_MS;
@@ -4164,6 +4200,7 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
     let openedOk = false;
     let scan = null;
     if (wizardHere) {
+      await require('./isolatedAccountFlow').armIdentity(page);
       openedOk = true;
       scan = { found: true, method: 'already_open' };
       logEvt(nome, source, 'wizard_already_open', { screen: here });
@@ -4182,6 +4219,7 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
       openedOk = opened.openedOk;
       scan = opened.scan;
       if (!openedOk) {
+        await require('./isolatedAccountFlow').armIdentity(page);
         const probed = await openIdentityFromVisibleListings(page, { nome, source, deadlineAt: workDeadline });
         if (probed) {
           openedOk = true;
@@ -4222,9 +4260,10 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
     });
     if (wiz && wiz.ok) {
       await clearMarketplacePhoneFlags(nome);
-      return { ok: true, marked: false };
+      return { ok: true, marked: false, identityFlowConfirmed: true };
     }
     const fail = { ok: false, error: (wiz && wiz.error) || 'wizard_failed', marked: false, marketplacePhoneError: !!(wiz && wiz.marketplacePhoneError), marketplacePhoneNoBalance: !!(wiz && wiz.marketplacePhoneNoBalance) };
+    await recordIdFailure(page, nome, source, fail.error);
     if (shouldMarkDocError(fail)) {
       await setMarketplaceDocFlag(nome, { reason: fail.error, text: `ID de documento nao concluiu: ${fail.error}` });
     }

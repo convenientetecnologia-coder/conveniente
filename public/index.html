@@ -1354,7 +1354,6 @@
           <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="robe">Robe</button>
           <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="virtus">Virtus</button>
           <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="localizacao">Localização</button>
-          <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="proxy">Proxy</button>
         </div>
 
         <div class="srv-cfg-panel active" data-srv-cfg-panel="servidor">
@@ -1521,7 +1520,7 @@
               <option value="0">Não</option>
               <option value="1">Sim</option>
             </select>
-            <div class="muted" style="margin-top:6px;">Só o envio do anúncio sai pela rede móvel da Claro. Usuário e senha vêm do CT, como as outras chaves. O anúncio é montado no modem. Depois de publicar, a página de classificados volta no modem. Se a rede não for a móvel, não publica e não usa o Wi-Fi.</div>
+            <div class="muted" style="margin-top:6px;">Vale para postagem, ID e renovação, em navegadores separados do Virtus. Com Sim, monta o anúncio na rede e publica pelo celular; verifica o ID na rede e faz toda a confirmação pelo celular; prepara a renovação na rede e troca no último Renovar. Usa os celulares autorizados pelo CT, sem fallback para a rede normal. Com Não, as três etapas usam a rede normal. ID concluído e renovação fora do horário ou já concluída não abrem navegador.</div>
           </div>
           <div class="form-row">
             <label>Robe — títulos de itens</label>
@@ -1610,21 +1609,7 @@
           </div>
         </div>
 
-        <div class="srv-cfg-panel" data-srv-cfg-panel="proxy">
-          <div class="form-row">
-            <label>Modo do proxy</label>
-            <select id="srvProxyMode">
-              <option value="">Sem opção</option>
-              <option value="gen">Proxy gen</option>
-              <option value="phone">Convenienteproxy</option>
-            </select>
-            <div class="muted" style="margin-top:6px;">Sem opção, a conta abre como antes. Proxy gen usa os proxies marcados na central e a conta fica no mesmo. Convenienteproxy deixa a conta na NeoRede. O celular entra no cadastro (cookie primeiro, senha se o cookie não entrar, e a conferência do Marketplace), na postagem do Robe e na confirmação de identidade, e solta a cadeira em seguida.</div>
-          </div>
-          <div class="form-row">
-            <div id="srvProxyState" class="pill info"><span class="dot"></span>Consultando o CT...</div>
-            <div id="srvProxyInfo" class="muted" style="margin-top:8px"></div>
-          </div>
-        </div>
+
 
         <div class="modal-actions">
           <button class="btn" id="srvCfgClose">Fechar</button>
@@ -1633,7 +1618,6 @@
       `;
       overlay.append(box);
       document.body.append(overlay);
-      let loadSrvProxyStatus = async function () {};
       (() => {
         const tabs = Array.from(box.querySelectorAll('[data-srv-cfg-tab]'));
         const panels = Array.from(box.querySelectorAll('[data-srv-cfg-panel]'));
@@ -1646,37 +1630,7 @@
           t.onclick = () => activateTab(t.getAttribute('data-srv-cfg-tab'));
         });
         activateTab('servidor');
-        const proxyState = box.querySelector('#srvProxyState');
-        const proxyInfo = box.querySelector('#srvProxyInfo');
-        loadSrvProxyStatus = async function () {
-          try {
-            const r = await fetch('/api/proxy-central/status');
-            const j = await r.json();
-            if (!proxyState) return;
-            const mode = String(j && j.mode || '');
-            if (mode !== 'gen') {
-              proxyState.innerHTML = '<span class="dot"></span>' + (mode === 'phone' ? 'convenienteproxy' : 'sem opção');
-              if (proxyInfo) proxyInfo.textContent = '';
-              return;
-            }
-            if (!j || j.ok !== true) {
-              proxyState.innerHTML = '<span class="dot"></span>Não consegui consultar o CT.';
-              if (proxyInfo) proxyInfo.textContent = '';
-              return;
-            }
-            if (j.configured !== true) {
-              proxyState.innerHTML = '<span class="dot"></span>desconectado';
-              if (proxyInfo) proxyInfo.textContent = '';
-              return;
-            }
-            proxyState.innerHTML = '<span class="dot"></span>conectado';
-            const names = (Array.isArray(j.proxies) ? j.proxies : []).map((p) => String(p && p.name || 'sem nome'));
-            if (proxyInfo) proxyInfo.textContent = names.join(', ');
-          } catch {
-            if (proxyState) proxyState.innerHTML = '<span class="dot"></span>Não consegui consultar o CT.';
-          }
-        };
-        loadSrvProxyStatus();
+
       })();
       const infoEl = box.querySelector('#serverCfgInfo');
       const cdMinEl = box.querySelector('#srvCooldownMin');
@@ -1888,11 +1842,6 @@
         if (netRotateMinEl) netRotateMinEl.value = Number(net.intervalMinMinutes || 300);
         if (netRotateMaxEl) netRotateMaxEl.value = Number(net.intervalMaxMinutes || 420);
         if (netRotateAttemptsEl) netRotateAttemptsEl.value = Number(net.maxAttemptsPerCycle || 5);
-        const proxyModeEl = box.querySelector('#srvProxyMode');
-        if (proxyModeEl) {
-          const savedMode = String(cfg && cfg.proxyMode || '').trim();
-          proxyModeEl.value = (savedMode === 'gen' || savedMode === 'phone') ? savedMode : '';
-        }
         if (dailyModeEl) {
           const mode = String(daily.executionMode || '').trim().toLowerCase();
           // renew_window_close_open foi removido: trata como fechar/abrir puro.
@@ -2313,9 +2262,7 @@
             await showSystemMessageModal({ title: 'RAM inválida', message: 'Pico provision: use entre 256 e 8192 MB.', tone: 'bad' });
             return;
           }
-          const proxyModeEl = box.querySelector('#srvProxyMode');
           const payload = {
-            proxyMode: String((proxyModeEl && proxyModeEl.value) || '').trim(),
             memory: {
               ...(workerDivisorSupported ? { workerRamDivisorGb } : {}),
               governorEnterMb,
@@ -2420,7 +2367,6 @@
           const partialFailureMsg = partialFailure
             ? ` Uma etapa secundária falhou depois da persistência (${String(r.error || 'erro desconhecido')}); a configuração acima não foi revertida.`
             : '';
-          try { await loadSrvProxyStatus(); } catch {}
           await showSystemMessageModal({
             title: (renewReplanFailed || partialFailure) ? 'Configuração salva com alerta' : 'Configuração salva',
             message: 'Configuração salva com sucesso. O novo intervalo de rotação passa a valer no próximo ciclo agendado.' + workerRestartMsg + renewReplanMsg + (() => {
@@ -2586,6 +2532,7 @@
           p.captchaCheckpoint ? 1 : 0,
           p.twoFactor ? 1 : 0,
           p.problem ? 1 : 0,
+          p.proxyWaiting ? String(p.proxyWaiting.operationId || 'waiting') : '',
           Number(p.issuesCount || 0) || 0,
           p.ramMB == null ? 'x' : Math.round(Number(p.ramMB) || 0),
           p.cpuPercent == null ? 'x' : Math.round(Number(p.cpuPercent) || 0),
@@ -3359,7 +3306,7 @@
 
         // Pills (mantenha como já está, apenas reaproveite o código existente a partir daqui)
         titleRow.append(buildPill('Navegador '+(p.active?'Ativo':'Inativo'), p.active?'good':'bad'));
-        titleRow.append(buildPill('Virtus '+(p.trabalhando?'Online':'Offline'), p.trabalhando?'good':'bad'));
+        titleRow.append(buildPill(p.provisioningPending ? 'Cadastro pendente' : 'Virtus '+(p.virtusOnline?'Online':'Offline'), p.virtusOnline && !p.provisioningPending?'good':'bad'));
         if (p.robeMode === 'veiculos') titleRow.append(buildPill('Modo: Veículos', 'info'));
         else titleRow.append(buildPill('Modo: Itens', 'info'));
         const gatewayPills = buildGatewayProxyPills(p);
@@ -3495,7 +3442,7 @@
           titleRow.append(pill);
         }
         if (p.marketplaceDocError === true) {
-          const pill = buildPill('Documento MKT erro', 'bad');
+          const pill = buildPill(String(p.marketplaceDocErrorReason || '').startsWith('proxy:') ? 'ID proxy erro' : 'ID erro', 'bad');
           pill.title = p.marketplaceDocErrorText || 'ID de documento do Marketplace nao concluiu';
           titleRow.append(pill);
         }
@@ -3505,12 +3452,12 @@
           titleRow.append(pill);
         }
         if (p.proxyPublishError === true) {
-          const pill = buildPill('Proxy erro', 'bad');
+          const pill = buildPill('Robe proxy erro', 'bad');
           pill.title = p.proxyPublishErrorText || 'Publicacao nao saiu na rede movel';
           titleRow.append(pill);
         }
         if (p.renewError === true) {
-          const pill = buildPill('Renovação erro', 'bad');
+          const pill = buildPill(String(p.renewErrorReason || '').startsWith('proxy:') ? 'Renovação proxy erro' : 'Renovação erro', 'bad');
           pill.title = p.renewErrorText || 'Renovacao de classificados nao concluiu';
           titleRow.append(pill);
         }
@@ -3539,8 +3486,7 @@
           if (scrollDays > 0) {
             titleRow.append(buildPill('Scroll: ' + scrollDays + ' dia' + (scrollDays === 1 ? '' : 's'), 'info'));
           }
-          const lastCount = Math.floor(Number(p.marketplaceRenewLastCount || 0) || 0);
-          if (lastCount > 0) titleRow.append(buildPill('Renovados - ' + lastCount, 'good'));
+          if (p.marketplaceRenewDoneToday === true && p.renovadosAt) titleRow.append(buildPill('Renovação: sim', 'good'));
         }
 
         // ------- COOLDOWN (ADICIONAL) -------
@@ -3554,6 +3500,7 @@
         }
 
         // ------- Estado do robe ------
+        if(p.proxyWaiting)titleRow.append(buildPill('Aguardando proxy', 'info'));
         if (robeStatus && robeStatus.estado) {
           titleRow.append(buildRobeEstadoPill(robeStatus.estado));
         }

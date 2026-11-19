@@ -88,6 +88,9 @@ function emptyFlagsAgg() {
     appeal_submitted: 0,
     marketplace_phone_error: 0,
     marketplace_doc_error: 0,
+    id_proxy_error: 0,
+    robe_proxy_error: 0,
+    renew_proxy_error: 0,
     robe_post_error: 0,
     renew_error: 0,
     anuncio_error: 0,
@@ -145,9 +148,16 @@ function buildServerCardAggs(status, opts = {}) {
     if (p.whatsappConfirm === true) flagsAgg.whatsapp_confirm++;
     if (p.appealSubmitted === true) flagsAgg.appeal_submitted++;
     if (p.marketplacePhoneError === true) flagsAgg.marketplace_phone_error++;
-    if (p.marketplaceDocError === true) flagsAgg.marketplace_doc_error++;
+    if (p.marketplaceDocError === true) {
+      if (String(p.marketplaceDocErrorReason || '').startsWith('proxy:')) flagsAgg.id_proxy_error++;
+      else flagsAgg.marketplace_doc_error++;
+    }
+    if (p.proxyPublishError === true) flagsAgg.robe_proxy_error++;
     if (p.robePostError === true) flagsAgg.robe_post_error++;
-    if (p.renewError === true) flagsAgg.renew_error++;
+    if (p.renewError === true) {
+      if (String(p.renewErrorReason || '').startsWith('proxy:')) flagsAgg.renew_proxy_error++;
+      else flagsAgg.renew_error++;
+    }
     if (p.anuncioError === true) flagsAgg.anuncio_error++;
     if (p.marketplacePhoneNoBalance === true) flagsAgg.marketplace_phone_no_balance++;
     if (p.marketplacePhoneConfirm === true) flagsAgg.marketplace_phone_confirm++;
@@ -156,7 +166,7 @@ function buildServerCardAggs(status, opts = {}) {
 
     // Canônico (= CT snapshot + renewMetrics.aggregateRenovadosFromPerfis): renovadosLastCount.
     const renovN = Math.floor(Number(p.renovadosLastCount || 0) || 0);
-    if (renovN > 0) {
+    if (renovN > 0 || (p.marketplaceRenewDoneToday === true && p.renovadosAt)) {
       flagsAgg.renovados++;
       flagsAgg.renovados_qtd += renovN;
     }

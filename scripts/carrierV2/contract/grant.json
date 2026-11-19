@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocolVersion": {
+      "type": "integer",
+      "const": 2
+    },
+    "carrierGeneration": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "operationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "leaseId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "leaseGeneration": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "serverId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "accountId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "publish",
+        "identity",
+        "renew"
+      ]
+    },
+    "phoneId": {
+      "type": "string",
+      "enum": [
+        "p001",
+        "p002",
+        "p003"
+      ]
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "edgeGeneration": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "grantId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "keyId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "issuedAt": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "expiresAt": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "absoluteDeadline": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "contractRevision": {
+      "type": "integer",
+      "const": 2
+    },
+    "instanceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "resourceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "executorFence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "authorityEpoch": {
+      "type": "string",
+      "format": "uuid"
+    }
+  },
+  "required": [
+    "protocolVersion",
+    "carrierGeneration",
+    "operationId",
+    "leaseId",
+    "leaseGeneration",
+    "serverId",
+    "accountId",
+    "type",
+    "phoneId",
+    "port",
+    "edgeGeneration",
+    "grantId",
+    "keyId",
+    "issuedAt",
+    "expiresAt",
+    "absoluteDeadline",
+    "contractRevision",
+    "instanceId",
+    "resourceId",
+    "executorFence",
+    "authorityEpoch"
+  ],
+  "additionalProperties": false
+}

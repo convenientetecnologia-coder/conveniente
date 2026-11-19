@@ -2,12 +2,12 @@
 
 const fs = require('fs');
 const http = require('http');
+const https = require('https');
 const net = require('net');
 const tls = require('tls');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
-const mobile = require('./mobilePublishProxy.js');
 const {
   injectCookies,
   newPageDaConta,
@@ -44,6 +44,7 @@ function createSwitch() {
   const sockets = new Set();
   let upstream = null;
   let bytesToProxy = 0;
+  const traffic = { directUp: 0, directDown: 0, proxyUp: 0, proxyDown: 0 };
   let boundPort = 0;
   const server = http.createServer();
   server.timeout = 0;
@@ -82,7 +83,9 @@ function createSwitch() {
       track(dest);
       dest.on('connect', () => {
         try { client.write('HTTP/1.1 200 Connection Established\r\n\r\n'); } catch {}
-        if (head && head.length) dest.write(head);
+        if (head && head.length) { traffic.directUp += head.length; dest.write(head); }
+        client.on('data', chunk => { traffic.directUp += chunk.length; });
+        dest.on('data', chunk => { traffic.directDown += chunk.length; });
         dest.pipe(client);
         client.pipe(dest);
       });
@@ -90,36 +93,39 @@ function createSwitch() {
     }
     const dest = net.connect(hop.port, hop.host);
     track(dest);
+    dest.on('data', chunk => { traffic.proxyDown += chunk.length; });
     let buf = Buffer.alloc(0);
     const fail = () => {
       try { client.end('HTTP/1.1 502 Bad Gateway\r\n\r\n'); } catch {}
       try { dest.destroy(); } catch {}
     };
-    dest.on('data', (chunk) => {
+    const onProxyResponse = (chunk) => {
       buf = Buffer.concat([buf, chunk]);
       const idx = buf.indexOf('\r\n\r\n');
       if (idx < 0) return;
-      dest.removeAllListeners('data');
+      dest.removeListener('data', onProxyResponse);
       const header = buf.slice(0, idx).toString('latin1');
       const rest = buf.slice(idx + 4);
       if (!/^HTTP\/1\.[01] 200/i.test(header)) { fail(); return; }
       try { client.write('HTTP/1.1 200 Connection Established\r\n\r\n'); } catch {}
-      if (rest.length) dest.unshift(rest);
-      if (head && head.length) dest.write(head);
+      if (rest.length) client.write(rest);
+      if (head && head.length) { bytesToProxy += head.length; traffic.proxyUp += head.length; dest.write(head); }
       dest.pipe(client);
       client.on('data', (chunk) => {
-        if (chunk && chunk.length) bytesToProxy += chunk.length;
+        if (chunk && chunk.length) { bytesToProxy += chunk.length; traffic.proxyUp += chunk.length; }
       });
       client.pipe(dest);
-    });
+    };
+    dest.on('data', onProxyResponse);
     dest.on('connect', () => {
       const token = Buffer.from(`${hop.user}:${hop.pass}`).toString('base64');
-      dest.write(
+      const connectRequest =
         `CONNECT ${host}:${port} HTTP/1.1\r\n` +
         `Host: ${host}:${port}\r\n` +
         `Proxy-Authorization: Basic ${token}\r\n` +
-        `Proxy-Connection: keep-alive\r\n\r\n`
-      );
+        `Proxy-Connection: keep-alive\r\n\r\n`;
+      traffic.proxyUp += Buffer.byteLength(connectRequest);
+      dest.write(connectRequest);
     });
   });
 
@@ -142,6 +148,7 @@ function createSwitch() {
     setPhoneHop(hop) { this.phoneHop = hop || null; if (this.phoneHop) upstream = this.phoneHop; },
     backToDirect() { upstream = this.phoneHop || null; cut(); },
     bytesToProxy() { return bytesToProxy; },
+    trafficSnapshot() { return { ...traffic }; },
     close() {
       cut();
       return new Promise((resolve) => server.close(() => resolve()));
@@ -152,46 +159,62 @@ function createSwitch() {
 function proveThroughRail(port) {
   return new Promise((resolve, reject) => {
     const sock = net.connect(port, '127.0.0.1');
-    let buf = Buffer.alloc(0);
-    const timer = setTimeout(() => {
-      try { sock.destroy(); } catch {}
-      reject(new Error('prove_timeout'));
-    }, 20000);
-    const fail = (err) => {
+    let headerBytes = Buffer.alloc(0), settled = false, agent, request;
+    let phase = 'proxy_connect';
+    const finish = (error, body) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
+      try { if (request) request.destroy(); } catch {}
+      try { if (agent) agent.destroy(); } catch {}
       try { sock.destroy(); } catch {}
-      reject(err);
+      if (error) reject(error); else resolve(body);
     };
-    sock.on('error', fail);
-    const onHead = (chunk) => {
-      buf = Buffer.concat([buf, chunk]);
-      const idx = buf.indexOf('\r\n\r\n');
-      if (idx < 0) return;
+    const timer = setTimeout(() => finish(new Error('prove_timeout:' + phase)), 20000);
+    sock.on('error', error => finish(error));
+    const onHead = chunk => {
+      headerBytes = Buffer.concat([headerBytes, chunk]);
+      const cut = headerBytes.indexOf('\r\n\r\n');
+      if (cut < 0) return;
       sock.removeListener('data', onHead);
-      const header = buf.slice(0, idx).toString('latin1');
-      const rest = buf.slice(idx + 4);
+      const header = headerBytes.subarray(0, cut).toString('latin1');
       if (!/^HTTP\/1\.[01] 200/i.test(header)) {
-        fail(new Error(header.split('\r\n')[0] || 'prove_connect_failed'));
+        finish(new Error(header.split('\r\n')[0] || 'prove_connect_failed'));
         return;
       }
+      const rest = headerBytes.subarray(cut + 4);
       if (rest.length) sock.unshift(rest);
-      const secure = tls.connect({ socket: sock, servername: 'ip.oxylabs.io' }, () => {
-        secure.write('GET /location HTTP/1.1\r\nHost: ip.oxylabs.io\r\nConnection: close\r\n\r\n');
+      phase = 'tls';
+      const secure = tls.connect({ socket: sock, servername: 'ip.oxylabs.io' });
+      secure.once('secureConnect', () => { phase = 'http_headers'; });
+      secure.on('error', error => finish(error));
+      agent = new https.Agent({ keepAlive: false, maxSockets: 1 });
+      agent.createConnection = () => secure;
+      // IncomingMessage termina ao completar Content-Length/chunked; não espera
+      // o túnel TCP fechar, e decodifica os chunks antes de entregar o JSON.
+      request = https.request({ hostname: 'ip.oxylabs.io', path: '/location', method: 'GET',
+        headers: { Connection: 'close' }, agent }, response => {
+        phase = 'http_body';
+        if (response.statusCode !== 200) {
+          finish(new Error('prove_http_status:' + response.statusCode));
+          return;
+        }
+        const chunks = [];
+        let bytes = 0;
+        response.on('data', chunk => {
+          bytes += chunk.length;
+          if (bytes > 262144) return finish(new Error('prove_response_too_large'));
+          chunks.push(chunk);
+        });
+        response.on('aborted', () => finish(new Error('prove_http_aborted')));
+        response.on('error', error => finish(error));
+        response.on('end', () => finish(null, Buffer.concat(chunks).toString('utf8')));
       });
-      let body = Buffer.alloc(0);
-      secure.on('data', (c) => { body = Buffer.concat([body, c]); });
-      secure.on('error', fail);
-      secure.on('end', () => {
-        clearTimeout(timer);
-        const text = body.toString('utf8');
-        const cut = text.indexOf('\r\n\r\n');
-        resolve(cut >= 0 ? text.slice(cut + 4) : text);
-      });
+      request.on('error', error => finish(error));
+      request.end();
     };
     sock.on('data', onHead);
-    sock.on('connect', () => {
-      sock.write('CONNECT ip.oxylabs.io:443 HTTP/1.1\r\nHost: ip.oxylabs.io:443\r\n\r\n');
-    });
+    sock.on('connect', () => sock.write('CONNECT ip.oxylabs.io:443 HTTP/1.1\r\nHost: ip.oxylabs.io:443\r\n\r\n'));
   });
 }
 
@@ -373,25 +396,52 @@ function killTree(pid) {
   });
 }
 
-async function openRobeRail({ nome, cookies, liveBrowser }) {
+const isolatedProfiles = new Set();
+
+async function closeIsolatedBrowser(browser) {
+  if (!browser) return;
+  const proc = browser.process ? browser.process() : null;
+  let timer;
+  try {
+    // Mesmo no caminho de publicação, encerra a conexão Puppeteer e aguarda o
+    // Chrome liberar o perfil antes de entregar esse perfil ao próximo fluxo.
+    await Promise.race([
+      Promise.resolve().then(() => browser.close()).catch(() => {}),
+      new Promise(resolve => { timer = setTimeout(resolve, 3000); })
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (proc && proc.exitCode == null && proc.signalCode == null) await killTree(proc.pid);
+}
+
+async function launchIsolatedBrowser(config) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await accountPuppeteer.launch(config); }
+    catch (error) {
+      // Apenas abertura: nunca repete publicação, documento ou renovação.
+      if (attempt >= 1 || !/The browser is already running for /i.test(String(error && error.message))) throw error;
+      releaseProfileLocks(config.userDataDir);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
+}
+
+async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', proxyRequired = true, deadlineAt = 0 }) {
+  const profileKey = String(nome || '').trim();
+  if (!profileKey) throw new Error('isolated_profile_required');
+  if (isolatedProfiles.has(profileKey)) throw new Error('isolated_flow_busy');
+  isolatedProfiles.add(profileKey);
   const rail = createSwitch();
   let browser = null;
   let userDataDir = '';
+  let evidence = null;
+  let phoneUsed = false;
+  let carrierOperation = null;
+  const carrierAbort = new AbortController();
+  let clickTraffic = null;
+  let destroyed = false;
   try {
-    const proxyMode = require('./proxyMode').read();
-    let genLaunch = null;
-    if (proxyMode === 'gen') {
-      genLaunch = await require('./proxyGen').takeForLaunch(nome);
-    }
-    if (genLaunch && genLaunch.kind === 'socks') throw new Error('proxy_gen_required:socks_robe');
-    if (genLaunch) {
-      rail.setPhoneHop({
-        host: String(genLaunch.host || ''),
-        port: genLaunch.port,
-        user: genLaunch.username,
-        pass: genLaunch.password
-      });
-    }
     const port = await rail.listen();
     const [live, storage] = await Promise.all([
       collectLiveCookies(liveBrowser),
@@ -402,10 +452,11 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
     releaseProfileLocks(userDataDir);
     wipeRobeSiteData(userDataDir);
     prepareAccountChromeProfile(userDataDir);
-    browser = await accountPuppeteer.launch(accountChromeLaunchConfig({
+    browser = await launchIsolatedBrowser(accountChromeLaunchConfig({
       userDataDir,
       proxyServer: `127.0.0.1:${port}`
     }));
+    browser.once('disconnected',()=>carrierAbort.abort(Error('isolated_browser_disconnected')));
     browser.__ctRobeStorage = storage;
     const pages = await browser.pages();
     const seed = pages && pages[0] ? pages[0] : await newPageDaConta(browser, nome, { source: 'robe_rail_seed' });
@@ -435,15 +486,41 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
         cookieSource,
         local: Array.isArray(www.local) ? www.local.length : 0,
         session: Array.isArray(www.session) ? www.session.length : 0,
-        profile: 'fixed'
+        profile: 'fixed',
+        browserRole: 'robe_isolated',
+        purpose,
+        proxyRequired,
+        robePid: browser.process && browser.process() ? browser.process().pid : null,
+        virtusPid: liveBrowser && liveBrowser.process && liveBrowser.process() ? liveBrowser.process().pid : null
       });
     } catch {}
     const api = {
       browser,
+      purpose,
+      proxyRequired,
+      isProxyArmed: false,
       async armAndProve(page) {
+        if (!proxyRequired) return { ok: true, skipped: true, provider: 'direct' };
+        if (api.isProxyArmed) return { ok: true, provider: 'phone', alreadyArmed: true };
+        if (evidence) evidence.cleanup();
+        evidence = purpose === 'publish' || purpose === 'renew'
+          ? require('./robePublishEvidence').watch(page, { operation: purpose }) : null;
         try {
-          if (require('./phoneProxyMode').isEnabled() && require('./proxyMode').read() !== 'gen') {
-            const hop = await require('./phoneProxyMode').hopForPublish(nome);
+          const cp2=require('./carrierV2/accountOperation');
+          if(cp2.readConfig()&&['publish','renew','id'].includes(purpose)){
+            page.once('close',()=>carrierAbort.abort(Error('isolated_page_closed')));
+            carrierOperation=await cp2.begin({nome,purpose,signal:carrierAbort.signal,isReady:async()=>!destroyed&&browser.isConnected()&&!page.isClosed(),onWait:status=>{try{stepLog.appendJSONL(nome,'robe',{step:'carrier_v2_wait',purpose,state:status.state,operationId:status.operationId})}catch{}}});
+            rail.flip(carrierOperation.hop);
+            // TCP OPEN is insufficient: exercise HTTPS through authenticated CONNECT.
+            const raw=await proveThroughRail(port);let parsed;try{parsed=JSON.parse(raw)}catch{const match=String(raw).match(/\{[\s\S]*\}/);if(match)parsed=JSON.parse(match[0])}
+            const seen=readExit(parsed);if(!seen.ip)throw Error('cp2_mobile_proof_missing');
+            api.isProxyArmed=true;
+            stepLog.appendJSONL(nome,'robe',{step:'carrier_v2_proved',purpose,operationId:carrierOperation.operationId,ip:seen.ip,asn:seen.asn});
+            return {ok:true,provider:'carrier_v2',...seen};
+          }
+          if (require('./phoneProxyMode').isEnabled()) {
+            phoneUsed = true;
+            const hop = await require('./phoneProxyMode').hopForPublish(nome, { deadlineAt });
             rail.flip(hop);
             await new Promise((r) => setTimeout(r, 1500));
             let phoneRaw = '';
@@ -479,91 +556,86 @@ async function openRobeRail({ nome, cookies, liveBrowser }) {
                 asn: phoneSeen.asn,
                 country: phoneSeen.country,
                 ip: phoneSeen.ip,
-                via: 'phone'
+                via: 'phone',
+                purpose
               });
             } catch {}
+            api.isProxyArmed = true;
             return { ok: true, asn: phoneSeen.asn, country: phoneSeen.country, ip: phoneSeen.ip, reason: 'phone_proxy' };
           }
         } catch (e) {
           const error = String((e && e.message) || e).slice(0, 180);
           return { ok: false, reason: 'phone_proxy_unavailable', error };
         }
-        const cfg = mobile.readSettings();
-        if (!cfg.ready) return { ok: false, reason: 'no_credentials' };
-        const exit = await mobile.acquireExit(cfg.user, cfg.password);
-        if (!exit.ok) return { ok: false, reason: 'exit_fail', attempts: exit.attempts || 0 };
-        const hop = mobile.upstreamFor(exit.sessid);
-        rail.flip(hop);
-        await new Promise((r) => setTimeout(r, 1500));
-        let raw = '';
-        try {
-          raw = await proveThroughRail(port);
-        } catch (e) {
-          const error = String((e && e.message) || e).slice(0, 180);
-          try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_prove_fail', reason: 'prove_failed', error }); } catch {}
-          return { ok: false, reason: 'prove_failed', error };
-        }
-        let parsed = null;
-        try { parsed = JSON.parse(raw); } catch {}
-        if (!parsed) {
-          const blob = String(raw || '').match(/\{[\s\S]*\}/);
-          if (blob) { try { parsed = JSON.parse(blob[0]); } catch {} }
-        }
-        const seen = readExit(parsed);
-        if (!mobile.acceptExit(seen)) {
-          try {
-            stepLog.appendJSONL(nome || 'system', 'robe', {
-              step: 'robe_rail_prove_fail',
-              reason: 'prove_not_mobile',
-              asn: seen.asn,
-              country: seen.country,
-              ip: seen.ip
-            });
-          } catch {}
-          return { ok: false, reason: 'prove_not_mobile', asn: seen.asn, country: seen.country, ip: seen.ip, attempts: exit.attempts || 0 };
-        }
-        try {
-          stepLog.appendJSONL(nome || 'system', 'robe', {
-            step: 'robe_rail_proved',
-            asn: seen.asn,
-            country: seen.country,
-            ip: seen.ip
-          });
-        } catch {}
-        return { ok: true, asn: seen.asn, country: seen.country, ip: seen.ip, attempts: exit.attempts || 0 };
+        return { ok: false, reason: 'phone_proxy_not_configured' };
       },
       bytesToProxy() { return rail.bytesToProxy(); },
+      async markPublishClick() {
+        if(carrierOperation)await carrierOperation.possibleSideEffect();
+        clickTraffic = rail.trafficSnapshot();
+        if (evidence) evidence.arm();
+        stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_publish_click', purpose, trafficBeforeClick: clickTraffic });
+      },
+      async waitPublishTransport() {
+        const until = Date.now() + 30000;
+        let snap = evidence ? evidence.snapshot() : {};
+        while (Date.now() < until && (!snap.finished || snap.bodyPending) && !snap.failed) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+          snap = evidence ? evidence.snapshot() : {};
+        }
+        const total = rail.trafficSnapshot();
+        const afterClick = clickTraffic ? {
+          up: total.proxyUp - clickTraffic.proxyUp,
+          down: total.proxyDown - clickTraffic.proxyDown
+        } : null;
+        const confirmed = purpose === 'renew' ? snap.operationConfirmed === true : snap.creationConfirmed === true;
+        const result = { ok: snap.transportOk === true && confirmed, ...snap, purpose, traffic: total, afterClick, provider: 'phone' };
+        if(result.ok&&carrierOperation)carrierOperation.confirm();
+        stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_publish_transport', ...result });
+        return result;
+      },
       async backToDirect() {
+        if (purpose === 'id' && proxyRequired) throw new Error('identity_proxy_required_until_close');
+        const current=carrierOperation?.snapshot();
+        if(current?.sent&&current.result!=='confirmed')throw Error('cp2_unknown_keep_proxy_until_close');
         rail.backToDirect();
+        api.isProxyArmed = false;
         try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_direct' }); } catch {}
       },
+      async releaseProxy() {
+        await api.backToDirect();
+        if(carrierOperation){await carrierOperation.close();carrierOperation=null}
+        if (phoneUsed) await require('./phoneProxyMode').releaseSession(nome);
+        phoneUsed = false;
+      },
       async destroy(opts) {
-        try { await require('./phoneProxyMode').release(nome); } catch {}
+        if (destroyed) return;
+        destroyed = true;
+        carrierAbort.abort(Error('isolated_flow_closed'));
+        if (evidence) evidence.cleanup();
         const proc = browser && browser.process ? browser.process() : null;
         const pid = proc && proc.pid;
-        const killFirst = !!(opts && opts.killFirst);
-        if (killFirst && pid) {
-          await killTree(pid);
-        } else {
-          try { if (browser) await browser.close(); } catch {}
-          await killTree(pid);
-        }
+        await closeIsolatedBrowser(browser);
         try { await rail.close(); } catch {}
+        try { if(carrierOperation)await carrierOperation.close() } catch(error){stepLog.appendJSONL(nome,'robe',{step:'carrier_v2_close_pending',purpose,error:String(error.message||error)})}
+        try { if (phoneUsed) await require('./phoneProxyMode').releaseSession(nome); } catch {}
         try { releaseProfileLocks(userDataDir); } catch {}
-        try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_dead', pid: pid || null, kept: true }); } catch {}
+        isolatedProfiles.delete(profileKey);
+        try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_dead', purpose, pid: pid || null, kept: true, traffic: rail.trafficSnapshot() }); } catch {}
       }
     };
+    api.markIdentityStart=async()=>{if(carrierOperation)await carrierOperation.possibleSideEffect()};
+    api.confirmIdentity=()=>{if(carrierOperation)carrierOperation.confirm()};
     browser.__ctRobeRail = api;
+    browser.__ctIsolatedFlow = { kind: purpose, proxyRequired, rail: api };
     return api;
   } catch (e) {
-    try { await require('./phoneProxyMode').release(nome); } catch {}
-    try { if (browser) await browser.close(); } catch {}
-    try {
-      const proc = browser && browser.process ? browser.process() : null;
-      await killTree(proc && proc.pid);
-    } catch {}
+    if (evidence) evidence.cleanup();
+    try { await closeIsolatedBrowser(browser); } catch {}
     try { await rail.close(); } catch {}
+    try { if (phoneUsed) await require('./phoneProxyMode').releaseSession(nome); } catch {}
     try { if (userDataDir) releaseProfileLocks(userDataDir); } catch {}
+    isolatedProfiles.delete(profileKey);
     throw e;
   }
 }

@@ -325,7 +325,7 @@ async function replanAllProfiles({ nowMs = Date.now(), configHint = null, fileSt
   };
 }
 
-async function markDoneToday(nome, { count = 0, source = 'unknown', nowMs = Date.now() } = {}) {
+async function markDoneToday(nome, { count = 0, renewed = false, source = 'unknown', nowMs = Date.now() } = {}) {
   const profileName = String(nome || '').trim();
   if (!profileName) return { ok: false, error: 'nome_ausente' };
   const safeCount = Math.max(0, clampInt(count, 0, 5000, 0));
@@ -339,7 +339,7 @@ async function markDoneToday(nome, { count = 0, source = 'unknown', nowMs = Date
     m.accountFlags.marketplaceRenewLastCount = safeCount;
     m.accountFlags.marketplaceRenewLastSource = String(source || 'unknown').slice(0, 80);
     m.accountFlags.renovadosLastCount = safeCount;
-    m.accountFlags.renovadosAt = safeCount > 0 ? safeNowMs : null;
+    m.accountFlags.renovadosAt = renewed || safeCount > 0 ? safeNowMs : null;
     return m;
   });
   return { ok: true, day, count: safeCount };

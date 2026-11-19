@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocolVersion": {
+      "type": "integer",
+      "const": 2
+    },
+    "carrierGeneration": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "operationId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "leaseId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "leaseGeneration": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "serverId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "released",
+        "expired",
+        "revoked",
+        "canceled"
+      ]
+    },
+    "expiresAt": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "absoluteDeadline": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "businessResult": {
+      "type": "string",
+      "enum": [
+        "not_started",
+        "confirmed",
+        "failed",
+        "unknown"
+      ]
+    },
+    "phase": {
+      "type": "string",
+      "enum": [
+        "proof",
+        "navigation",
+        "upload",
+        "confirmation"
+      ]
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tcpWritten": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "tcpRead": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "activeFlows": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991,
+          "const": 0
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "proof",
+            "navigation",
+            "upload",
+            "confirmation"
+          ]
+        },
+        "grantWaitToStartMs": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "activeDurationMs": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "heartbeatAgeMs": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "pendingConnects": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 60,
+          "const": 0
+        },
+        "closingFlows": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 60,
+          "const": 0
+        }
+      },
+      "required": [
+        "tcpWritten",
+        "tcpRead",
+        "activeFlows",
+        "phase",
+        "pendingConnects",
+        "closingFlows"
+      ]
+    },
+    "contractRevision": {
+      "type": "integer",
+      "const": 2
+    },
+    "instanceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "resourceId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "executorFence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "authorityEpoch": {
+      "type": "string",
+      "format": "uuid"
+    }
+  },
+  "required": [
+    "protocolVersion",
+    "carrierGeneration",
+    "operationId",
+    "leaseId",
+    "leaseGeneration",
+    "serverId",
+    "state",
+    "expiresAt",
+    "absoluteDeadline",
+    "metrics",
+    "businessResult",
+    "contractRevision",
+    "instanceId",
+    "resourceId",
+    "executorFence",
+    "authorityEpoch"
+  ],
+  "additionalProperties": false
+}

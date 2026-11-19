@@ -404,7 +404,7 @@ async function openForCadastro(nome, browser) {
   if (!isEnabled()) return { ok: true, skipped: 'disabled' };
   let mode = '';
   try { mode = require('./proxyMode').read(); } catch {}
-  if (mode === 'gen') return { ok: true, skipped: 'gen' };
+  if (mode !== 'phone') return { ok: true, skipped: 'direct_network' };
   const sw = browser && browser.__ctDirectSwitch;
   if (!sw || typeof sw.flip !== 'function' || typeof sw.port !== 'function') {
     throw new Error('phone_proxy_required:switch');
@@ -456,8 +456,9 @@ async function closeForCadastro(nome, browser) {
   note('phone_proxy_cadastro_release', { nome: String(nome || '') });
 }
 
-async function hopForPublish(nome) {
+async function hopForPublish(nome, { deadlineAt = 0 } = {}) {
   while (true) {
+    if (deadlineAt > 0 && Date.now() >= deadlineAt) throw new Error('phone_proxy_required:deadline');
     try {
       const launch = await resolveLaunch(nome, 'publish');
       if (launch && launch.external) throw new Error('phone_proxy_required:static_route');

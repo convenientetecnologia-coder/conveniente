@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "const": 2
+        },
+        "carrierGeneration": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "code": {
+          "type": "string",
+          "enum": [
+            "unauthorized",
+            "stale_generation",
+            "lease_expired",
+            "capacity",
+            "connect_timeout",
+            "upstream_refused",
+            "maintenance",
+            "protocol_error",
+            "not_active",
+            "backpressure",
+            "revoked",
+            "duplicate_connection",
+            "connection_closed",
+            "internal_error"
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "protocolVersion",
+        "carrierGeneration",
+        "code",
+        "retryable"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "protocolVersion": {
+          "type": "integer",
+          "const": 2
+        },
+        "carrierGeneration": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "code": {
+          "type": "string",
+          "enum": [
+            "unauthorized",
+            "stale_generation",
+            "lease_expired",
+            "capacity",
+            "connect_timeout",
+            "upstream_refused",
+            "maintenance",
+            "protocol_error",
+            "not_active",
+            "backpressure",
+            "revoked",
+            "duplicate_connection",
+            "connection_closed",
+            "internal_error"
+          ]
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "operationId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "leaseId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "leaseGeneration": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "serverId": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "required": [
+        "protocolVersion",
+        "carrierGeneration",
+        "code",
+        "retryable",
+        "operationId",
+        "leaseId",
+        "leaseGeneration",
+        "serverId"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

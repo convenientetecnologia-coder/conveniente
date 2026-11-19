@@ -849,9 +849,8 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
     logging: {
       silentConsole: logRaw.silentConsole !== false
     },
-    proxyMode: (String(r.proxyMode || "").trim() === "gen" || String(r.proxyMode || "").trim() === "phone")
-      ? String(r.proxyMode || "").trim()
-      : "",
+    // Campo legado: o navegador principal usa rede direta. Proxy é opção do Robe.
+    proxyMode: "",
     country: {
       id: countryPack.id,
       label: countryPack.label,
