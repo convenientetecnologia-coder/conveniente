@@ -55,10 +55,34 @@ class OperationClient {
     const abort=()=>{clearTimeout(timer);signal?.removeEventListener('abort',abort);reject(signal.reason||Error('operation_canceled'))};
     const timer=setTimeout(done,ms*(0.9+Math.random()*0.2));if(signal?.aborted)abort();else signal?.addEventListener('abort',abort,{once:true});
   })}
-  async heartbeat(op){const response=await this.request('/'+op.operationId+'/heartbeat',this.lease(op.status));const ack=response.acknowledgment;
-    if(response.state!=='active'||ack?.source!=='carrier'||ack?.kind!=='heartbeat_ack'||!require('./protocol').sameIdentity(op.binding,ack)||require('./protocol').contextKeys.some(k=>op.binding[k]!==ack[k]))throw Error('cp2_lease_not_active');op.status=response;return response}
-  async phase(op,phase){return this.request('/'+op.operationId+'/phase',{...this.lease(op.status),phase})}
-  async possibleSideEffect(op){await this.request('/'+op.operationId+'/possible-side-effect',this.lease(op.status));op.result='unknown'}
+  control(op,action){
+    const prior=op.controlTail||Promise.resolve();
+    const task=prior.catch(()=>{}).then(action);
+    const tail=task.catch(()=>{});op.controlTail=tail;
+    tail.finally(()=>{if(op.controlTail===tail)delete op.controlTail});return task;
+  }
+  async controlRequest(path,body){
+    for(let attempt=0;;attempt++){
+      try{return await this.request(path,body)}catch(error){
+        // Busy means this control was not executed. Never replay a browser action.
+        if(error.message!=='operation_control_in_flight'||attempt>=3)throw error;
+        await this.wait(500*(attempt+1));
+      }
+    }
+  }
+  heartbeat(op){return this.control(op,async()=>{
+    if(op.releasing)return op.status;
+    const response=await this.controlRequest('/'+op.operationId+'/heartbeat',this.lease(op.status));const ack=response.acknowledgment;
+    if(response.state!=='active'||ack?.source!=='carrier'||ack?.kind!=='heartbeat_ack'||!require('./protocol').sameIdentity(op.binding,ack)||require('./protocol').contextKeys.some(k=>op.binding[k]!==ack[k]))throw Error('cp2_lease_not_active');op.status=response;return response;
+  })}
+  phase(op,phase){return this.control(op,()=>{
+    if(op.releasing)throw Error('cp2_operation_closing');
+    return this.controlRequest('/'+op.operationId+'/phase',{...this.lease(op.status),phase});
+  })}
+  possibleSideEffect(op){return this.control(op,async()=>{
+    if(op.releasing)throw Error('cp2_operation_closing');
+    await this.controlRequest('/'+op.operationId+'/possible-side-effect',this.lease(op.status));op.result='unknown';
+  })}
   async openRoute(op,{heartbeatMs=10000}={}){
     const url=new URL(this.url);url.protocol=url.protocol==='https:'?'wss:':'ws:';url.pathname=this.url.pathname.replace(/\/$/,'')+'/edge';url.searchParams.set('operationId',op.operationId);
     const ws=new WebSocket(url,'conveniente.carrier.v2.r2',{headers:{...this.headers(),'x-cp2-browser-budget':'1'},maxPayload:65536,perMessageDeflate:false,handshakeTimeout:10000});
@@ -80,7 +104,9 @@ class OperationClient {
     op.route={port:server.address().port,host:'127.0.0.1',close,session};return op.route;
   }
   async release(op,result=op.result){
+    op.releasing=true;
     if(op.route)await op.route.close();
+    return this.control(op,async()=>{
     let status;
     for(let attempt=0;attempt<3;attempt++){
       try{status=await this.request('/'+op.operationId+'/release',{...this.lease(op.status),businessResult:result});break}catch(error){
@@ -93,6 +119,7 @@ class OperationClient {
     }
     if(!['released','canceled','expired'].includes(status.state))throw Error('cp2_release_unconfirmed');
     this.operations.delete(op.operationId);return status;
+    });
   }
 }
 module.exports={OperationClient};

@@ -2509,6 +2509,8 @@ async function clickExactCenter(page, handle) {
 }
 
 async function clickOnce(page, handle) {
+  const ready = await require('./interactionReadiness').waitElement(page,handle,{timeoutMs:60000});
+  if (!ready.ok) throw Error('compose_control_not_ready:'+ready.reason);
   await page.evaluate((el) => { el.click(); }, handle);
 }
 

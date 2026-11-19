@@ -15,7 +15,7 @@ const SCROLL_STUCK_TICKS_LIMIT = 180;
 const RENEW_SCREEN_WAIT_MS = 120000;
 const ACTIONS_MENU_WAIT_MS = 120000;
 const SELECT_ALL_WAIT_MS = 120000;
-const NAV_TIMEOUT_MS = 45000;
+const NAV_TIMEOUT_MS = 120000;
 const SETTLE_MS = 8000;
 // Após confirmar que saiu da tela Renovar: hold no Selling antes de liberar close.
 const POST_RENEW_HOLD_MS_MIN = 25000;
@@ -132,6 +132,8 @@ async function clickByLabels(page, labels, { roleHints = [], timeoutMs = 30000, 
   const excludes = (Array.isArray(excludeSubstrings) ? excludeSubstrings : [])
     .map((x) => normalizeTxt(x))
     .filter(Boolean);
+  const ready = await require('./interactionReadiness').waitControl(page,labels,{exact:exactOnly,timeoutMs});
+  if (!ready.ok) return {ok:false,reason:ready.reason};
   const t0 = now();
   while (now() - t0 < timeoutMs) {
     const hit = await safeEvaluate(
@@ -339,10 +341,11 @@ async function ensureSelling(page, { onProgress } = {}) {
   const ready = await waitForLabel(
     page,
     ['Gerenciar classificados', 'Manage listings', 'Manage your listings', 'Selecionar tudo', 'Select all'],
-    { timeoutMs: 45000, requireEnabled: false, pollMs: 800 }
+    { timeoutMs: 120000, requireEnabled: false, pollMs: 800 }
   );
-  if (!ready) await sleep(SETTLE_MS);
-  else await sleep(1500);
+  if (!ready) throw Error('renew_selling_not_ready');
+  const settled = await require('./interactionReadiness').waitControl(page,['Gerenciar classificados','Manage listings','Manage your listings','Selecionar tudo','Select all'],{timeoutMs:60000});
+  if (!settled.ok) throw Error('renew_selling_not_stable');
   return true;
 }
 
@@ -743,6 +746,8 @@ async function waitRenewDialogClosed(page, {
  * Preferência: mais à direita / mais embaixo; clique via mouse (coords).
  */
 async function clickRenewConfirmInDialog(page, { beforeClick = null, onClick = null } = {}) {
+  const stable = await require('./interactionReadiness').waitControl(page,['Renovar','Renew'],{exact:true,withinDialog:true,timeoutMs:60000});
+  if (!stable.ok) return {ok:false,reason:stable.reason};
   // 1) Rola o dialog/modal até o rodapé (botões Cancelar | Renovar).
   try {
     await page.evaluate(() => {

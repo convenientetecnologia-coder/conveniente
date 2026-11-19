@@ -32,7 +32,7 @@ const fileStore = require('./fileStore.js');
 const ID_PNG_PATH = path.join(__dirname, '..', 'dados', 'id.png');
 const SELLING_URL = 'https://www.facebook.com/marketplace/you/selling';
 
-const BUDGET_TOTAL_MS = 420000;
+const BUDGET_TOTAL_MS = 900000;
 const BUDGET_SKIP_MS = 25000;
 const WAIT_POST_SETTLE_MS = 4000;
 const WAIT_STEP_MS = 5000;
@@ -40,7 +40,7 @@ const WAIT_FEED_SETTLE_MS = 10000;
 const WAIT_AFTER_UPLOAD_MS = 7000;
 const POLL_SUCCESS_MS = 180000;
 const POLL_AFTER_REFRESH_MS = 60000;
-const NAV_TIMEOUT_MS = 60000;
+const NAV_TIMEOUT_MS = 120000;
 /** Banner “ação necessária” fica no topo — sem caça por scroll. */
 const TOP_SCAN_ATTEMPTS_AUTO = 3;
 const TOP_SCAN_ATTEMPTS_HUMAN = 4;
@@ -535,6 +535,7 @@ async function clickByText(page, patterns, { withinDialog = false, exact = false
     .map((p) => norm(p))
     .filter(Boolean);
   if (!pats.length) return false;
+  if (!(await require('./interactionReadiness').waitControl(page,pats,{exact,withinDialog,timeoutMs:15000})).ok) return false;
   try {
     return await page.evaluate(
       (patsIn, withinDialogIn, exactIn) => {
@@ -561,6 +562,11 @@ async function clickByText(page, patterns, { withinDialog = false, exact = false
           const nodes = Array.from(root.querySelectorAll(selectors));
           for (const el of nodes) {
             if (isDisabled(el)) continue;
+            if (document.readyState === 'loading' || el.closest('[aria-busy="true"],[aria-hidden="true"],[inert]')) continue;
+            const rect=el.getBoundingClientRect(), style=getComputedStyle(el);
+            if(rect.width<2||rect.height<2||style.display==='none'||style.visibility==='hidden'||Number(style.opacity)===0)continue;
+            const top=document.elementFromPoint(Math.max(0,Math.min(innerWidth-1,rect.left+rect.width/2)),Math.max(0,Math.min(innerHeight-1,rect.top+rect.height/2)));
+            if(!top||!(top===el||el.contains(top)))continue;
             const aria = normLocal(el.getAttribute('aria-label') || '');
             const txt = normLocal(el.innerText || el.textContent || '');
             const label = `${aria} ${txt}`.trim();
@@ -1199,6 +1205,7 @@ async function readVisibleButtonLabels(page) {
 }
 
 async function clickExactWord(page, words) {
+  if (!(await require('./interactionReadiness').waitControl(page,words,{exact:true,timeoutMs:15000})).ok) return false;
   let point = null;
   try {
     point = await page.evaluate((wanted) => {
@@ -1235,6 +1242,7 @@ async function clickExactWord(page, words) {
 }
 
 async function clickBlueOverlay(page, labels) {
+  if (!(await require('./interactionReadiness').waitControl(page,labels,{exact:true,timeoutMs:15000})).ok) return false;
   const handle = await page.evaluateHandle((wanted) => {
     const normLocal = (s) => {
       try {
@@ -1306,7 +1314,7 @@ async function advanceBlueAndSeeUpload(page, deadlineAt) {
   const clicked = await clickBlueOverlay(page, ['avancar', 'next']);
   if (!clicked) return false;
   const start = Date.now();
-  while (Date.now() - start < 20000 && deadlineLeft(deadlineAt) > 0) {
+  while (Date.now() - start < 60000 && deadlineLeft(deadlineAt) > 0) {
     if (await uploadPromptOpen(page)) return true;
     await sleep(800);
   }
@@ -1354,7 +1362,7 @@ async function readUploadProblem(page) {
 async function waitPhotoAttached(page, deadlineAt) {
   const start = Date.now();
   let last = null;
-  while (Date.now() - start < 15000 && deadlineLeft(deadlineAt) > 0) {
+  while (Date.now() - start < 90000 && deadlineLeft(deadlineAt) > 0) {
     const problem = await readUploadProblem(page);
     const enviar = await readNamedButton(page, ['enviar', 'submit', 'send']);
     const enabled = buttonLooksEnabled(enviar);
@@ -1379,6 +1387,7 @@ async function waitPhotoAttached(page, deadlineAt) {
 async function clickRoleAria(page, label) {
   const want = norm(label);
   if (!want) return false;
+  if (!(await require('./interactionReadiness').waitControl(page,[want],{exact:true,timeoutMs:15000})).ok) return false;
   try {
     return await page.evaluate((wanted) => {
       const normLocal = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
@@ -1427,7 +1436,7 @@ async function carregarButtonVisible(page) {
 async function waitCarregarStable(page, deadlineAt) {
   const start = Date.now();
   let seenAt = 0;
-  while (Date.now() - start < 20000 && deadlineLeft(deadlineAt) > 0) {
+  while (Date.now() - start < 60000 && deadlineLeft(deadlineAt) > 0) {
     if (await carregarButtonVisible(page)) {
       if (!seenAt) seenAt = Date.now();
       if (Date.now() - seenAt >= 2500) return true;
@@ -1441,7 +1450,7 @@ async function waitCarregarStable(page, deadlineAt) {
 
 async function clickDocIntroAvancar(page, deadlineAt) {
   const start = Date.now();
-  while ((Date.now() - start) < 20000 && deadlineLeft(deadlineAt) > 0) {
+  while ((Date.now() - start) < 60000 && deadlineLeft(deadlineAt) > 0) {
     if (await cnhChoiceVisible(page)) return true;
     if (await pageHasNorm(page, "n.includes('carregue uma foto')")) return true;
     const clicked = await clickRoleAria(page, 'avancar');
@@ -3808,7 +3817,7 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source, network 
           await sleep(1000);
           continue;
         }
-        const waiter = page.waitForFileChooser({ timeout: 8000 }).catch(() => null);
+        const waiter = page.waitForFileChooser({ timeout: 30000 }).catch(() => null);
         const loaded = await clickRoleAria(page, 'carregar');
         logEvt(nome, source, 'wizard_carregar_documento', { ok: !!loaded, where: 'foto_carregar' });
         const got = loaded ? await waiter : null;
@@ -3869,7 +3878,7 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source, network 
   }
   assertBudget(deadlineAt, 'wizard_after_upload');
 
-  // 8) A foto já está na tela e o Enviar está azul. Só esse clique sai pelo celular.
+  // 8) A foto está pronta. Toda a sessão isolada permanece na rota configurada.
   const fileBytes = (() => { try { return fs.statSync(idPath).size; } catch { return 0; } })();
   const sentWrap = await submitEnviarOnPhone(page, nome, source, async () => {
     let sent = false;
