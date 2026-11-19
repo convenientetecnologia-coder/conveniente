@@ -4514,7 +4514,7 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
         await flowAlertFlags.clearRobePostError(nome);
         proved = await rail.armAndProve(page);
         if (!proved || proved.ok !== true) {
-          const err = new Error('proxy_mobile_unavailable');
+          const err = new Error('proxy_mobile_unavailable:' + String(proved?.error || proved?.reason || 'unknown'));
           err.PROXY_PUBLISH = true;
           throw err;
         }

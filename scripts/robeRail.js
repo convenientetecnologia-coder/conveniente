@@ -566,6 +566,7 @@ async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', p
           }
         } catch (e) {
           const error = String((e && e.message) || e).slice(0, 180);
+          try { stepLog.appendJSONL(nome || 'system', 'robe', {step:'carrier_v2_admission_failed',purpose,error,code:String(e?.code||''),cause:String(e?.cause?.code||'')}); } catch {}
           return { ok: false, reason: 'phone_proxy_unavailable', error };
         }
         return { ok: false, reason: 'phone_proxy_not_configured' };
