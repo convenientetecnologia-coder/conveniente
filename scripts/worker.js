@@ -982,6 +982,7 @@ async function __deltaWsLivenessTick() {
 }
 
 function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
+  if(browser?.__ctNetworkPurpose==='cadastro')return null;
   if (isAccountProvisioningPending(nome) || controllers.get(nome)?.configurando === true || isProfileHumanHeld(nome)) {
     const deferredCtrl = controllers.get(nome);
     if (deferredCtrl && !deferredCtrl.virtus) deferredCtrl.trabalhando = false;
@@ -8599,7 +8600,7 @@ function releaseDetachedOpenSlot(token, { nome = '', result = 'ok' } = {}) {
   }
 }
 
-async function activateOnce(nome, source = '', operator = '') {
+async function activateOnce(nome, source = '', operator = '', {networkPurpose='auto'} = {}) {
   const boot = await __deltaAwaitHostBootReady();
   if (!boot.ready) {
     try {
@@ -8896,7 +8897,7 @@ async function activateOnce(nome, source = '', operator = '') {
         if (connectLane.isEnabled()) {
           heavyNav = await connectLane.acquire({ kind: 'chrome_boot', nome });
         }
-        const browser = await browserHelper.openBrowser(manifest);
+        const browser = await browserHelper.openBrowser(manifest,{networkPurpose});
         if (!browser || typeof browser.newPage !== 'function') {
           throw new Error('Objeto browser não retornado corretamente (Puppeteer falhou ao acoplar).');
         }
@@ -12314,7 +12315,8 @@ logger.info('[WORKER][BROWSER] disconnected', { nome });
 try { robeQueue.skip && robeQueue.skip(nome); } catch {}
 
 const ctrl = controllers.get(nome);
-if (ctrl && ctrl.browser === browser) {
+const plannedCadastroClose=browser.__ctCadastroClosing===true;
+if (ctrl && ctrl.browser === browser && !plannedCadastroClose) {
   try {
     const rc = await tryReconnectAfterDisconnected(nome, ctrl);
     if (rc && rc.ok) {
@@ -12382,7 +12384,7 @@ try { await reportAction(nome, 'browser_disconnected', 'Janela/navegador fechado
 stopPruneLoop(nome);
 cleanupProfileTransientLocks(nome, 'disconnected');
 
-try { registerFailure(nome, 'disconnected', 'external'); } catch {}
+try { if(!plannedCadastroClose)registerFailure(nome, 'disconnected', 'external'); } catch {}
 try {
   const d = readJsonFile(desiredPath, { perfis: {} });
   const isDesiredActive = d.perfis?.[nome]?.active === true;
@@ -12443,6 +12445,32 @@ async function completeAccountProvisioning(nome, source) {
     return d;
   });
   try { provisionAudit.append({ ts: Date.now(), event: 'account_provisioning_ready', nome, source }); } catch {}
+}
+
+async function prepareCadastroBrowser(nome, operator) {
+  const proxy=require('./serverConfig').readServerConfigEffective().cadastro?.proxyEnabled===true;
+  const current=controllers.get(nome),expected=proxy?'proxy':'direct';
+  if(current?.browser?.isConnected?.()&&current.browser.__ctCadastroNetworkMode===expected){current.browser.__ctCadastroProxy?.assertHealthy();return current;}
+  if(current?.browser?.isConnected?.()){
+    await stopVirtus(nome,{configure:true});
+    await hardCloseController(nome,current,{reason:'cadastro_network_mode',allowKillUserDataDir:false});
+  }
+  const opened=await activateOnce(nome,'cadastro_prepare',operator,{networkPurpose:'cadastro'});
+  if(opened?.ok!==true)throw Error(opened?.error||'cadastro_browser_open_failed');
+  const ready=controllers.get(nome);
+  if(!ready?.browser?.isConnected?.()||ready.browser.__ctCadastroNetworkMode!==expected)throw Error('cadastro_network_mode_unconfirmed');
+  ready.browser.__ctCadastroProxy?.assertHealthy();return ready;
+}
+
+async function closeCadastroBrowser(nome, browser) {
+  if(!browser)return;
+  browser.__ctCadastroClosing=true;
+  if(isAccountProvisioningPending(nome))await fileStore.withDesiredFileLockUpdate(d=>{
+    if(d.perfis?.[nome])d.perfis[nome]={...d.perfis[nome],active:false,virtus:'off'};
+    return d;
+  });
+  if(browser.__ctCadastroProxy)await browser.__ctCadastroProxy.close();
+  else if(browser.isConnected?.())await browser.close();
 }
 
 function automationAllowed(ctrl, { operator, ignoreTrabalhando } = {}) {
@@ -13499,7 +13527,10 @@ const handlers = {
   async configure({ nome, operator } = {}) {
     const boot = await __deltaAwaitHostBootReady();
     if (!boot.ready) return { ok: false, error: 'host_boot_not_ready' };
-    return lockProfileAction(nome, async () => {
+    let cadastroBrowser=null;
+    try {
+      const prepared=await prepareCadastroBrowser(nome,operator);cadastroBrowser=prepared.browser;
+    return await lockProfileAction(nome, async () => {
       logger.info('[HANDLER] configure chamada', { nome });
       const ctrl = controllers.get(nome);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
@@ -13689,7 +13720,7 @@ const handlers = {
         try { provisionAudit.append({ ts: Date.now(), event: 'configure_inject_cookies_begin', nome: String(nome||''), operator: op || null }); } catch {}
         let cadastroPhone = false;
         try {
-          const phoneOn = require('./phoneProxyMode').isEnabled() && require('./proxyMode').read() === 'phone';
+          const phoneOn = ctrl.browser.__ctNetworkPurpose!=='cadastro'&&require('./phoneProxyMode').isEnabled() && require('./proxyMode').read() === 'phone';
           if (phoneOn) {
             await require('./phoneProxyMode').openForCadastro(nome, ctrl.browser);
             cadastroPhone = true;
@@ -13699,6 +13730,9 @@ const handlers = {
           throw e;
         }
         ctrl._cadastroPhone = cadastroPhone;
+        ctrl.browser.__ctCadastroProxy?.noteStage('cookies_and_session');
+        ctrl.browser.__ctCadastroProxy?.noteStage('authentication');
+      await ctrl.browser.__ctCadastroProxy?.possibleSideEffect();
         await browserHelper.configureProfile(ctrl.browser, nome, manifest.cookies);
         try { provisionAudit.append({ ts: Date.now(), event: 'configure_inject_cookies_done', nome: String(nome||''), operator: op || null }); } catch {}
 
@@ -14139,6 +14173,15 @@ const handlers = {
         } catch {}
 
         // Sucesso: limpa flags e segue.
+        ctrl.browser.__ctCadastroProxy?.noteStage('final_verification');
+        if(ctrl.browser.__ctNetworkPurpose==='cadastro'){
+          await require('./cadastroVerification').verify({browser:ctrl.browser,cookies:manifest.cookies});
+          ctrl.browser.__ctCadastroProxy?.noteStage('save_session');
+          const fresh=await browserHelper.collectFreshCookies(ctrl.browser);
+          if(!fresh?.ok||!fresh.cookies?.length)throw Error('cadastro_session_save_unconfirmed');
+          await manifestStore.update(nome,m=>({...m,cookies:fresh.cookies,cookiesUpdatedAt:Date.now()}));
+        }
+        ctrl.browser.__ctCadastroProxy?.confirm();
         await completeAccountProvisioning(nome, 'configure_success');
         try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed']); } catch {}
         try { provisionAudit.append({ ts: Date.now(), event: 'configure_success', nome: String(nome||''), operator: op || null, closedForRamCount: closedForRam.length, isStockProvision: !!isStockProvision }); } catch {}
@@ -14327,13 +14370,18 @@ const handlers = {
         await snapshotStatusAndWrite();
       }
     });
+    } catch(error){return {ok:false,error:String(error.message||error)}}
+    finally{await closeCadastroBrowser(nome,cadastroBrowser)}
   },
 
   // ===== NOVO: login_remediate (cookies -> login/senha -> humano) =====
   async login_remediate({ nome, operator, options } = {}) {
     const boot = await __deltaAwaitHostBootReady();
     if (!boot.ready) return { ok: false, error: 'host_boot_not_ready' };
-    return lockProfileAction(nome, async () => {
+    let cadastroBrowser=null;
+    try {
+      if(isAccountProvisioningPending(nome)||/^stock_provision/i.test(String(operator||''))){const prepared=await prepareCadastroBrowser(nome,operator);cadastroBrowser=prepared.browser;}
+    return await lockProfileAction(nome, async () => {
       const startedAt = Date.now();
       const op = String(operator || '').trim() || `login_remediate:${String(nome || '').trim()}:${startedAt}`;
       const opts = (options && typeof options === 'object') ? options : {};
@@ -14567,6 +14615,8 @@ const handlers = {
         try { provisionLock.release({ owner: op }); } catch {}
         return { ok: false, error: 'browser_not_connected', steps };
       }
+
+      await ctrl.browser.__ctCadastroProxy?.possibleSideEffect();
 
       // Cookie primeiro. Se cair em Continuar (perfil salvo), clica Continuar e segue na senha.
       const isStockProvisionOp = String(op || '').toLowerCase().startsWith('stock_provision');
@@ -15043,7 +15093,8 @@ const handlers = {
       }
 
       if (success) {
-        await completeAccountProvisioning(nome, 'login_remediate_success');
+        ctrl.browser.__ctCadastroProxy?.noteStage('final_verification');
+        const cadastroExpectedCookies=ctrl.browser.__ctNetworkPurpose==='cadastro'?(await manifestStore.read(nome)).cookies:null;
         pushStep({ step: 'login_remediate_success' });
         try { await clearAccountFlags(nome, ['loginRemediateFailed', 'loginRequired']); } catch {}
         try {
@@ -15095,7 +15146,8 @@ const handlers = {
         } catch (eTab) {
           pushStep({ step: 'keep_messages_tab_only_fail', error: (eTab && eTab.message) || String(eTab) });
         }
-        // Atualiza cookies frescos no manifest (pipeline imediato)
+        let cadastroCookiesSaved=false;
+        ctrl.browser.__ctCadastroProxy?.noteStage('save_session');
         try {
           const fresh = await withTimeout('collectCookies', browserHelper.collectFreshCookies(ctrl.browser), stageTimeoutMs.collectCookies);
           pushStep({ step: 'collect_fresh_cookies', ok: !!fresh.ok, count: fresh && fresh.cookies ? fresh.cookies.length : 0, error: fresh && fresh.error });
@@ -15106,9 +15158,18 @@ const handlers = {
               m.cookiesUpdatedAt = Date.now();
               return m;
             });
+            cadastroCookiesSaved=true;
             pushStep({ step: 'manifest_cookies_updated' });
           }
         } catch {}
+        if(ctrl.browser.__ctNetworkPurpose==='cadastro'){
+          if(!cadastroCookiesSaved)throw Error('cadastro_session_save_unconfirmed');
+          const expected=(cadastroExpectedCookies||[]).some(c=>c.name==='c_user')?cadastroExpectedCookies:(await manifestStore.read(nome)).cookies;
+          await require('./cadastroVerification').verify({browser:ctrl.browser,cookies:expected});
+        }
+        ctrl.browser.__ctCadastroProxy?.confirm();
+        await completeAccountProvisioning(nome, 'login_remediate_success');
+        if(cadastroBrowser){await closeCadastroBrowser(nome,cadastroBrowser);cadastroBrowser=null;}
         try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed']); } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
       } else {
@@ -15135,7 +15196,7 @@ const handlers = {
         const tryResume = (n) => {
           try {
             const ctrlR = controllers.get(n);
-            if (!ctrlR || !ctrlR.browser || !ctrlR.browser.isConnected?.()) return false;
+            if (!ctrlR || !ctrlR.browser || !ctrlR.browser.isConnected?.() || ctrlR.browser.__ctNetworkPurpose==='cadastro') return false;
             if (ctrlR.humanControl === true || ctrlR.configurando === true) return false;
             if (!automationAllowed(ctrlR)) return false;
             ctrlR.virtus = startVirtusByEngine(ctrlR.browser, n, autoMode, { epoch: ctrlR.virtusEpoch || 0 });
@@ -15255,7 +15316,7 @@ const handlers = {
           pushStep({ step: 'post_success_start_virtus_begin' });
           try {
             const ctrlNow = controllers.get(nome);
-            if (ctrlNow && ctrlNow.browser && ctrlNow.browser.isConnected?.()) {
+            if (ctrlNow && ctrlNow.browser && ctrlNow.browser.isConnected?.() && ctrlNow.browser.__ctNetworkPurpose!=='cadastro') {
               if (!automationAllowed(ctrlNow, { operator: op })) {
                 pushStep({ step: 'post_success_start_virtus_denied', error: 'automation_not_allowed' });
               } else {
@@ -15353,6 +15414,8 @@ const handlers = {
         } catch {}
       }
     });
+    } catch(error){return {ok:false,error:String(error.message||error)}}
+    finally{await closeCadastroBrowser(nome,cadastroBrowser)}
   },
 
   start_work,
@@ -17707,6 +17770,7 @@ perfis.push({
   proxyOpening: proxyOpeningEnabled()?{inFlight:proxyOpeningCoordinator.running.has(nome),readiness:proxyOpenReadiness.snapshot(),localLimit:proxyOpeningCoordinator.limit}:null,
   proxyWaiting: require('./carrierV2/accountOperation').getWaiting(nome),
   virtusProxy: controllers.get(nome)?.browser?.__ctVirtusProxy?.snapshot() || null,
+  cadastroProxy: controllers.get(nome)?.browser?.__ctCadastroProxy?.snapshot() || null,
   openBackoffMs: robeMeta[nome]?.openBackoffMs || null,
   lastSwapAt: robeMeta[nome]?.lastSwapAt || null,
   lastSwapPeer: robeMeta[nome]?.lastSwapPeer || null,
@@ -20398,6 +20462,7 @@ async function nurseTick() {
       }
       const want = desired.perfis[nome] || {};
       const ctrl = ctrlExisting || null;
+      if(ctrl?.browser?.__ctNetworkPurpose==='cadastro')continue;
       const proxySession=ctrl?.browser?.__ctVirtusProxy;
       if(proxySession){
         if(isProfileOpening(nome)||proxyOpeningCoordinator.running.has(nome))continue;

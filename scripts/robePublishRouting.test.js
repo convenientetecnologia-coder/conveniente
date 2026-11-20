@@ -100,6 +100,7 @@ test('Avançar precede a troca de rede; Publicar ocorre depois da prova e do mar
   const end = source.indexOf('// --- O PATCH PRINCIPAL:', start);
   const events = [], actions = [{ kind: 'avancar', handle: 'avancar' }, { kind: 'publicar', handle: 'publicar' }];
   const click = vm.runInNewContext(source.slice(start, end) + '\nclickFlowExactRetry', {
+    stepLog:{appendJSONL(){}},
     dismissListingError: async () => {}, dismissOpenListbox: async () => {}, sleep: async () => {},
     findFooterAction: async () => actions.shift(), clickOnce: async (_p, handle) => events.push(handle)
   });

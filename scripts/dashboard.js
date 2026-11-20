@@ -2813,7 +2813,7 @@ async function execStockProvision(cmd) {
           const r4 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/activate`, {
             method: 'POST',
             headers: { 'x-operator': lockOwner },
-            timeoutMs: Math.max(20_000, Math.min(3 * 60 * 1000, budgetLeftMs() + 20_000)),
+            timeoutMs: Math.max(20_000, Math.min(25 * 60 * 1000, budgetLeftMs() + 20_000)),
             body: {}
           });
           if (!r4 || r4.ok === false) throw new Error((r4 && r4.error) ? String(r4.error) : 'activate_failed');
@@ -2825,7 +2825,7 @@ async function execStockProvision(cmd) {
         // - password_first (novo): /login-remediate com authMode=password_first
         if (stockAuthMode === 'password_first') {
           await runStep('login_remediate_password_first', async () => {
-            const longTimeoutMs = Math.max(120_000, Math.min(10 * 60 * 1000, budgetLeftMs() + 45_000));
+            const longTimeoutMs = Math.max(120_000, Math.min(25 * 60 * 1000, budgetLeftMs() + 45_000));
             const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/login-remediate`, {
               method: 'POST',
               headers: { 'x-operator': lockOwner },
@@ -2852,7 +2852,7 @@ async function execStockProvision(cmd) {
           });
         } else {
           await runStep('configure', async () => {
-            const longTimeoutMs = Math.max(60_000, Math.min(10 * 60 * 1000, budgetLeftMs() + 30_000));
+            const longTimeoutMs = Math.max(60_000, Math.min(25 * 60 * 1000, budgetLeftMs() + 30_000));
             const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/configure`, {
               method: 'POST',
               headers: { 'x-operator': lockOwner },

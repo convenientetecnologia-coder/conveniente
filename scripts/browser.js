@@ -2571,11 +2571,12 @@ async function maximizeAccountWindow(page) {
 /**
  * Ativar perfil: abre browser dedicado.
  */
-async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, ctrl=undefined, openingMap=undefined } = {}) {
+async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, ctrl=undefined, openingMap=undefined, networkPurpose='auto' } = {}) {
   let browser = null;
   let pruneTimer = null;
   let directSwitch = null;
   let virtusProxySession = null;
+  let cadastroProxySession = null;
   try {
     const genLaunch = null;
     const gatewayResolved = { enabled: false };
@@ -2611,9 +2612,12 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try { if (fs.existsSync(chromeLogFile)) fs.unlinkSync(chromeLogFile); } catch {}
 
     // FLAGS “OURO” ONLY! A lista mora em buildAccountChromeLaunchArgs (Virtus e Robe).
-    virtusProxySession = await require('./virtusProxySession').create({nome,onState:state=>{try{require('./stepLog').appendJSONL(nome,'virtus-proxy',state)}catch{}}});
+    const cadastroRoute=require('./cadastroProxySession');
+    const networkMode=cadastroRoute.mode({purpose:networkPurpose,pending:networkPurpose==='auto'?cadastroRoute.pending(nome):false,config:require('./serverConfig').readServerConfigEffective()});
+    if(networkMode.cadastro&&networkMode.proxy)cadastroProxySession=await cadastroRoute.create({nome,onState:state=>{try{require('./stepLog').appendJSONL(nome,'cadastro-proxy',state)}catch{}}});
+    if(!networkMode.cadastro)virtusProxySession = await require('./virtusProxySession').create({nome,onState:state=>{try{require('./stepLog').appendJSONL(nome,'virtus-proxy',state)}catch{}}});
     if(virtusProxySession)await virtusProxySession.boot();
-    const proxyServer = virtusProxySession?.proxyServer || '';
+    const proxyServer = cadastroProxySession?.proxyServer || virtusProxySession?.proxyServer || '';
     try {
       require('./phoneProxyMode').note('phone_proxy_chrome', {
         nome: String(nome || ''),
@@ -2622,8 +2626,8 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
         proxyServer
       });
     } catch {}
-    const launchArgs = buildAccountChromeLaunchArgs(proxyServer, { directNetwork: !virtusProxySession });
-    if(virtusProxySession)launchArgs.push('--disable-quic','--proxy-bypass-list=<-loopback>');
+    const launchArgs = buildAccountChromeLaunchArgs(proxyServer, { directNetwork: !proxyServer });
+    if(proxyServer)launchArgs.push('--disable-quic','--proxy-bypass-list=<-loopback>');
     if (proxyServer) {
       try { require('./connectLane.js').markArmed(true, 'proxy_launch'); } catch {}
     }
@@ -2714,6 +2718,9 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       throw new Error('Browser não iniciou após 3 tentativas. Veja logs acima e o arquivo chrome_launch.log do perfil.');
     }
     browser = browserTry;
+    browser.__ctNetworkPurpose=networkMode.cadastro?'cadastro':'virtus';
+    browser.__ctCadastroNetworkMode=networkMode.cadastro?(networkMode.proxy?'proxy':'direct'):null;
+    if(cadastroProxySession)cadastroProxySession.attach(browser);
     if(virtusProxySession){virtusProxySession.attach(browser);const bootTimeout=setTimeout(()=>{if(!virtusProxySession.snapshot().startupFinished){virtusProxySession.noteInbox({ok:false,state:'startup_timeout'});virtusProxySession.close().catch(()=>{})}},240000);bootTimeout.unref?.();browser.once('disconnected',()=>clearTimeout(bootTimeout))}
     if (directSwitch) {
       browser.__ctDirectSwitch = directSwitch;
@@ -2808,6 +2815,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     try { if (directSwitch) await directSwitch.close(); } catch {}
     try { await require('./phoneProxyMode').releaseSession(nome); } catch {}
     try {if(virtusProxySession)await virtusProxySession.close()}catch{}
+    try {if(cadastroProxySession)await cadastroProxySession.close()}catch{}
     logger.error('[BROWSER][ERRO FATAL ao abrir Puppeteer/browser]', {}, err);
     throw err;
   }

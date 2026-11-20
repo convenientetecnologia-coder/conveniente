@@ -1352,6 +1352,7 @@
           <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="pais">País</button>
           <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="rede">Rede</button>
           <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="robe">Robe</button>
+          <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="cadastro">Cadastro</button>
           <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="virtus">Virtus</button>
           <button type="button" class="srv-cfg-tab" data-srv-cfg-tab="localizacao">Localização</button>
         </div>
@@ -1583,6 +1584,14 @@
           </div>
         </div>
 
+        <div class="srv-cfg-panel" data-srv-cfg-panel="cadastro">
+          <div class="form-row">
+            <label>Cadastro — Proxy</label>
+            <select id="srvCadastroProxy"><option value="0">Não — conexão normal</option><option value="1">Sim — pelo proxy</option></select>
+            <div class="muted" style="margin-top:6px;">Com Sim, aguarda uma cadeira antes de abrir o navegador e mantém o cadastro no proxy até concluir. Sem saída pela rede normal se o proxy falhar. Com Não, usa a conexão normal. Depois do cadastro, vale a configuração própria do Virtus.</div>
+          </div>
+        </div>
+
         <div class="srv-cfg-panel" data-srv-cfg-panel="virtus">
           <div class="form-row">
             <label>Virtus — Proxy</label>
@@ -1670,6 +1679,7 @@
       const v4DirectedPercentEl = box.querySelector('#srvRobeV4DirectedPercent');
       const v4ExactPercentEl = box.querySelector('#srvRobeV4ExactPercent');
       const virtusEngineEl = box.querySelector('#srvVirtusEngine');
+      const cadastroProxyEl = box.querySelector('#srvCadastroProxy');
       const virtusProxyEl = box.querySelector('#srvVirtusProxy');
       const countryIdEl = box.querySelector('#srvCountryId');
       const itemTitlesPackEl = box.querySelector('#srvItemTitlesPack');
@@ -1930,6 +1940,7 @@
         if (v4ExactPercentEl) {
           v4ExactPercentEl.value = Number(robe.v4ExactNeighborhoodPercent != null ? robe.v4ExactNeighborhoodPercent : 90);
         }
+        if (cadastroProxyEl) cadastroProxyEl.value = cfg.cadastro?.proxyEnabled === true ? '1' : '0';
         if (virtusProxyEl) virtusProxyEl.value = cfg.virtus?.proxyEnabled === true ? '1' : '0';
         if (virtusEngineEl) virtusEngineEl.value = String(cfg.virtusEngine || 'delta') === 'delta' ? 'delta' : 'legacy';
         if (countryIdEl) {
@@ -2353,6 +2364,7 @@
                 return uniqueCities(globalCitiesSelected);
               })()
             },
+            cadastro: { proxyEnabled: String(cadastroProxyEl?.value || '0') === '1' },
             virtus: { proxyEnabled: String(virtusProxyEl?.value || '0') === '1' },
             virtusEngine: String((virtusEngineEl && virtusEngineEl.value) || 'delta') === 'delta' ? 'delta' : 'legacy'
           };

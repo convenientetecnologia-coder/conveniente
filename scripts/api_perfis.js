@@ -1214,7 +1214,7 @@ module.exports = (app, workerClient, fileStore) => {
     let r = null;
     for (let attempt = 0; attempt < activateRetries.length; attempt++) {
       if (attempt > 0) await sleepMs(activateRetries[attempt]);
-      r = await workerClient.sendWorkerCommand('activate', { nome, operator: op }, { timeoutMs: 60000 }).catch(e => {
+      r = await workerClient.sendWorkerCommand('activate', { nome, operator: op }, { timeoutMs: /^stock_provision/i.test(String(op||'')) ? 25*60*1000 : 60000 }).catch(e => {
         logger.error('Erro ao enviar comando activate para worker', { nome, rota: '/api/perfis/:nome/activate', attempt: attempt + 1, error: e && e.message }, e);
         return { ok: false, error: (e && e.message) ? String(e.message) : 'activate_failed' };
       });
@@ -1317,7 +1317,7 @@ module.exports = (app, workerClient, fileStore) => {
       let gotLock = false;
       if (!isStockProvision) {
         try {
-          const lk = provisionLock.tryAcquire({ owner: lockOwner, ttlMs: 4 * 60 * 1000, meta: { op: 'admin_configure', nome, by: opTrim || null } });
+          const lk = provisionLock.tryAcquire({ owner: lockOwner, ttlMs: 30 * 60 * 1000, meta: { op: 'admin_configure', nome, by: opTrim || null } });
           if (!lk || !lk.ok) {
             const curOwner = lk && lk.lock && lk.lock.owner ? String(lk.lock.owner) : '';
             return res.json({ ok: false, error: `configure_lock_busy${curOwner ? ` owner=${curOwner}` : ''}` });
@@ -1330,7 +1330,7 @@ module.exports = (app, workerClient, fileStore) => {
       // Cadastro (stock): timeout alinhado ao client do dashboard (até ~8–10min).
       // Timeout curto (3min) fazia o API retornar "Timeout..." enquanto o worker
       // ainda rodava → stock_provision retryava configure em cima do humano/captcha.
-      const configureTimeoutMs = isStockProvision
+      const configureTimeoutMs = require('./serverConfig').readServerConfigEffective().cadastro?.proxyEnabled===true ? 25*60*1000 : isStockProvision
         ? Math.max(180000, Number(process.env.STOCK_CONFIGURE_WORKER_TIMEOUT_MS || (10 * 60 * 1000)) || (10 * 60 * 1000))
         : Math.max(180000, Number(process.env.CONFIGURE_WORKER_TIMEOUT_MS || 180000) || 180000);
       // Passa operador para o worker decidir se deixa em modo humano (admin) ou segue fluxo automático (stock_provision)

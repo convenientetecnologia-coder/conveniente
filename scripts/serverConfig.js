@@ -180,6 +180,7 @@ const DEFAULTS = Object.freeze({
     reservePer8GbMb: 768,
     provisionSpikeMb: 1536
   },
+  cadastro: { proxyEnabled: false },
   virtus: { proxyEnabled: false },
   robe: {
     windowStartMin: 360,
@@ -550,6 +551,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
   const cap = (r.capacity && typeof r.capacity === "object") ? r.capacity : {};
   const memRaw = (r.memory && typeof r.memory === "object") ? r.memory : {};
   const robe = (r.robe && typeof r.robe === "object") ? r.robe : {};
+  const cadastro = (r.cadastro && typeof r.cadastro === "object") ? r.cadastro : {};
   const virtus = (r.virtus && typeof r.virtus === "object") ? r.virtus : {};
   const net = (r.networkRotation && typeof r.networkRotation === "object") ? r.networkRotation : {};
   const daily = (r.dailyWindow && typeof r.dailyWindow === "object") ? r.dailyWindow : {};
@@ -717,6 +719,7 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
       reservePer8GbMb,
       provisionSpikeMb
     },
+    cadastro: { proxyEnabled: cadastro.proxyEnabled === true },
     virtus: { proxyEnabled: virtus.proxyEnabled === true },
     robe: {
       windowStartMin,
@@ -877,6 +880,7 @@ function validateServerConfigPayload(payload) {
   const p = (payload && typeof payload === "object") ? payload : {};
   const cap = (p.capacity && typeof p.capacity === "object") ? p.capacity : null;
   const robe = (p.robe && typeof p.robe === "object") ? p.robe : null;
+  const cadastro = (p.cadastro && typeof p.cadastro === "object") ? p.cadastro : null;
   const virtus = (p.virtus && typeof p.virtus === "object") ? p.virtus : null;
   const mem = (p.memory && typeof p.memory === "object") ? p.memory : null;
   const net = (p.networkRotation && typeof p.networkRotation === "object") ? p.networkRotation : null;
@@ -897,7 +901,7 @@ function validateServerConfigPayload(payload) {
     if (typeof p.pais === "string") return { id: p.pais };
     return null;
   })();
-  if (!cap && !virtus && !robe && !mem && !net && !daily && !renew && !anuncio && !termClean && !log && !countryIn && p.proxyMode === undefined) {
+  if (!cap && !cadastro && !virtus && !robe && !mem && !net && !daily && !renew && !anuncio && !termClean && !log && !countryIn && p.proxyMode === undefined) {
     return { ok: false, error: "payload_sem_campos_reconhecidos" };
   }
 
@@ -908,6 +912,8 @@ function validateServerConfigPayload(payload) {
   const existingRaw = (existingProbe.raw && typeof existingProbe.raw === "object") ? existingProbe.raw : {};
 
   const errors = [];
+  if (p.cadastro !== undefined && (!cadastro || Array.isArray(p.cadastro))) errors.push("cadastro_invalido");
+  if (cadastro && cadastro.proxyEnabled !== undefined && typeof cadastro.proxyEnabled !== "boolean") errors.push("cadastro.proxyEnabled_invalido");
   if (p.virtus !== undefined && (!virtus || Array.isArray(p.virtus))) errors.push("virtus_invalido");
   if (virtus && virtus.proxyEnabled !== undefined && typeof virtus.proxyEnabled !== "boolean") errors.push("virtus.proxyEnabled_invalido");
   if (p.proxyMode !== undefined) {
@@ -1158,6 +1164,7 @@ function validateServerConfigPayload(payload) {
     ...DEFAULTS,
     ...existingRaw,
     capacity: { ...DEFAULTS.capacity, ...(existingRaw.capacity || {}), ...(cap || {}) },
+    cadastro: { ...DEFAULTS.cadastro, ...(existingRaw.cadastro || {}), ...(cadastro || {}) },
     virtus: { ...DEFAULTS.virtus, ...(existingRaw.virtus || {}), ...(virtus || {}) },
     robe: { ...DEFAULTS.robe, ...(existingRaw.robe || {}), ...(robe || {}) },
     memory: { ...DEFAULTS.memory, ...(existingRaw.memory || {}), ...(mem || {}) },
@@ -1257,6 +1264,7 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
       reservePer8GbMb: v.normalized.memory.reservePer8GbMb,
       provisionSpikeMb: v.normalized.memory.provisionSpikeMb
     },
+    cadastro: { proxyEnabled: v.normalized.cadastro.proxyEnabled },
     virtus: { proxyEnabled: v.normalized.virtus.proxyEnabled },
     robe: {
       windowStartMin: v.normalized.robe.windowStartMin,

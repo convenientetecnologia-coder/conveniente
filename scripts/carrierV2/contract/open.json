@@ -39,7 +39,8 @@
         "publish",
         "identity",
         "renew",
-        "virtus"
+        "virtus",
+        "provision"
       ]
     },
     "phoneId": {
