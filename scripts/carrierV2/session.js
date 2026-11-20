@@ -78,8 +78,8 @@ class CarrierSession extends EventEmitter {
     if(!flow){
       // IDs não são reutilizados: créditos/END em trânsito após o fechamento
       // pertencem ao fluxo antigo e não invalidam o canal dos vizinhos.
-      if(id>0&&id<=this.nextId&&[F.END,F.WINDOW,F.OPEN_ERR,F.DATA].includes(kind))return;
-      throw Error('unbound_flow');
+      if(id>0&&id<=this.nextId&&[F.END,F.WINDOW,F.OPEN_ERR,F.OPEN_OK,F.DATA].includes(kind))return;
+      const error=Error('unbound_flow');error.frame={kind,id,lastAllocatedId:this.nextId};throw error;
     }
     if(kind!==F.DATA&&!p.sameIdentity(flow.binding,body))throw Error('flow_identity_mismatch');
     flow.receive(kind,body);
