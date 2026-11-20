@@ -17,7 +17,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
  const rail=rails.createDirectSwitch({requireProxy:true});let port;
  try{
   port=await rail.listen();
-  const turn=new VirtusTurn({rail,onState,beforeDisconnect:async()=>{if(browser)for(const page of await browser.pages())try{await page.setOfflineMode(true)}catch{}},acquire:({intent,signal})=>cp2.begin({nome,purpose:'virtus',intent,hotUntil:Math.floor(activity.snapshot().hotUntil/1000),signal,isReady:dependencies.isReady||(()=>accountStillWanted(nome))}),prove:async()=>{
+  const turn=new VirtusTurn({rail,onState,beforeDisconnect:async()=>{if(browser)for(const page of await browser.pages())try{await page.setOfflineMode(true)}catch{}},acquire:({intent,signal})=>cp2.begin({nome,purpose:'virtus',intent,messageIsolation:true,observationRecovery:['warm','observe','engaged'].includes(intent)&&!!deliveryLedger.accountBlocked?.(nome),hotUntil:Math.floor(activity.snapshot().hotUntil/1000),signal,isReady:dependencies.isReady||(()=>accountStillWanted(nome))}),prove:async()=>{
    const raw=await rails.proveThroughRail(port);let payload;try{payload=JSON.parse(raw)}catch{throw Error('virtus_proxy_invalid_proof')}
    const proof=rails.readExit(payload);if(!proof.ip)throw Error('virtus_proxy_missing_ip');return proof;
   }});
@@ -26,10 +26,18 @@ async function create({nome,onState=()=>{},dependencies={}}){
   const ready=new Promise((resolve,reject)=>{bootReady=resolve;bootReject=reject});
   const boot=()=>{const task=turn.run('warm',async()=>{bootReady();await bootGate});task.catch(bootReject);return ready};
   let browser=null,timer=null,stopped=false,lastNetworkAt=0,lastSyncNetworkAt=0,connectedAt=Date.now(),observerBusy=false,observerOptions=null,observerLastTickAt=0,lastObserveAttemptAt=0,observerSkipReason=null,observerVersion=0,startupFinished=false,healthCheck=null,lastInbox=null,activeLease=null,expectedSend=null,outgoingEvidence=null,humanHeld=false,humanTimer=null,humanResolve=null,humanTask=null;
+  const deliveryLedger=dependencies.deliveryLedger||require("./virtusDeliveryLedger");
+  let closedBrowserTimer=null,recoveringClosedBrowser=false;
   const activity=new Activity();const inboundByThread=new Map();let lastReplyTiming=null;const burst=[];let visitIntent=null,visitReplied=false;
  const api={turn,proxyServer:'127.0.0.1:'+port,boot,
    attach(value){
     browser=value;browser.__ctVirtusProxy=api;
+    closedBrowserTimer=(dependencies.setClosedBrowserInterval||setInterval)(async()=>{
+      if(!turn.closed||stopped||humanHeld||recoveringClosedBrowser||!browser?.isConnected?.())return;
+      recoveringClosedBrowser=true;
+      try{await api.close();await browser.close()}catch(error){onState({...api.snapshot(),error:'virtus_closed_browser_recovery:'+String(error.message||error)})}
+      finally{recoveringClosedBrowser=false}
+    },2000);closedBrowserTimer.unref?.();
     const watch=page=>{
      if(page.__ctVirtusProxyObserved)return;page.__ctVirtusProxyObserved=true;
      const pending=new Set();page.__ctVirtusPendingInbox=pending;
@@ -64,7 +72,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
    },
    async leaveHuman(){if(!humanTask){humanHeld=false;return}const task=humanTask.task;clearTimeout(humanTimer);humanResolve?.();await task;humanHeld=false},
    async run(intent,action){
-    if(intent==='reply'&&activeLease&&['observe','engaged'].includes(visitIntent)&&!humanHeld&&!visitReplied&&burst.length<1){return new Promise((resolve,reject)=>burst.push({action,resolve,reject}))}
+    if(intent==='reply'&&activeLease&&!activeLease.snapshot().reconciliationOnly&&['observe','engaged'].includes(visitIntent)&&!humanHeld&&!visitReplied&&burst.length<1){return new Promise((resolve,reject)=>burst.push({action,resolve,reject}))}
     return turn.run(intent,async lease=>{
       activeLease=lease;rotationPolicy=lease.snapshot().rotation||rotationPolicy;visitIntent=intent;visitReplied=false;
       try{
@@ -80,26 +88,53 @@ async function create({nome,onState=()=>{},dependencies={}}){
         if(lastNetworkAt<reconnectAt)throw Error('virtus_reconnect_not_confirmed');
         if(intent==='reply'&&healthCheck){const health=await healthCheck();if(!health.ok)throw Error('virtus_account_blocked:'+health.state)}
         return await action(lease);
-      }finally{visitIntent=null;activeLease=null;while(burst.length)burst.shift().reject(Error('virtus_visit_ended_before_reply'))}
+      }finally{if(expectedSend?.delivery){deliveryLedger.markUncertain?.(expectedSend.delivery);expectedSend=null}visitIntent=null;activeLease=null;while(burst.length)burst.shift().reject(Error('virtus_visit_ended_before_reply'))}
     });
    },
-   async beforeSend({threadKey,text}={}){
+   async beforeSend({threadKey,text,clientMessageId}={}){
     if(!activeLease)throw Error('virtus_send_without_turn');
+    if(activeLease.snapshot().reconciliationOnly)throw Error('virtus_delivery_reconciliation_required');
     if(!threadKey||!String(text||'').trim())throw Error('virtus_send_identity_missing');
-    expectedSend={threadKey:String(threadKey),text:String(text).replace(/\s+/g,' ').trim(),since:Date.now(),inboundAt:inboundByThread.get(String(threadKey))||null};outgoingEvidence=null;
+    const delivery=clientMessageId?deliveryLedger.begin({account:nome,id:String(clientMessageId),thread:threadKey,text}):null;
+    expectedSend={threadKey:String(threadKey),text:String(text).replace(/\s+/g,' ').trim(),since:Date.now(),inboundAt:inboundByThread.get(String(threadKey))||null,delivery};outgoingEvidence=null;
     await activeLease.possibleSideEffect();
+    const accepted=delivery&&deliveryLedger.read?.(nome,String(clientMessageId));
+    if(accepted?.state==='confirmed'){outgoingEvidence=accepted.evidence;return {skipSubmit:true};}
+    return {skipSubmit:false};
+   },
+   async reconcileSend({page,threadKey}) {
+    if(!activeLease||activeLease.snapshot().healthy===false||humanHeld)throw Error('virtus_recovery_without_healthy_turn');
+    if(!/^\d{12,20}$/.test(String(threadKey)))throw Error('virtus_recovery_thread_invalid');
+    const started=Date.now();
+    await page.goto('https://www.facebook.com/messages/t/'+threadKey+'/',{waitUntil:'domcontentloaded',timeout:60000});
+    const until=Date.now()+(dependencies.recoverySyncTimeoutMs??30000);
+    while(Date.now()<until&&!stopped) {
+      if(activeLease.snapshot().healthy===false)throw Error('virtus_recovery_transport_lost');
+      if(lastSyncNetworkAt>=started&&!(page.__ctVirtusPendingInbox?.size)&&Date.now()-lastSyncNetworkAt>=(dependencies.recoveryQuietMs??2500))return;
+      await new Promise(resolve=>setTimeout(resolve,250));
+    }
+    throw Error('virtus_recovery_sync_incomplete');
    },
    recordOutgoing({threadKey,text,messageId,messageAt}={}){
+    const hasReconciler=typeof deliveryLedger.recordServerEcho==='function';
+    const receipt=messageId&&threadKey?deliveryLedger.recordServerEcho?.({account:nome,thread:String(threadKey),text:String(text||''),messageId:String(messageId),messageAt:Number(messageAt),onAmbiguous:details=>onState({...api.snapshot(),deliveryAmbiguous:details})}):null;
     if(!expectedSend||!messageId||String(threadKey)!==expectedSend.threadKey)return;
+    if(expectedSend.delivery&&hasReconciler){
+      if(receipt?.state!=='confirmed'||receipt.id!==expectedSend.delivery.id)return;
+      outgoingEvidence=receipt.evidence;return;
+    }
     if(String(text||'').replace(/\s+/g,' ').trim()!==expectedSend.text)return;
     if(!Number.isFinite(Number(messageAt))||Number(messageAt)<expectedSend.since-2000)return;
-    outgoingEvidence={messageId:String(messageId),messageAt:Number(messageAt)};
+    const evidence={messageId:String(messageId),messageAt:Number(messageAt),...(expectedSend.delivery?{source:"facebook_server_event",account:nome,thread:expectedSend.delivery.thread,clientMessageId:expectedSend.delivery.id,attemptId:expectedSend.delivery.attemptId,contentHash:expectedSend.delivery.contentHash}:{})};
+    if(expectedSend.delivery)deliveryLedger.confirm(expectedSend.delivery,evidence);
+    outgoingEvidence=evidence;
    },
    async confirmSend(){
     if(!activeLease||!expectedSend)throw Error('virtus_send_without_turn');
     const until=Date.now()+(dependencies.confirmationTimeoutMs||45000);
     while(!outgoingEvidence&&Date.now()<until&&!stopped)await new Promise(r=>setTimeout(r,250));
     if(!outgoingEvidence)throw Error('virtus_send_server_ack_unconfirmed');
+    if(expectedSend.delivery)deliveryLedger.confirm(expectedSend.delivery,outgoingEvidence);
     activeLease.confirm();visitReplied=true;activity.replied();
     const now=Date.now();lastReplyTiming={confirmedAt:now,sendToConfirmationMs:now-expectedSend.since,customerToConfirmationMs:expectedSend.inboundAt&&now>=expectedSend.inboundAt?now-expectedSend.inboundAt:null};onState(api.snapshot());expectedSend=null;return outgoingEvidence;
    },
@@ -133,7 +168,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
     };
     timer=(dependencies.setObserverInterval||setInterval)(()=>tick().catch(error=>onState({...api.snapshot(),error:String(error.message||error)})),5000);timer.unref?.();return version;
    },
-   async close(){if(stopped)return;stopped=true;api.stopObserver();humanResolve?.();bootResolve();await turn.close()}
+   async close(){if(stopped)return;stopped=true;(dependencies.clearClosedBrowserInterval||clearInterval)(closedBrowserTimer);closedBrowserTimer=null;api.stopObserver();humanResolve?.();bootResolve();await turn.close()}
   };
   return api;
  }catch(error){await rail.close();throw error}

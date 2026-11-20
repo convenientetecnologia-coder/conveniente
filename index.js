@@ -2337,7 +2337,7 @@ function __edgeNormalizeThreadKeyCandidates(input, primaryThreadKey = '') {
   return out.slice(0, 12);
 }
 
-function __edgeEnqueueDeltaReplyToDiskSync({ id, nome, thread_key, texto_resposta, client_message_id, thread_key_candidates } = {}) {
+function __edgeEnqueueDeltaReplyToDiskSync({ id, nome, thread_key, texto_resposta, client_message_id, thread_key_candidates, issued_at } = {}) {
   __edgeEnsureDeltaReplyOutboxDirsSync();
   const cmdId = String(id || '').trim() || __edgeComputeCmdIdFallback({ nome, thread_key, texto_resposta, client_message_id });
   const normalizedCandidates = __edgeNormalizeThreadKeyCandidates(thread_key_candidates, thread_key);
@@ -2349,8 +2349,14 @@ function __edgeEnqueueDeltaReplyToDiskSync({ id, nome, thread_key, texto_respost
     thread_key: String(thread_key || '').trim(),
     texto_resposta: String(texto_resposta || '').replace(/\r/g, ''),
     client_message_id: String(client_message_id || '').trim() || null,
+    ...(issued_at!==undefined?{issued_at:Number(issued_at)}:{}),
     ...(normalizedCandidates.length ? { thread_key_candidates: normalizedCandidates } : {})
   };
+  if(__edgeUsesProxyDelivery(rec.nome)) {
+    require('./scripts/virtusDeliveryLedger').stage(rec);
+    setImmediate(()=>{try{__edgeRecoverDurableReplies()}catch(error){logger.error('[DELIVERY_RECOVERY]',String(error.message||error))}});
+    return cmdId;
+  }
   try {
     fs.appendFileSync(EDGE_DELTA_REPLY_OUTBOX_PATH, JSON.stringify(rec) + '\n', 'utf8');
   } catch {}
@@ -2600,9 +2606,16 @@ function __edgeRequeueDeltaReplyRecordSync(rec, { cmdId, reason, error, burnRetr
     else {
       try { delete out.not_before; } catch {}
     }
+    if(__edgeUsesProxyDelivery(out.nome)) {
+      const ledger=require('./scripts/virtusDeliveryLedger');
+      ledger.stage(out);
+      ledger.snooze({account:out.nome,id:String(out.client_message_id||out.id),error:String(error||reason||'retry'),delayMs:Math.max(4000,(out.not_before||Date.now()+30000)-Date.now())});
+      return out;
+    }
     fs.appendFileSync(EDGE_DELTA_REPLY_OUTBOX_PATH, JSON.stringify(out) + '\n', 'utf8');
     return out;
-  } catch {
+  } catch (error) {
+    if(__edgeUsesProxyDelivery(String(rec?.nome||'')))throw error;
     return null;
   }
 }
@@ -2648,6 +2661,32 @@ function __edgeEmitVmDeliveryError(threadKey, errorCode) {
     );
   } catch {}
 }
+
+function __edgeUsesProxyDelivery(account) {
+  if(require('./scripts/serverConfig').readServerConfigEffective()?.virtus?.proxyEnabled===true)return true;
+  const pilot=__readJsonFileSafe(path.join(__dirname,'dados','carrier_v2_private','virtus_pilot.json'));
+  return pilot?.enabled===true&&pilot.accountId===account;
+}
+
+// Recovery reads one durable logical job; it never appends another transport copy.
+let __edgeDeliveryMaintenanceAt=0;
+function __edgeRecoverDurableReplies() {
+  const ledger=require('./scripts/virtusDeliveryLedger');
+  if(Date.now()-__edgeDeliveryMaintenanceAt>=3600000){ledger.maintain?.();__edgeDeliveryMaintenanceAt=Date.now();}
+  const eligible=rec=>!!rec.nome&&__edgeUsesProxyDelivery(rec.nome)&&__edgeIsProfileRuntimeReadySync(rec.nome)&&!__edgeIsProfileHumanHeldSync(rec.nome)&&!__edgeDeltaReplyAccountInFlight.has(rec.nome);
+  for(const rec of [...ledger.listReceipts({limit:32,eligible}),...ledger.listDue({limit:32,eligible})]) {
+    const account=String(rec.nome||''),cmdId=String(rec.id||rec.client_message_id||'');
+    if(!account||!cmdId||!__edgeUsesProxyDelivery(account)||!__edgeIsProfileRuntimeReadySync(account)||__edgeIsProfileHumanHeldSync(account))continue;
+    if(__edgeDeltaReplyAccountInFlight.has(account)||__edgeDeltaReplyAccountInFlight.size>=__EDGE_DELTA_REPLY_MAX_PARALLEL)continue;
+    try {
+      ledger.prepareRetry({account,id:String(rec.client_message_id||rec.id),thread:rec.thread_key,text:rec.texto_resposta});
+      __edgeDeltaReplyAccountInFlight.set(account,{startedAt:Date.now(),cmdId,thread_key:rec.thread_key});
+      void __edgeDispatchDeltaReplySend(rec,cmdId).catch(error=>logger.error('[DELIVERY_RECOVERY]',String(error.message||error)));
+    }catch(error){logger.error('[DELIVERY_RECOVERY]',{account,error:String(error.message||error)})}
+  }
+}
+const __edgeDeliveryRecoveryTimer=setInterval(()=>{try{__edgeRecoverDurableReplies()}catch(error){logger.error('[DELIVERY_RECOVERY]',String(error.message||error))}},10000);
+__edgeDeliveryRecoveryTimer.unref();
 
 /** Envio Facebook por conta (async). Não bloqueia o scanner das outras contas. */
 async function __edgeDispatchDeltaReplySend(rec, cmdId) {
@@ -2711,8 +2750,11 @@ async function __edgeDispatchDeltaReplySend(rec, cmdId) {
       { timeoutMs: 180000 }
     );
     const workerStatus = String((r && r.status) || '').trim().toLowerCase();
-    const finalOk = !!(r && r.ok === true) && __edgeIsDeltaReplyFinalSendStatus(workerStatus);
+    const durableProxy=__edgeUsesProxyDelivery(accountNome);
+    const durableReceipt=durableProxy?require('./scripts/virtusDeliveryLedger').read(accountNome,String(rec.client_message_id||rec.id)):null;
+    const finalOk = !!(r && r.ok === true) && __edgeIsDeltaReplyFinalSendStatus(workerStatus)&&(!durableProxy||durableReceipt?.state==='confirmed');
     if (finalOk) {
+      if(durableProxy)require('./scripts/virtusDeliveryLedger').markReportPending({account:accountNome,id:String(rec.client_message_id||rec.id),error:'receipt_queued_waiting_ct',delayMs:60000});
       __edgeResetDeltaReplyPumpBackoff();
       __edgeWriteAckSync(cmdId, { worker: r || null, final_status: workerStatus });
       __forensicEdgeEmit({
@@ -2730,9 +2772,14 @@ async function __edgeDispatchDeltaReplySend(rec, cmdId) {
       return;
     }
 
-    const retryError = (r && r.error)
+    const retryError = durableProxy&&r?.ok===true&&durableReceipt?.state!=='confirmed'?'virtus_delivery_server_evidence_missing':(r && r.error)
       ? String(r.error)
       : (workerStatus ? workerStatus : 'ipc_not_ok');
+    if(workerStatus==='reconciliation_required'||require('./scripts/virtusDeliveryLedger').isUncertain(retryError)){
+      require('./scripts/virtusDeliveryLedger').defer(rec,retryError);
+      __forensicEdgeEmit({account_login:accountNome,thread_key:threadKey,flow_stage:'delivery_reconciliation_required',details:{cmd_id:cmdId,error:retryError}});
+      return;
+    }
     const softRequeue = __edgeIsDeltaReplySoftRequeueStatus(workerStatus)
       || String(retryError || '').trim().toLowerCase() === 'duplicate_inflight_skip';
 
@@ -3021,6 +3068,13 @@ async function __edgeRunDeltaReplyPump() {
         }
 
         const accountNome = String(rec.nome || '').trim();
+        const deliveryRecord=accountNome&&(rec.client_message_id||rec.id)?require('./scripts/virtusDeliveryLedger').read(accountNome,String(rec.client_message_id||rec.id)):null;
+        if(deliveryRecord?.state==='reconciliation_required'){
+          require('./scripts/virtusDeliveryLedger').defer(rec,'virtus_delivery_reconciliation_required');
+          __edgeWriteDeltaReplyCursorSync(nextOffset);
+          continue;
+        }
+
 
         // Cool-off de rota: item falhou abrir chat → fica no fim; não monopoliza a conta.
         const notBeforeMs = Number(rec.not_before || 0) || 0;
@@ -3202,6 +3256,11 @@ async function __edgeRunDeltaReplyPump() {
         }
 
         // Claim: avança cursor já; envio roda em paralelo sem travar as outras contas.
+        if(__edgeUsesProxyDelivery(accountNome)) {
+          const ledger=require('./scripts/virtusDeliveryLedger');
+          ledger.stage(rec);
+          ledger.prepareRetry({account:accountNome,id:String(rec.client_message_id||rec.id),thread:rec.thread_key,text:rec.texto_resposta});
+        }
         // Runtime ready: libera throttle do soft-status (se voltar offline, CT é avisado de novo).
         try { __edgeClearDeferredOfflineCtThrottle(cmdId); } catch {}
         try { __edgeClearOfflineLogThrottle(cmdId); } catch {}
@@ -3374,6 +3433,7 @@ app.post('/api/infra/command-bus', async (req, res) => {
           thread_key,
           texto_resposta,
           client_message_id: clientMessageId,
+          issued_at:cmd.issued_at??cmd.issuedAt,
           thread_key_candidates
         });
         try { forensicLog('EDGE_DELTA', 'delta_reply_received_by_edge', { id: cmdId, nome, thread_key, chars: texto_resposta.length }); } catch {}

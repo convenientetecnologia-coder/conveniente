@@ -1,0 +1,5 @@
+'use strict';
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
+const source=fs.readFileSync(require('node:path').join(__dirname,'worker.js'),'utf8'),start=source.indexOf('        // Delivery receipts must see server replay BEFORE'),end=source.indexOf('        let dedupMetaId',start);assert.ok(start>0&&end>start);const block=source.slice(start,end);
+for(const own of [true,false])test('servidor replay '+(own?'próprio chega ao recibo antes do dedup de leads':'de outro remetente não confirma envio'),()=>{const calls=[],context={ev:{sender_id:own?'123':'456',account_user_id:'123'},ctrl:{browser:{__ctVirtusProxy:{recordOutgoing:r=>calls.push(r)}}},op:'upsertMessage',threadKey:'thread',texto:'resposta',metaIds:{msgId:'server-id',offlineId:'offline-id'},metaTsMs:Date.now(),nome:'account',logger:{error(){throw Error('unexpected')}}};const run=()=>vm.runInNewContext('for(const event of [1]){'+block+'; throw Error("inbound_dedup")} ',context,{timeout:1000});if(own)run();else assert.throws(run,/inbound_dedup/);assert.equal(calls.length,own?1:0)});
+

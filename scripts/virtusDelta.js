@@ -2969,6 +2969,14 @@ async function waitLexicalComposerEmpty(page, { timeoutMs = 500, pollMs = 50 } =
   };
 }
 
+async function focusComposerForSubmission(page) {
+  const composer=await page.$('div[contenteditable="true"][role="textbox"][data-lexical-editor="true"]');
+  if(!composer)throw Error('composer_missing');
+  await composer.focus();
+  const focused=await composer.evaluate(el=>document.activeElement===el||el.contains(document.activeElement));
+  if(!focused)throw Error('composer_focus_not_confirmed');
+}
+
 async function clickStrictPhysicalSendButton(page) {
   const strictSelector = 'div[role="button"][aria-label="Pressione Enter para enviar"]';
   const strictBtn = await page.$(strictSelector).catch(() => null);
@@ -4709,7 +4717,7 @@ async function probeOpenLineContinuity(page, threadKey) {
   }
 }
 
-async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead = false, onItemLink = null, forensicAccountLogin = null, continuityProbe = null, skipActionDispatch = false } = {}) {
+async function sendReplyFlow({ page, threadKey, textoResposta, clientMessageId = null, fromNetworkLead = false, onItemLink = null, forensicAccountLogin = null, continuityProbe = null, skipActionDispatch = false } = {}) {
   const t = String(threadKey || "").trim();
   logInfo(`[virtusDelta][reply] start thread_key=${t} chars=${String(textoResposta || "").length} from_network=${fromNetworkLead ? "sim" : "nao"}`);
   try { if (page) page.__virtusDeltaReplyInFlight = true; } catch (_) {}
@@ -5043,8 +5051,13 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
     }
 
     try { await page.keyboard.up("Shift"); } catch (_) {}
-    if(page.browser().__ctVirtusProxy)await page.browser().__ctVirtusProxy.beforeSend({threadKey:t,text:expectedComposer});
-    try { await page.keyboard.press("Enter"); } catch (_) {}
+    if(page.browser().__ctVirtusProxy){
+      await focusComposerForSubmission(page);
+      const submission=await page.browser().__ctVirtusProxy.beforeSend({threadKey:t,text:expectedComposer,clientMessageId});
+      if(submission?.skipSubmit){await page.browser().__ctVirtusProxy.confirmSend();return {ok:true,delivery_confidence:'confirmed_server',thread_key:t,item_link:itemLink||null};}
+      try{await page.keyboard.press("Enter")}catch(error){return {ok:false,error:'virtus_send_unconfirmed_no_replay',status:'reconciliation_required',delivery_confidence:'unconfirmed'}}
+    }else{try { await page.keyboard.press("Enter"); } catch (_) {}}
+
     logInfo(`[virtusDelta][reply] enter_sent thread_key=${t}`);
     const emptyAfterEnter = await waitLexicalComposerEmpty(page, { timeoutMs: page.browser().__ctVirtusProxy?45000:2200, pollMs: 150 });
     let after = String(emptyAfterEnter && emptyAfterEnter.text_preview || "").trim();
@@ -5085,7 +5098,9 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
       };
     }
 
-    // Send já confirmado no Messenger. Só agora tenta link (não atrasa Enter).
+    // A cleared composer is not confirmation: require correlated server evidence first.
+    if(page.browser().__ctVirtusProxy)await page.browser().__ctVirtusProxy.confirmSend();
+    // Metadata collection cannot postpone delivery verification.
     if (!canUseOpenLineFastPath || fromNetworkLead || typeof onItemLink === "function") {
       const handsPath = !!skipActionDispatch && !fromNetworkLead;
       const itemLinkAttempts = handsPath
@@ -5112,7 +5127,6 @@ async function sendReplyFlow({ page, threadKey, textoResposta, fromNetworkLead =
       } catch (_) {}
     }
 
-    if(page.browser().__ctVirtusProxy)await page.browser().__ctVirtusProxy.confirmSend();
     return { ok: true, item_link: itemLink || null, delivery_confidence: "confirmed_local", status: "send_ok" };
   } finally {
     try { if (page) page.__virtusDeltaReplyInFlight = false; } catch (_) {}
@@ -6321,7 +6335,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     return "https://atendimentos.convenientetecnologia.com/api/attendance/confirm-delivery";
   }
 
-  async function postJsonWithTimeout(url, payload, { timeoutMs = 4500, headers = {} } = {}) {
+  async function postJsonWithTimeout(url, payload, { timeoutMs = 4500, headers = {}, requireJsonAck = false } = {}) {
     const u = String(url || "").trim();
     if (!u) return { ok: false, status: 0, error: "empty_url" };
     if (typeof fetch !== "function") return { ok: false, status: 0, error: "fetch_unavailable" };
@@ -6335,7 +6349,10 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         signal: controller.signal
       });
       const st = Number(res.status || 0) || 0;
-      if (res.ok) return { ok: true, status: st };
+      if (res.ok) {
+        if(requireJsonAck){let body;try{body=await res.json()}catch{return {ok:false,status:st,error:'confirm_response_not_json'}}if(body?.ok!==true)return {ok:false,status:st,error:'confirm_response_not_accepted'};}
+        return { ok: true, status: st };
+      }
       return { ok: false, status: st, error: `http_${st || 0}` };
     } catch (e) {
       return { ok: false, status: 0, error: (e && e.message) ? String(e.message) : String(e) };
@@ -6524,8 +6541,34 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     } catch (_) {}
   }
 
+  const proxyReceiptInFlight=new Set();
+  function queueProxyDeliveryReceipt(rec) {
+    const key=JSON.stringify([rec.account_login,rec.id]);
+    if(proxyReceiptInFlight.has(key))return;
+    proxyReceiptInFlight.add(key);
+    try{setTimeout(()=>{void(async()=>{
+      const ledger=require('./virtusDeliveryLedger');
+      try{
+        const row=ledger.read(rec.account_login,rec.id);
+        if(row?.state!=='confirmed'||row.thread!==rec.thread_key||!row.evidence)throw Error('virtus_delivery_server_evidence_missing');
+        if(row.reportedAt)return;
+        const payload={server_id:rec.server_id,account_login:rec.account_login,thread_key:rec.thread_key,status:'sent_to_facebook',client_message_id:rec.id,delivery_evidence:{...row.evidence,correlation:row.evidence.correlation||'thread_text_server_time'}};
+        const urls=[resolveCtDeliveryConfirmUrl(),'https://atendimentos.convenientetecnologia.com/api/attendance/confirm-delivery','https://convenientetecnologia.com/api/attendance/confirm-delivery'].filter((url,index,all)=>!!url&&all.indexOf(url)===index);
+        let response={ok:false,status:0,error:'confirm_url_missing'};
+        for(const url of urls){
+          response=await postJsonWithTimeout(url,payload,{timeoutMs:4500,requireJsonAck:true});
+          if(response?.ok){ledger.markReported({account:rec.account_login,id:rec.id});return}
+          if(Number(response?.status)!==404)break;
+        }
+        ledger.markReportPending({account:rec.account_login,id:rec.id,error:String(response?.error||'confirm_delivery_failed'),delayMs:60000});
+        try{__forensicEdgeEmit({account_login:rec.account_login,thread_key:rec.thread_key,flow_stage:'confirm_delivery_pending_retry',details:{client_message_id:rec.id,http_status:Number(response?.status)||0,error:String(response?.error||'confirm_delivery_failed')}})}catch{}
+      }catch(error){
+        try{ledger.markReportPending({account:rec.account_login,id:rec.id,error:String(error.message||error),delayMs:60000})}catch(storageError){try{logInfo('[virtusDelta][delivery_confirm] pending_storage_failed '+String(storageError.message||storageError))}catch{}}
+      }finally{proxyReceiptInFlight.delete(key)}
+    })()},0).unref?.()}catch(error){proxyReceiptInFlight.delete(key);throw error}
+  }
+
   function enqueueDeliveryConfirmToDiskSync({ cmdId, thread_key, status } = {}) {
-    ensureDeliveryConfirmDirsSync();
     const cid = String(cmdId || "").trim() || crypto.randomBytes(12).toString("hex");
     const rec = {
       ts: Date.now(),
@@ -6535,7 +6578,19 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       thread_key: String(thread_key || "").trim(),
       status: String(status || "").trim() || "sent_to_facebook"
     };
-    try { fsSync.appendFileSync(DELIVERY_CONFIRM_OUTBOX, JSON.stringify(rec) + "\n", "utf8"); } catch {}
+    if(proxySession){
+      const row=require('./virtusDeliveryLedger').read(ACCOUNT_LOGIN,cid);
+      if(row?.state!=='confirmed'||row.thread!==rec.thread_key||!row.evidence)throw Error('virtus_delivery_server_evidence_missing');
+      if(row.record?.delivery_origin==='local_greeting'){
+        require('./virtusDeliveryLedger').markReported({account:ACCOUNT_LOGIN,id:cid});
+        return cid;
+      }
+      if(!row.reportedAt)queueProxyDeliveryReceipt(rec);
+      return cid;
+    }
+    ensureDeliveryConfirmDirsSync();
+    const fd=fsSync.openSync(DELIVERY_CONFIRM_OUTBOX,'a');
+    try{fsSync.writeFileSync(fd,JSON.stringify(rec)+'\n','utf8');fsSync.fsyncSync(fd)}finally{fsSync.closeSync(fd)}
     try {
       __forensicEdgeEmit({
         account_login: ACCOUNT_LOGIN,
@@ -6548,7 +6603,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   }
 
   function kickDeliveryConfirmPump() {
-    try { setTimeout(() => { runDeliveryConfirmPump().catch(() => {}); }, 0).unref?.(); } catch {}
+    try { setTimeout(() => { runDeliveryConfirmPump().catch(error => {
+      try{logInfo('[virtusDelta][delivery_confirm] retry_after_error '+String(error.message||error))}catch{}
+      _deliveryConfirmPumpBackoffMs=Math.min(60000,Math.max(1500,Math.floor(_deliveryConfirmPumpBackoffMs*1.7)));
+      setTimeout(()=>kickDeliveryConfirmPump(),_deliveryConfirmPumpBackoffMs).unref?.();
+    }); }, 0).unref?.(); } catch {}
   }
 
   async function runDeliveryConfirmPump() {
@@ -6557,6 +6616,8 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     try {
       ensureDeliveryConfirmDirsSync();
       let url = resolveCtDeliveryConfirmUrl();
+      const advanceCursor=offset=>{if(writeDeliveryConfirmCursorSync(offset)!==true)throw Error('delivery_confirm_cursor_not_persisted')};
+      let scanned=0;
 
       // Pré-condições (fail-fast, sem falha muda)
       if (!url) {
@@ -6609,6 +6670,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       }
 
       while (true) {
+        if(++scanned>32){setTimeout(()=>kickDeliveryConfirmPump(),30000).unref?.();break}
         if (!fsSync.existsSync(DELIVERY_CONFIRM_OUTBOX)) break;
         const cur = readDeliveryConfirmCursorSync();
         const off = Math.max(0, Number(cur && cur.offset || 0) || 0);
@@ -6628,14 +6690,17 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           if (nl === -1) break;
           const line = txt.slice(0, nl).trim();
           const nextOff = off + Buffer.byteLength(txt.slice(0, nl + 1), "utf8");
-          if (!line) { writeDeliveryConfirmCursorSync(nextOff); continue; }
+          if (!line) { advanceCursor(nextOff); continue; }
 
           let rec = null;
           try { rec = JSON.parse(line); } catch { rec = null; }
-          if (!rec) { writeDeliveryConfirmCursorSync(nextOff); continue; }
+          if (!rec) { advanceCursor(nextOff); continue; }
           const cmdId = String(rec.id || "").trim();
-          if (!cmdId) { writeDeliveryConfirmCursorSync(nextOff); continue; }
-          if (hasDeliveryConfirmAckSync(cmdId)) { writeDeliveryConfirmCursorSync(nextOff); continue; }
+          if (!cmdId) { advanceCursor(nextOff); continue; }
+          if (hasDeliveryConfirmAckSync(cmdId)) {
+            const ack=JSON.parse(fsSync.readFileSync(ackFpForDeliveryConfirm(cmdId),'utf8'));
+            if(ack.dead_letter!==true&&ack.ok!==false){advanceCursor(nextOff);continue}
+          }
 
           const payload = {
             server_id: String(rec.server_id || SERVER_ID || "").trim(),
@@ -6643,8 +6708,16 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
             thread_key: String(rec.thread_key || "").trim(),
             status: String(rec.status || "sent_to_facebook").trim(),
             // Extra para correlação sem ambiguidades (best-effort).
-            client_message_id: cmdId
+            client_message_id: cmdId,
+            ...(rec.delivery_evidence?{delivery_evidence:rec.delivery_evidence}:{})
           };
+          const proxyReceipt=!!rec.delivery_evidence||!!(proxySession&&payload.account_login===ACCOUNT_LOGIN);
+          if(proxyReceipt&&!payload.delivery_evidence){
+            const row=require('./virtusDeliveryLedger').read(payload.account_login,cmdId);
+            if(row?.state!=='confirmed'||row.thread!==payload.thread_key||!row.evidence)throw Error('virtus_delivery_server_evidence_missing');
+            payload.delivery_evidence={...row.evidence,correlation:row.evidence.correlation||'thread_text_server_time'};
+          }
+          if(proxyReceipt&&require('./virtusDeliveryLedger').read(payload.account_login,cmdId)?.reportedAt){advanceCursor(nextOff);continue}
           try {
             try {
               __forensicEdgeEmit({
@@ -6664,14 +6737,15 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
 
           let r = null;
           try {
-            r = await postJsonWithTimeout(url, payload, { timeoutMs: 4500 });
+            r = await postJsonWithTimeout(url, payload, { timeoutMs: 4500, requireJsonAck:true });
           } catch (e) {
             r = { ok: false, status: 0, error: (e && e.message) ? String(e.message) : String(e) };
           }
 
           if (r && r.ok) {
+            if(proxyReceipt)require('./virtusDeliveryLedger').markReported({account:payload.account_login,id:cmdId});
             writeDeliveryConfirmAckSync(cmdId, { status: r.status, url });
-            writeDeliveryConfirmCursorSync(nextOff);
+            advanceCursor(nextOff);
             _deliveryConfirmPumpBackoffMs = 450;
             try {
               __forensicEdgeEmit({
@@ -6721,15 +6795,16 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
                     }
                   });
                 } catch (_) {}
-                const r2 = await postJsonWithTimeout(alt, payload, { timeoutMs: 4500 }).catch((e) => ({
+                const r2 = await postJsonWithTimeout(alt, payload, { timeoutMs: 4500, requireJsonAck:true }).catch((e) => ({
                   ok: false,
                   status: 0,
                   error: (e && e.message) ? String(e.message) : String(e),
                 }));
                 if (r2 && r2.ok) {
+                  if(proxyReceipt)require('./virtusDeliveryLedger').markReported({account:payload.account_login,id:cmdId});
                   url = alt; // fixa para o restante do pump
                   writeDeliveryConfirmAckSync(cmdId, { status: r2.status, url: alt, rerouted_from: prevUrl });
-                  writeDeliveryConfirmCursorSync(nextOff);
+                  advanceCursor(nextOff);
                   _deliveryConfirmPumpBackoffMs = 450;
                   try {
                     __forensicEdgeEmit({
@@ -6756,6 +6831,13 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
               }
             }
           } catch (_) {}
+
+          if(proxyReceipt){
+            require('./virtusDeliveryLedger').markReportPending({account:payload.account_login,id:cmdId,error:String(r?.error||'confirm_delivery_failed'),delayMs:60000});
+            try{__forensicEdgeEmit({account_login:payload.account_login,thread_key:payload.thread_key,flow_stage:'confirm_delivery_pending_retry',details:{client_message_id:cmdId,http_status:Number(r?.status)||0,error:String(r?.error||'confirm_delivery_failed')}})}catch{}
+            advanceCursor(nextOff);
+            continue;
+          }
 
           try {
             const st0 = Number(r && r.status || 0) || 0;
@@ -6802,7 +6884,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
                 }
               });
             } catch (_) {}
-            writeDeliveryConfirmCursorSync(nextOff);
+            advanceCursor(nextOff);
             _deliveryConfirmPumpBackoffMs = 450;
             continue;
           }
@@ -7306,6 +7388,17 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     const t = String(threadKey || "").trim();
     const msg = String(textoResposta || "").replace(/\r/g, "");
     const cmid = String(clientMessageId || "").trim() || null;
+    if(page.browser().__ctVirtusProxy&&cmid){
+      try{const ledger=require('./virtusDeliveryLedger');let previous=ledger.inspect({account:ACCOUNT_LOGIN,id:cmid,thread:t,text:msg});
+        const retry=ledger.read?.(ACCOUNT_LOGIN,cmid);
+        if(!previous&&retry?.state==='retry_ready'&&retry.hasAttempted!==false){
+          await page.browser().__ctVirtusProxy.reconcileSend({page,threadKey:t});
+          previous=ledger.inspect({account:ACCOUNT_LOGIN,id:cmid,thread:t,text:msg});
+        }
+        if(previous?.state==='confirmed'){enqueueDeliveryConfirmToDiskSync({cmdId:cmid,thread_key:t,status:'sent_to_facebook'});kickDeliveryConfirmPump();return {ok:true,status:'send_ok',delivery_confidence:'confirmed_server',client_message_id:cmid};}
+        if(previous)return {ok:false,status:'reconciliation_required',error:'virtus_delivery_reconciliation_required',delivery_confidence:'unconfirmed'};
+      }catch(error){return {ok:false,status:'reconciliation_required',error:error.message,delivery_confidence:'unconfirmed'}}
+    }
     if (!t || !msg) return { ok: false, error: "missing_thread_key_or_texto_resposta" };
     // Melhor primeiro; pessoal 1000… por último. Até 12 candidatos.
     const normalizedCandidates = __deltaRankThreadKeyCandidatesLocal([
@@ -7433,7 +7526,9 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         const cid = cmid || computeFallbackClientMessageId({ account_login: ACCOUNT_LOGIN, thread_key: t, texto_resposta: msg });
         enqueueDeliveryConfirmToDiskSync({ cmdId: cid, thread_key: t, status: "sent_to_facebook" });
         kickDeliveryConfirmPump();
-      } catch (_) {}
+      } catch (error) {
+        if(proxySession)return {ok:false,status:'delivery_receipt_pending',error:'virtus_delivery_receipt_enqueue_failed',delivery_confidence:'confirmed_server',receipt_error:String(error.message||error),thread_key:t};
+      }
       try {
         void collectMetadataAfterCtReply(t, out).catch(() => {});
       } catch (_) {}
@@ -7528,6 +7623,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           page,
           threadKey: t,
           textoResposta: msg,
+          clientMessageId: cmid,
           fromNetworkLead: false,
           forensicAccountLogin: ACCOUNT_LOGIN,
           continuityProbe,
@@ -7538,6 +7634,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
           return markSendOk(lastOut);
         }
         lastErr = String((lastOut && lastOut.error) || "send_reply_flow_failed");
+        if(require("./virtusDeliveryLedger").isUncertain(lastErr))return {...lastOut,ok:false,status:"reconciliation_required",delivery_confidence:"unconfirmed"};
         if (isNonRetryableSendError(lastErr)) {
           return markNonRetryable(lastErr, lastOut);
         }
@@ -7567,6 +7664,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
       } catch (e) {
         lastErr = e && e.message ? String(e.message) : String(e);
         lastOut = { ok: false, error: lastErr };
+        if(require("./virtusDeliveryLedger").isUncertain(lastErr))return {...lastOut,status:"reconciliation_required",delivery_confidence:"unconfirmed"};
         if (isNonRetryableSendError(lastErr)) {
           return markNonRetryable(lastErr, lastOut);
         }
@@ -7703,8 +7801,16 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     await enforceGlobalDeltaCooldown(ACCOUNT_LOGIN);
 
     const prior = greetingStateByThread.get(t) || null;
-    const greetingAlreadySent = !!(prior && prior.sentAt);
-    const greetingText = String((prior && prior.greetingText) || generateDeltaGreeting() || "").trim();
+    const greetingId='virtus_greeting:'+t;
+    const greetingLedger=page.browser().__ctVirtusProxy?require('./virtusDeliveryLedger'):null;
+    const priorDelivery=greetingLedger?.read(ACCOUNT_LOGIN,greetingId);
+    const greetingAlreadySent = !!(prior && prior.sentAt)||priorDelivery?.state==='confirmed';
+    const greetingText = String(priorDelivery?.record?.texto_resposta||(prior && prior.greetingText) || generateDeltaGreeting() || "").trim();
+    if(greetingLedger&&!greetingAlreadySent){
+      const rec=priorDelivery?.record||{nome:ACCOUNT_LOGIN,id:greetingId,client_message_id:greetingId,thread_key:t,texto_resposta:greetingText,delivery_origin:'local_greeting',issued_at:Date.now(),ts:Date.now(),type:'delta_reply'};
+      greetingLedger.stage(rec);
+      greetingLedger.prepareRetry({account:ACCOUNT_LOGIN,id:greetingId,thread:t,text:greetingText});
+    }
     let greetingSentAt = Number((prior && prior.sentAt) || 0) || 0;
     const itemLinkAttempts = Math.max(4, Number(process.env.VIRTUS_DELTA_ITEM_LINK_ATTEMPTS || 8) || 8);
     const linkReadyMs = Math.max(1500, Number(process.env.VIRTUS_DELTA_LINK_READY_MS || 8000) || 8000);
@@ -7757,6 +7863,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         page,
         threadKey: t,
         textoResposta: greetingText,
+        clientMessageId:greetingLedger?greetingId:null,
         fromNetworkLead: true,
         onItemLink: (link) => resolveItemLink(link),
         forensicAccountLogin: ACCOUNT_LOGIN,
@@ -7808,6 +7915,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
         };
       }
       greetingSentAt = Date.now();
+      if(greetingLedger)greetingLedger.markReported({account:ACCOUNT_LOGIN,id:greetingId});
     } else {
       // Retry de cidade não reenvia saudação: somente reabre o thread para recuperar link, se necessário.
       if (!(prior && prior.itemLink)) {

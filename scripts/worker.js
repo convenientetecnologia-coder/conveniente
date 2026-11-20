@@ -29427,6 +29427,15 @@ async function __deltaAttachCdpEar(nome, page) {
         const metaIds = __deltaExtractMetaMessageIds(ev);
         const metaDedupMetaId = metaIds && metaIds.dedupId ? String(metaIds.dedupId) : '';
         const metaTsMs = __deltaExtractMetaTimestampMs(ev, nowMs);
+        // Delivery receipts must see server replay BEFORE inbound lead deduplication.
+        // A previously captured server id may be the confirmation lost before restart.
+        const receiptSender = String(ev && (ev.sender_id || ev.actor_id) || '').replace(/\D/g, '');
+        const receiptOwner = String(ev && (ev.account_user_id || ev.accountUserId) || ctrl.deltaAccountUserId || '').replace(/\D/g, '');
+        if (receiptSender && receiptOwner && receiptSender === receiptOwner && ['insertMessage','upsertMessage'].includes(op)) {
+          try { ctrl.browser?.__ctVirtusProxy?.recordOutgoing({threadKey,text:texto,messageId:metaIds?.msgId,messageAt:metaTsMs,offlineThreadingId:metaIds?.offlineId}); }
+          catch (error) { logger.error('[VIRTUS_DELIVERY][RECEIPT_FAILED]', {nome,threadKey,error:String(error.message||error)}); }
+          continue;
+        }
         let dedupMetaId = metaDedupMetaId;
         let dedupMetaIdSynthetic = false;
         // Contingência canônica: quando a Meta omite mid/message_id nos primeiros frames de boot,

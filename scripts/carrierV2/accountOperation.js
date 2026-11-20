@@ -9,14 +9,21 @@ function write(file,row){const tmp=file+'.'+process.pid+'.tmp';let fd;try{fd=fs.
 const locks=new Set();
 const waiting=new Map();
 function lock(file){const f=file+'.lock';if(locks.has(f))throw Error('cp2_account_operation_busy');for(let n=0;n<2;n++){try{const fd=fs.openSync(f,'wx',0o600);fs.writeFileSync(fd,JSON.stringify({pid:process.pid}));fs.fsyncSync(fd);fs.closeSync(fd);locks.add(f);return ()=>{locks.delete(f);fs.unlinkSync(f)}}catch(e){if(e.code!=='EEXIST')throw e;let old;try{old=JSON.parse(fs.readFileSync(f,'utf8'))}catch{throw Error('cp2_operation_lock_corrupt')}try{process.kill(old.pid,0)}catch(error){if(error.code==='ESRCH'){fs.unlinkSync(f);continue}throw Error('cp2_operation_owner_unreachable')}throw Error('cp2_account_operation_busy')}}throw Error('cp2_account_operation_busy')}
-async function beginOnce({nome,purpose,intent='observe',hotUntil=0,signal,isReady=async()=>true,onWait=()=>{},config=readConfig(),Client=OperationClient,root=ROOT}){
+async function beginOnce({nome,purpose,intent='observe',hotUntil=0,observationRecovery=false,messageIsolation=false,signal,isReady=async()=>true,onWait=()=>{},config=readConfig(),Client=OperationClient,root=ROOT,Ledger=require("../virtusDeliveryLedger")}){
  if(!config)throw Error('cp2_not_enabled');const type={publish:'publish',renew:'renew',id:'identity',virtus:'virtus'}[purpose];if(!type)throw Error('cp2_flow_not_supported');
  fs.mkdirSync(root,{recursive:true});const journalType=type==='virtus'?'virtus_'+(intent==='reply'?'reply':intent==='human'?'human':'observe'):type;const file=root===ROOT?location(nome,journalType):path.join(root,crypto.createHash('sha256').update(nome+'\0'+journalType).digest('hex')+'.json'),unlock=lock(file);let row,client,op,closed=false;
  const persist=()=>write(file,row);
  try{
   if(type==='virtus'){const probe=new Client(config);const cap=await probe.capabilities();if(cap.virtusTurns!==true)throw Error('virtus_executor_upgrade_required');if(cap.rotation?.version!==1)throw Error('virtus_rotation_upgrade_required');}
   const old=fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):null;
-  if(old?.sent&&old.result!=='confirmed')throw Error('cp2_unknown_requires_review:'+old.operationId);
+  if(observationRecovery&&(type!=='virtus'||!['warm','observe','engaged'].includes(intent)))throw Error('cp2_observation_recovery_scope_invalid');
+  if(old?.sent&&old.result!=='confirmed'){
+   const isolatedVirtus=type==='virtus'&&messageIsolation===true;
+   const messageIsolatedReply=type==='virtus'&&intent==='reply'&&Ledger.accountBlocked(nome);
+   if(!isolatedVirtus&&((!observationRecovery&&!messageIsolatedReply)||old.phase!=='closed'||!Ledger.accountBlocked(nome)))throw Error('cp2_unknown_requires_review:'+old.operationId);
+   const previous=new Client({...config,edgeGeneration:old.edgeGeneration});const terminal=await previous.request('/'+old.operationId);
+   if(!['released','canceled','expired','unknown','failed'].includes(terminal.state))throw Error('cp2_uncertain_transport_not_closed');
+  }
   let resumeUnaccepted=false;
   if(old&&old.phase!=='closed'){
    const previous=new Client({...config,edgeGeneration:old.edgeGeneration});
@@ -48,10 +55,10 @@ async function beginOnce({nome,purpose,intent='observe',hotUntil=0,signal,isRead
   const route=await client.openRoute(op,{heartbeatMs:config.heartbeatMs});
   return {
    operationId:row.operationId,hop:{host:'127.0.0.1',port:route.port,user:'',pass:''},
-   async possibleSideEffect(){if(row.sent)return;if(op.heartbeatError||op.transportError)throw Error('cp2_transport_not_healthy');row.sent=true;row.result='unknown';persist();await client.possibleSideEffect(op)},
+   async possibleSideEffect(){if(observationRecovery)throw Error("cp2_readonly_effect_refused");if(row.sent)return;if(op.heartbeatError||op.transportError)throw Error('cp2_transport_not_healthy');row.sent=true;row.result='unknown';persist();await client.possibleSideEffect(op)},
    confirm(){row.result='confirmed';op.result='confirmed';persist()},
    async close(){if(closed)return;closed=true;try{await client.release(op,row.result);row.phase='closed';persist()}finally{unlock()}},
-   snapshot(){return {operationId:row.operationId,type:row.type,phase:row.phase,sent:row.sent,result:row.result,healthy:!op.heartbeatError&&!op.transportError,rotation:op.status.rotation||null}}
+   snapshot(){return {operationId:row.operationId,type:row.type,phase:row.phase,sent:row.sent,result:row.result,healthy:!op.heartbeatError&&!op.transportError,reconciliationOnly:observationRecovery===true,rotation:op.status.rotation||null}}
   };
  }catch(error){if(op)try{await client.release(op,row?.result||'not_started')}catch{}unlock();throw error}
 }
