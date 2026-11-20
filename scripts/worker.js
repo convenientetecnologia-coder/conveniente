@@ -17704,6 +17704,7 @@ perfis.push({
   reopenAt: robeMeta[nome]?.reopenAt || null,
   manifestStatus,
   closingReason: robeMeta[nome]?.closingReason || null,
+  proxyOpening: proxyOpeningEnabled()?{inFlight:proxyOpeningCoordinator.running.has(nome),readiness:proxyOpenReadiness.snapshot(),localLimit:proxyOpeningCoordinator.limit}:null,
   proxyWaiting: require('./carrierV2/accountOperation').getWaiting(nome),
   virtusProxy: controllers.get(nome)?.browser?.__ctVirtusProxy?.snapshot() || null,
   openBackoffMs: robeMeta[nome]?.openBackoffMs || null,
@@ -18441,6 +18442,14 @@ function rememberCheapTabScan(tabs, url, now, patch) {
 const MAX_OPEN_CONCURRENCY = 1;
 const OPEN_ALL_SETTLE_MS = Math.max(15_000, Math.min(90_000, Number(process.env.OPEN_ALL_SETTLE_MS || 55000) || 55000));
 let slotsInUse = 0;
+const proxyOpeningCoordinator=new (require('./virtusProxyOpenQueue').ProxyOpeningCoordinator)({limit:2,onResult:(nome,result)=>{try{provisionAudit.append({ts:Date.now(),event:'proxy_open_independent_result',nome,ok:result?.ok===true,error:result?.error||null})}catch{}}});
+const proxyOpenReadiness=new (require('./virtusProxyOpenReadiness').ProxyOpenReadiness)({probe:async()=>{
+ const account=require('./carrierV2/accountOperation');await account.ensureConfig();
+ const cap=await new (require('./carrierV2/client').OperationClient)(account.readConfig()).capabilities();
+ return {ready:cap.virtusTurns===true&&cap.rotation?.version===1,reason:cap.virtusTurns!==true?'virtus_executor_upgrade_required':cap.rotation?.version!==1?'virtus_rotation_upgrade_required':null,capacity:cap.capacity||0};
+}});
+let proxyOpenModeCache={at:0,value:false};
+function proxyOpeningEnabled(){const now=Date.now();if(now-proxyOpenModeCache.at<1000)return proxyOpenModeCache.value;try{proxyOpenModeCache={at:now,value:require('./serverConfig').readServerConfigEffective().virtus?.proxyEnabled===true}}catch{proxyOpenModeCache={at:now,value:false}}return proxyOpenModeCache.value}
 const OPEN_ACTIVATION_DELAY_MS = parseInt(process.env.OPEN_ACTIVATION_DELAY_MS || '1200', 10);
 const SUPERVISOR_SLOT_HOLD_MS = Math.max(5000, parseInt(process.env.SUPERVISOR_SLOT_HOLD_MS || '30000', 10) || 30000);
 const SUPERVISOR_OTHER_HOLD_MS = Math.max(5000, parseInt(process.env.SUPERVISOR_OTHER_HOLD_MS || '12000', 10) || 12000);
@@ -19613,6 +19622,7 @@ let _openAllWaitLogKey = '';
 async function openAllShouldWaitBeforeActivate(nextNome) {
   try {
     if (!isOpenAllSessionActive()) return { wait: false };
+    if(proxyOpeningEnabled())return {wait:false,reason:'proxy_openings_are_independent'};
     const skip = String(nextNome || '');
     const inflight = Object.keys(opening || {}).filter((n) => n && opening[n] && n !== skip);
     if (inflight.length) {
@@ -20114,6 +20124,7 @@ async function nurseTick() {
         for (const [n, c] of controllers.entries()) {
           try {
             if (!c || !c.virtus) { skipped.noVirtus++; continue; }
+            if(require('./virtusProxyOpenQueue').readyMayRunDuringBatch({proxy:!!c.browser?.__ctVirtusProxy,kind,owner}))continue;
             if (c.humanControl === true) { skipped.human++; continue; }
             if (c.configurando === true) { skipped.configurando++; continue; }
             if (robeMeta[n] && robeMeta[n].emExecucao === true) { skipped.robeExec++; continue; }
@@ -20346,6 +20357,8 @@ async function nurseTick() {
     if (appealReadyPick) {
       if (robeMeta[appealReadyPick]?.activationHeldUntil && robeMeta[appealReadyPick].activationHeldUntil > Date.now()) {
         // Não deve acontecer (guard), mas não travar: segue o loop normal.
+      } else if(proxyOpeningEnabled()){
+        if(proxyOpenReadiness.check().ready)proxyOpeningCoordinator.start(appealReadyPick,()=>activateOnce(appealReadyPick,'nurse_appeal_ready'));
       } else if (slotsInUse < MAX_OPEN_CONCURRENCY) {
         slotsInUse++;
         try {
@@ -20387,6 +20400,7 @@ async function nurseTick() {
       const ctrl = ctrlExisting || null;
       const proxySession=ctrl?.browser?.__ctVirtusProxy;
       if(proxySession){
+        if(isProfileOpening(nome)||proxyOpeningCoordinator.running.has(nome))continue;
         if(want.active===true&&!ctrl.virtus&&!ctrl._virtusStarting&&!ctrl.configurando&&!ctrl.humanControl&&!want.humanHold&&!isRobeBusy(nome)){
           ctrl._virtusStarting=true;
           const initialize=()=>startVirtusByEngine(ctrl.browser,nome,autoMode,{epoch:ctrl.virtusEpoch||0});
@@ -20824,10 +20838,12 @@ async function nurseTick() {
           }
         }
 
-        if (slotsInUse >= MAX_OPEN_CONCURRENCY) {
-          continue;
-        }
-        slotsInUse++;
+        const proxyOpenMode=proxyOpeningEnabled();
+        if(proxyOpenMode&&!proxyOpenReadiness.check().ready){robeMeta[nome]=robeMeta[nome]||{};robeMeta[nome].whyNotOpen=proxyOpenReadiness.snapshot().reason;continue;}
+        if(proxyOpenMode?!proxyOpeningCoordinator.canStart(nome):slotsInUse>=MAX_OPEN_CONCURRENCY)continue;
+        const openAccount=async()=>{
+          let openingResult=null;
+          if(!proxyOpenMode)slotsInUse++;
         try {
           let _flags = null;
           try { _flags = await readAccountFlags(nome).catch(()=>null); } catch {}
@@ -20859,6 +20875,7 @@ async function nurseTick() {
               try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_attempt', nome: String(nome||''), source: 'nurse_auto', oaActive: false, lkActive: false, lkKind: null }); } catch {}
               r = await activateOnce(nome, 'nurse_auto');
             }
+            openingResult=r||{ok:false,error:'activate_no_result'};
             if (!r || !r.ok) {
               const err = (r && r.error) || '';
               try { provisionAudit.append({ ts: Date.now(), event: 'nurse_open_denied', nome: String(nome||''), error: String(err || '').slice(0, 160) }); } catch {}
@@ -20917,11 +20934,14 @@ async function nurseTick() {
               } catch {}
               logger.info('[NURSE] activateOnce ok', { nome });
             }
-          } catch { }
+          } catch(error) {openingResult={ok:false,error:String(error.message||error)};}
         } finally {
-          slotsInUse--;
+          if(!proxyOpenMode)slotsInUse--;
         }
-        await new Promise(r => setTimeout(r, OPEN_ACTIVATION_DELAY_MS));
+          return openingResult||{ok:false,error:'open_task_incomplete'};
+        };
+        if(proxyOpenMode){proxyOpeningCoordinator.start(nome,openAccount);}
+        else {await openAccount();await new Promise(r=>setTimeout(r,OPEN_ACTIVATION_DELAY_MS));}
         continue;
       }
 

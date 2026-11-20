@@ -17,7 +17,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
  const rail=rails.createDirectSwitch({requireProxy:true});let port;
  try{
   port=await rail.listen();
-  const turn=new VirtusTurn({rail,onState,beforeDisconnect:async()=>{if(browser)for(const page of await browser.pages())try{await page.setOfflineMode(true)}catch{}},acquire:({intent,signal})=>cp2.begin({nome,purpose:'virtus',intent,hotUntil:Math.floor(activity.snapshot().hotUntil/1000),signal,isReady:async()=>true}),prove:async()=>{
+  const turn=new VirtusTurn({rail,onState,beforeDisconnect:async()=>{if(browser)for(const page of await browser.pages())try{await page.setOfflineMode(true)}catch{}},acquire:({intent,signal})=>cp2.begin({nome,purpose:'virtus',intent,hotUntil:Math.floor(activity.snapshot().hotUntil/1000),signal,isReady:dependencies.isReady||(()=>accountStillWanted(nome))}),prove:async()=>{
    const raw=await rails.proveThroughRail(port);let payload;try{payload=JSON.parse(raw)}catch{throw Error('virtus_proxy_invalid_proof')}
    const proof=rails.readExit(payload);if(!proof.ip)throw Error('virtus_proxy_missing_ip');return proof;
   }});
@@ -137,6 +137,9 @@ async function create({nome,onState=()=>{},dependencies={}}){
   };
   return api;
  }catch(error){await rail.close();throw error}
+}
+function accountStillWanted(nome){
+ try{const fs=require('node:fs'),path=require('node:path');const desired=JSON.parse(fs.readFileSync(path.join(__dirname,'../dados/desired.json'),'utf8'));return desired.perfis?.[nome]?.active===true}catch{return false}
 }
 function readPilot(){
  const fs=require('node:fs'),path=require('node:path');
