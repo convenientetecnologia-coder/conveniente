@@ -2662,15 +2662,16 @@ function __edgeEmitVmDeliveryError(threadKey, errorCode) {
   } catch {}
 }
 
-function __edgeUsesProxyDelivery(account) {
+function __edgeUsesProxyDelivery(account=null) {
   if(require('./scripts/serverConfig').readServerConfigEffective()?.virtus?.proxyEnabled===true)return true;
   const pilot=__readJsonFileSafe(path.join(__dirname,'dados','carrier_v2_private','virtus_pilot.json'));
-  return pilot?.enabled===true&&pilot.accountId===account;
+  return pilot?.enabled===true&&(account===null||pilot.accountId===account);
 }
 
 // Recovery reads one durable logical job; it never appends another transport copy.
 let __edgeDeliveryMaintenanceAt=0;
 function __edgeRecoverDurableReplies() {
+  if(!__edgeUsesProxyDelivery())return;
   const ledger=require('./scripts/virtusDeliveryLedger');
   if(Date.now()-__edgeDeliveryMaintenanceAt>=3600000){ledger.maintain?.();__edgeDeliveryMaintenanceAt=Date.now();}
   const eligible=rec=>!!rec.nome&&__edgeUsesProxyDelivery(rec.nome)&&__edgeIsProfileRuntimeReadySync(rec.nome)&&!__edgeIsProfileHumanHeldSync(rec.nome)&&!__edgeDeltaReplyAccountInFlight.has(rec.nome);
@@ -2775,7 +2776,7 @@ async function __edgeDispatchDeltaReplySend(rec, cmdId) {
     const retryError = durableProxy&&r?.ok===true&&durableReceipt?.state!=='confirmed'?'virtus_delivery_server_evidence_missing':(r && r.error)
       ? String(r.error)
       : (workerStatus ? workerStatus : 'ipc_not_ok');
-    if(workerStatus==='reconciliation_required'||require('./scripts/virtusDeliveryLedger').isUncertain(retryError)){
+    if(durableProxy&&(workerStatus==='reconciliation_required'||require('./scripts/virtusDeliveryLedger').isUncertain(retryError))){
       require('./scripts/virtusDeliveryLedger').defer(rec,retryError);
       __forensicEdgeEmit({account_login:accountNome,thread_key:threadKey,flow_stage:'delivery_reconciliation_required',details:{cmd_id:cmdId,error:retryError}});
       return;
@@ -3068,7 +3069,7 @@ async function __edgeRunDeltaReplyPump() {
         }
 
         const accountNome = String(rec.nome || '').trim();
-        const deliveryRecord=accountNome&&(rec.client_message_id||rec.id)?require('./scripts/virtusDeliveryLedger').read(accountNome,String(rec.client_message_id||rec.id)):null;
+        const deliveryRecord=accountNome&&__edgeUsesProxyDelivery(accountNome)&&(rec.client_message_id||rec.id)?require('./scripts/virtusDeliveryLedger').read(accountNome,String(rec.client_message_id||rec.id)):null;
         if(deliveryRecord?.state==='reconciliation_required'){
           require('./scripts/virtusDeliveryLedger').defer(rec,'virtus_delivery_reconciliation_required');
           __edgeWriteDeltaReplyCursorSync(nextOffset);

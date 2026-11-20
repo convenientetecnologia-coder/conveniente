@@ -334,9 +334,26 @@ function Get-ConvenienteNpmCmd {
 }
 
 function Test-ConvenienteNpmModulesOk {
-    $repoRoot = Get-ConvenienteRepoRoot
-    $express = Join-Path $repoRoot 'node_modules\express\package.json'
-    return (Test-Path -LiteralPath $express)
+    try {
+        $repoRoot = Get-ConvenienteRepoRoot
+        $express = Join-Path $repoRoot 'node_modules\express\package.json'
+        if (-not (Test-Path -LiteralPath $express)) { return $false }
+        $required = Get-Content -LiteralPath (Join-Path $repoRoot 'package.json') -Raw | ConvertFrom-Json
+        $sqliteDependency = $required.dependencies.PSObject.Properties['better-sqlite3']
+        if ($null -eq $sqliteDependency) { return $true }
+        $sqliteRoot = Join-Path $repoRoot 'node_modules\better-sqlite3'
+        $sqlitePackage = Join-Path $sqliteRoot 'package.json'
+        if (-not (Test-Path -LiteralPath $sqlitePackage)) { return $false }
+        $installed = Get-Content -LiteralPath $sqlitePackage -Raw | ConvertFrom-Json
+        if ([string]$installed.version -ne [string]$sqliteDependency.Value) { return $false }
+        $manifest = Get-ConvenienteNodeRuntimeManifest
+        if (-not (Test-Path -LiteralPath $manifest.NodeExe)) { return $false }
+        # An anonymous database probes the native ABI without quoting strings through Windows PowerShell.
+        & $manifest.NodeExe -e 'const DB=require(process.argv[1]);const db=new DB();db.close()' $sqliteRoot 2>$null | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
 }
 
 function Ensure-ConvenienteNpmModules {
@@ -364,7 +381,7 @@ function Ensure-ConvenienteNpmModules {
         }
 
         Write-Host ''
-        Write-Host 'Bibliotecas npm ausentes (express). Instalando com o Node pinado...'
+        Write-Host 'Bibliotecas npm ausentes ou incompativeis. Instalando com o Node pinado...'
         Write-ConvenienteNodeRuntimeEvent -Event 'npm_install_start' -Data @{
             RepoRoot = $repoRoot
             NpmCmd   = [string]$rt.NpmCmd
@@ -390,9 +407,19 @@ function Ensure-ConvenienteNpmModules {
             return $out
         }
         if (-not (Test-ConvenienteNpmModulesOk)) {
+            # npm install may keep a package built for another Node ABI unchanged.
+            Push-Location $repoRoot
+            try {
+                & $rt.NpmCmd rebuild better-sqlite3 --no-fund --no-audit
+                $code = [int]$LASTEXITCODE
+            } finally {
+                Pop-Location
+            }
+        }
+        if ($code -ne 0 -or -not (Test-ConvenienteNpmModulesOk)) {
             $out = [ordered]@{
                 Ok       = $false
-                Error    = 'npm_install_missing_express'
+                Error    = 'npm_modules_probe_failed'
                 RepoRoot = $repoRoot
             }
             Write-ConvenienteNodeRuntimeEvent -Event 'npm_modules_fail' -Data $out
