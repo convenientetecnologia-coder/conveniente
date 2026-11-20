@@ -88,6 +88,8 @@ module.exports = (app, workerClient, fileStore) => {
   const hasServerConfigFields = (payload) => {
     const p = (payload && typeof payload === 'object') ? payload : {};
     return !!(
+      (p.cadastro && typeof p.cadastro === 'object') ||
+      (p.virtus && typeof p.virtus === 'object') ||
       (p.capacity && typeof p.capacity === 'object') ||
       (p.robe && typeof p.robe === 'object') ||
       (p.memory && typeof p.memory === 'object') ||
