@@ -12385,7 +12385,7 @@ stopPruneLoop(nome);
 cleanupProfileTransientLocks(nome, 'disconnected');
 
 try { if(!plannedCadastroClose)registerFailure(nome, 'disconnected', 'external'); } catch {}
-try {
+if(!plannedCadastroClose)try {
   const d = readJsonFile(desiredPath, { perfis: {} });
   const isDesiredActive = d.perfis?.[nome]?.active === true;
   const isHold = d.perfis?.[nome]?.humanHold === true;

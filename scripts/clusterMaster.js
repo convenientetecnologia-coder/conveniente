@@ -1115,10 +1115,11 @@ async function createCluster() {
     for (let i = 0; i < children.length; i++) {
       const shardNames = Array.isArray(blocksArr[i]) ? blocksArr[i] : [];
       const prevNames = Array.from((children[i] && children[i].shard) ? children[i].shard : []);
-      children[i].shard = new Set(shardNames);
       if (shardKey(prevNames) === shardKey(shardNames)) continue;
       tasks.push(
-        sendTo(i, 'set-shard', { names: shardNames }, { timeoutMs: 20000 }).then(() => {
+        sendTo(i, 'set-shard', { names: shardNames }, { timeoutMs: 20000 }).then((ack) => {
+          if (!ack || ack.ok !== true) throw new Error('shard_assignment_unconfirmed:' + String(ack && ack.error || 'missing_ack'));
+          children[i].shard = new Set(shardNames);
           try {
             cellRegistry.upsertCell({
               idx: i,
@@ -1133,6 +1134,17 @@ async function createCluster() {
     if (tasks.length) await Promise.all(tasks);
     for (const k of Object.keys(route)) delete route[k];
     routeRebuildFromBlocks(blocksArr);
+  }
+
+  async function sendWithShardRepair(idx, type, payload, opts) {
+    const result = await sendTo(idx, type, payload, opts);
+    // wrong_shard is returned before Chrome launch; never replay timeouts or business actions.
+    if (type !== 'activate' || result?.error !== 'wrong_shard') return result;
+    const names = Array.from(children[idx]?.shard || []);
+    if (!names.includes(payload.nome)) return { ok: false, error: 'profile_not_assigned' };
+    const ack = await sendTo(idx, 'set-shard', { names }, { timeoutMs: 20000 });
+    if (ack?.ok !== true) return { ok: false, error: 'shard_assignment_unconfirmed:' + String(ack?.error || 'missing_ack') };
+    return sendTo(idx, type, payload, opts);
   }
 
   async function rebalanceOnce(reason = 'watcher') {
@@ -1820,7 +1832,7 @@ async function createCluster() {
           return liveRes;
         }
       }
-      return sendTo(i, type, payload, opts);
+      return sendWithShardRepair(i, type, payload, opts);
     } catch (err) {
       if (String(err).startsWith('Error: profile_not_assigned_to_any_worker')) {
         return { ok: false, error: 'profile_not_assigned' };

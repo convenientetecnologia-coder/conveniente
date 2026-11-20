@@ -4,3 +4,21 @@ test('cadastro troca navegador Virtus por rota correta antes de configurar',asyn
 test('cadastro já aberto no modo certo não reinicia nem pede outra cadeira',async()=>{const f=fixture({mode:'cadastro'});assert.equal(await f.api.prepareCadastroBrowser('account','test'),f.current);assert.deepEqual(f.events,['healthy'])});
 test('não conseguir cadeira não vira cadastro pronto ou rota direta',async()=>{const f=fixture({openOk:false});await assert.rejects(f.api.prepareCadastroBrowser('account','test'),/chair_unavailable/)});
 test('cadastro falho fecha sessão e evita reabertura automática enquanto aguarda nova ação',async()=>{const f=fixture({mode:'cadastro'});await f.api.closeCadastroBrowser('account',f.current.browser);assert.deepEqual(f.events,['pending_inactive','proxy_close']);assert.equal(f.desired.perfis.account.active,false);assert.equal(f.desired.perfis.account.provisioningPending,true)});
+
+
+test('fechamento planejado do cadastro não arma kill guard; desconexão inesperada mantém proteção',async()=>{
+ const start=source.indexOf('function attachBrowserLifecycle('),end=source.indexOf('function isAccountProvisioningPending(',start),snippet=source.slice(start,end);
+ for(const planned of [true,false]){
+  const events=[];let disconnected;const browser={__ctCadastroClosing:planned,once:(_event,fn)=>{disconnected=fn},removeAllListeners(){}};
+  const ctrl={browser},controllers=new Map([['account',ctrl]]),robeMeta={account:{}};
+  const attach=vm.runInNewContext(snippet+';attachBrowserLifecycle',{controllers,robeMeta,chromeHeapFaxina:{elevateMaxListeners(){}},logger:{info(){},warn(){}},robeQueue:{skip(){}},tryReconnectAfterDisconnected:async()=>({ok:false}),provisionAudit:{append(){}},getAvailableMB:()=>8192,_stopVirtusRunnerMaybePromise:async()=>{},freezeCooldownIfNotWorking(){},__deltaDetachCdpSession:async()=>{},healthState:new Map(),profileFailures:new Map(),clearOxyFaxinaHold(){},reportAction:async()=>{},stopPruneLoop(){},cleanupProfileTransientLocks(){},registerFailure:()=>events.push('failure'),readJsonFile:()=>({perfis:{account:{active:true}}}),desiredPath:'fixture',isFrozenNow:()=>false,getControlledReopenDelayMs:()=>1000,issues:{append:async()=>{}},setKillGuard:()=>events.push('kill_guard'),DISCONNECTED_KILL_GUARD_MS:60000,snapshotStatusAndWrite:async()=>{},Date});
+  attach('account',browser);await disconnected();assert.equal(controllers.has('account'),false);assert.deepEqual(events,planned?[]:['failure','kill_guard']);assert.equal(!!robeMeta.account.reopenAt,!planned);
+ }
+});
+
+
+test('bloqueio automático entra em humano offline sem solicitar cadeira manual',async()=>{
+ const start=source.indexOf('async function enterHumanMode('),end=source.indexOf('// ===== Captcha flow',start),events=[],ctrl={browser:{__ctVirtusProxy:{finishBoot(){events.push('finish_boot')},leaveHuman:async()=>events.push('release_human'),enterHuman:async()=>events.push('acquire_human')}},trabalhando:true},desired={perfis:{account:{active:true,virtus:'on'}}};
+ const enter=vm.runInNewContext(source.slice(start,end)+';enterHumanMode',{releaseIfOwnProfile:async()=>false,robeQueue:{skip(){}},isLiveBrowserCtrl:()=>true,readDesiredHumanHoldFlag:()=>false,fileStore:{withDesiredFileLockUpdate:async fn=>fn(desired)},syncDeltaHumanHoldBrowserGuard:async()=>{},stopVirtus:async()=>events.push('stop_virtus'),browserHelper:{invocarHumano:async()=>events.push('overlay'),enableGlassForHumanBrowser:async()=>{}},shouldSkipHumanInvokeNavigation:()=>true,ensureHumanOverlay:async()=>{},provisionAudit:{append(){}},snapshotStatusAndWrite:async()=>{},String,Date});
+ await enter('account',ctrl,{reason:'captcha_checkpoint'});assert.equal(events.includes('acquire_human'),false);assert.deepEqual(events.slice(0,2),['finish_boot','release_human']);assert.equal(desired.perfis.account.humanHold,true);assert.equal(desired.perfis.account.virtus,'off');assert.equal(ctrl.trabalhando,false);
+});
