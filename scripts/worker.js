@@ -29616,7 +29616,7 @@ async function __deltaAttachCdpEar(nome, page) {
           continue;
         }
 
-        try{ctrl.browser?.__ctVirtusProxy?.noteIncoming(Number(tsForWindow))}catch{}
+        try{ctrl.browser?.__ctVirtusProxy?.noteIncoming(Number(tsForWindow),threadKey)}catch{}
         if (fromWaitingRead) {
           try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey, { ensureHandsCompleted: true }); } catch {}
         }

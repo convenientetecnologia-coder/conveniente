@@ -26,7 +26,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
   const ready=new Promise((resolve,reject)=>{bootReady=resolve;bootReject=reject});
   const boot=()=>{const task=turn.run('warm',async()=>{bootReady();await bootGate});task.catch(bootReject);return ready};
   let browser=null,timer=null,stopped=false,lastNetworkAt=0,lastSyncNetworkAt=0,connectedAt=Date.now(),observerBusy=false,observerOptions=null,observerLastTickAt=0,lastObserveAttemptAt=0,observerSkipReason=null,observerVersion=0,startupFinished=false,healthCheck=null,lastInbox=null,activeLease=null,expectedSend=null,outgoingEvidence=null,humanHeld=false,humanTimer=null,humanResolve=null,humanTask=null;
-  const activity=new Activity();const burst=[];let visitIntent=null,visitReplied=false;
+  const activity=new Activity();const inboundByThread=new Map();let lastReplyTiming=null;const burst=[];let visitIntent=null,visitReplied=false;
  const api={turn,proxyServer:'127.0.0.1:'+port,boot,
    attach(value){
     browser=value;browser.__ctVirtusProxy=api;
@@ -43,14 +43,17 @@ async function create({nome,onState=()=>{},dependencies={}}){
     browser.once('disconnected',()=>{api.close().catch(()=>{})});
    },
    finishBoot(){startupFinished=true;bootResolve()},
-   noteIncoming(at){activity.incoming(Number(at))},
+   noteIncoming(at,threadKey){
+    at=Number(at);activity.incoming(at);
+    if(threadKey&&Number.isFinite(at)&&at<=Date.now()+5000&&Date.now()-at<=3600000){const key=String(threadKey);const old=inboundByThread.get(key)||0;if(at>old){inboundByThread.delete(key);inboundByThread.set(key,at)}while(inboundByThread.size>256)inboundByThread.delete(inboundByThread.keys().next().value)}
+   },
    noteConversationComplete(){activity.complete()},
    noteNetwork(){lastNetworkAt=Date.now()},
    noteSyncNetwork(){lastSyncNetworkAt=Date.now()},
    visitNetwork(page){return {connectedAt,lastNetworkAt:lastSyncNetworkAt,pending:page?.__ctVirtusPendingInbox?.size||0}},
    setHealthCheck(fn){healthCheck=fn},
    noteInbox(result){lastInbox={...result,at:Date.now()};onState(api.snapshot())},
-   snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld,pilot:accountPilot,lastInbox,startupFinished,rotation:rotationPolicy,activity:activity.snapshot(),pendingBurst:burst.length,observer:{registered:!!observerOptions,lastTickAt:observerLastTickAt,skipReason:observerSkipReason,guard:observerOptions?.describeGuard?.()||null}}},
+   snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld,pilot:accountPilot,lastInbox,startupFinished,rotation:rotationPolicy,lastReplyTiming,activity:activity.snapshot(),pendingBurst:burst.length,observer:{registered:!!observerOptions,lastTickAt:observerLastTickAt,skipReason:observerSkipReason,guard:observerOptions?.describeGuard?.()||null}}},
    async enterHuman(){
     if(humanTask)return humanTask.ready;
     humanHeld=true;api.finishBoot();let readyResolve,readyReject;const ready=new Promise((r,j)=>{readyResolve=r;readyReject=j});
@@ -83,7 +86,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
    async beforeSend({threadKey,text}={}){
     if(!activeLease)throw Error('virtus_send_without_turn');
     if(!threadKey||!String(text||'').trim())throw Error('virtus_send_identity_missing');
-    expectedSend={threadKey:String(threadKey),text:String(text).replace(/\s+/g,' ').trim(),since:Date.now()};outgoingEvidence=null;
+    expectedSend={threadKey:String(threadKey),text:String(text).replace(/\s+/g,' ').trim(),since:Date.now(),inboundAt:inboundByThread.get(String(threadKey))||null};outgoingEvidence=null;
     await activeLease.possibleSideEffect();
    },
    recordOutgoing({threadKey,text,messageId,messageAt}={}){
@@ -97,7 +100,8 @@ async function create({nome,onState=()=>{},dependencies={}}){
     const until=Date.now()+(dependencies.confirmationTimeoutMs||45000);
     while(!outgoingEvidence&&Date.now()<until&&!stopped)await new Promise(r=>setTimeout(r,250));
     if(!outgoingEvidence)throw Error('virtus_send_server_ack_unconfirmed');
-    activeLease.confirm();visitReplied=true;activity.replied();expectedSend=null;return outgoingEvidence;
+    activeLease.confirm();visitReplied=true;activity.replied();
+    const now=Date.now();lastReplyTiming={confirmedAt:now,sendToConfirmationMs:now-expectedSend.since,customerToConfirmationMs:expectedSend.inboundAt&&now>=expectedSend.inboundAt?now-expectedSend.inboundAt:null};onState(api.snapshot());expectedSend=null;return outgoingEvidence;
    },
    stopObserver(version){if(version!==undefined&&version!==observerVersion)return;observerOptions=null;(dependencies.clearObserverInterval||clearInterval)(timer);timer=null},
    startObserver({canObserve=()=>true,prepareInbox=async()=>{},describeGuard=()=>null}={}){
