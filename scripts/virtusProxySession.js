@@ -28,6 +28,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
   let browser=null,timer=null,stopped=false,lastNetworkAt=0,lastSyncNetworkAt=0,connectedAt=Date.now(),observerBusy=false,observerOptions=null,observerLastTickAt=0,lastObserveAttemptAt=0,observerSkipReason=null,observerVersion=0,startupFinished=false,healthCheck=null,lastInbox=null,activeLease=null,expectedSend=null,outgoingEvidence=null,humanHeld=false,humanTimer=null,humanResolve=null,humanTask=null;
   const deliveryLedger=dependencies.deliveryLedger||require("./virtusDeliveryLedger");
   let closedBrowserTimer=null,recoveringClosedBrowser=false;
+  let lastDocumentNavigation=null,documentNavigations=0,plannedNavigationReason=null;
   const activity=new Activity();const inboundByThread=new Map();let lastReplyTiming=null;const burst=[];let visitIntent=null,visitReplied=false;
  const api={turn,proxyServer:'127.0.0.1:'+port,boot,
    attach(value){
@@ -42,7 +43,13 @@ async function create({nome,onState=()=>{},dependencies={}}){
      if(page.__ctVirtusProxyObserved)return;page.__ctVirtusProxyObserved=true;
      const pending=new Set();page.__ctVirtusPendingInbox=pending;
      const relevant=request=>{try{const u=new URL(request.url());return /(^|\.)facebook\.com$|(^|\.)messenger\.com$/.test(u.hostname)&&/\/api\/graphql|\/ajax\/mercury|\/messaging|\/graphql/.test(u.pathname)}catch{return false}};
-     page.on('request',request=>{if(relevant(request))pending.add(request)});
+     page.on('request',request=>{
+      if(relevant(request))pending.add(request);
+      try{if(request.isNavigationRequest()&&request.frame()===page.mainFrame()){
+        lastDocumentNavigation={at:Date.now(),path:new URL(request.url()).pathname,reason:plannedNavigationReason||'browser_document_navigation'};
+        documentNavigations++;onState(api.snapshot());
+      }}catch{}
+     });
      page.on('requestfinished',request=>pending.delete(request));page.on('requestfailed',request=>pending.delete(request));
      page.on('response',res=>{try{const u=new URL(res.url());if(/(^|\.)facebook\.com$|(^|\.)messenger\.com$/.test(u.hostname)&&res.status()>=200&&res.status()<400&&!res.fromCache()&&!res.fromServiceWorker()){api.noteNetwork();if(relevant(res.request()))api.noteSyncNetwork()}}catch{}});
     };
@@ -61,7 +68,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
    visitNetwork(page){return {connectedAt,lastNetworkAt:lastSyncNetworkAt,pending:page?.__ctVirtusPendingInbox?.size||0}},
    setHealthCheck(fn){healthCheck=fn},
    noteInbox(result){lastInbox={...result,at:Date.now()};onState(api.snapshot())},
-   snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld,pilot:accountPilot,lastInbox,startupFinished,rotation:rotationPolicy,lastReplyTiming,activity:activity.snapshot(),pendingBurst:burst.length,observer:{registered:!!observerOptions,lastTickAt:observerLastTickAt,skipReason:observerSkipReason,guard:observerOptions?.describeGuard?.()||null}}},
+   snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld,pilot:accountPilot,lastInbox,startupFinished,documentNavigations,lastDocumentNavigation,rotation:rotationPolicy,lastReplyTiming,activity:activity.snapshot(),pendingBurst:burst.length,observer:{registered:!!observerOptions,lastTickAt:observerLastTickAt,skipReason:observerSkipReason,guard:observerOptions?.describeGuard?.()||null}}},
    async enterHuman(){
     if(humanTask)return humanTask.ready;
     humanHeld=true;api.finishBoot();let readyResolve,readyReject;const ready=new Promise((r,j)=>{readyResolve=r;readyReject=j});
@@ -106,7 +113,9 @@ async function create({nome,onState=()=>{},dependencies={}}){
     if(!activeLease||activeLease.snapshot().healthy===false||humanHeld)throw Error('virtus_recovery_without_healthy_turn');
     if(!/^\d{12,20}$/.test(String(threadKey)))throw Error('virtus_recovery_thread_invalid');
     const started=Date.now();
-    await page.goto('https://www.facebook.com/messages/t/'+threadKey+'/',{waitUntil:'domcontentloaded',timeout:60000});
+    plannedNavigationReason='recover_previously_attempted_delivery';
+    try{await page.goto('https://www.facebook.com/messages/t/'+threadKey+'/',{waitUntil:'domcontentloaded',timeout:60000})}
+    finally{plannedNavigationReason=null}
     const until=Date.now()+(dependencies.recoverySyncTimeoutMs??30000);
     while(Date.now()<until&&!stopped) {
       if(activeLease.snapshot().healthy===false)throw Error('virtus_recovery_transport_lost');
