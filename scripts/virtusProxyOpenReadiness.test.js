@@ -2,3 +2,9 @@
 test('cem contas aguardando compartilham uma verificação sem travar monitor',async()=>{let calls=0,release;const gate=new Promise(r=>release=r),r=new ProxyOpenReadiness({probe:async()=>{calls++;await gate;return {ready:true,capacity:6}}});for(let n=0;n<100;n++)assert.equal(r.check().ready,false);await new Promise(setImmediate);assert.equal(calls,1);release();await r.settled();assert.equal(r.check().ready,true);assert.equal(calls,1)});
 test('CT antigo aparece como incompatibilidade e é reavaliado após carregar versão nova',async()=>{let now=1000,newVersion=false;const r=new ProxyOpenReadiness({clock:()=>now,recheckMs:100,probe:async()=>({ready:newVersion,reason:newVersion?null:'virtus_rotation_upgrade_required'})});r.check();await r.settled();assert.equal(r.snapshot().reason,'virtus_rotation_upgrade_required');newVersion=true;now+=101;r.check();await r.settled();assert.equal(r.snapshot().ready,true)});
 test('falha de rede não aprova abertura e não produz rejeição órfã',async()=>{const r=new ProxyOpenReadiness({probe:async()=>{throw Error('ct_unavailable')}});r.check();await r.settled();assert.equal(r.snapshot().ready,false);assert.equal(r.snapshot().reason,'ct_unavailable')});
+
+test('indisponibilidade prolongada continua reavaliando e recupera sem reiniciar worker',async()=>{
+ let now=1000,calls=0,healthy=false;const r=new ProxyOpenReadiness({clock:()=>now,recheckMs:100,probe:async()=>{calls++;if(!healthy)throw Error('carrier_unavailable');return {ready:true,capacity:6}}});
+ for(let cycle=0;cycle<100;cycle++){for(let account=0;account<150;account++)assert.equal(r.check().ready,false);await r.settled();assert.equal(r.snapshot().reason,'carrier_unavailable');assert.equal(calls,cycle+1);now+=101;}
+ healthy=true;r.check();await r.settled();assert.equal(r.snapshot().ready,true);assert.equal(calls,101);assert.equal(r.snapshot().capacity,6);
+});
