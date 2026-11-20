@@ -23,3 +23,12 @@ test('oferta expirada antes de ativar é reconciliada e refeita sem erro de cont
  const f=fixture();let attempt=0;class Client extends f.Client{async acquire(request){if(++attempt===1)throw Error('offer_not_ready');return super.acquire(request)}}
  try{const h=await begin({nome:'fixture',purpose:'renew',...f,Client});assert.equal(attempt,2);assert.ok(f.events.includes('reconcile'));await h.close();assert.equal(f.events.includes('possible'),false)}finally{fs.rmSync(f.root,{recursive:true,force:true})}
 });
+
+function pendingJournal(f,patch={}){const crypto=require('node:crypto'),row={version:1,nome:'fixture',type:'renew',operationId:crypto.randomUUID(),edgeGeneration:crypto.randomUUID(),phase:'queued',sent:false,result:'not_started',at:Date.now(),...patch};const file=path.join(f.root,crypto.createHash('sha256').update('fixture\0renew').digest('hex')+'.json');fs.writeFileSync(file,JSON.stringify(row));return {file,row}}
+test('pedido nunca recebido durante indisponibilidade retoma mesmo ID sem repetir negócio',async()=>{
+ const f=fixture(),prior=pendingJournal(f);let id;class Client extends f.Client{async request(){throw Error('operation_not_found')}async acquire(request){id=request.operationId;return super.acquire(request)}}
+ try{const h=await begin({nome:'fixture',purpose:'renew',...f,Client});assert.equal(id,prior.row.operationId);assert.equal(h.operationId,prior.row.operationId);assert.equal(JSON.parse(fs.readFileSync(prior.file)).edgeGeneration,prior.row.edgeGeneration);assert.equal(f.events.includes('possible'),false);await h.close()}finally{fs.rmSync(f.root,{recursive:true,force:true})}
+});
+test('ausência no CT não autoriza refazer operação previamente ativada ou com lease',async()=>{
+ for(const patch of [{phase:'active'},{lease:{leaseId:'previous'}},{sent:true,result:'unknown'}]){const f=fixture();pendingJournal(f,patch);class Client extends f.Client{async request(){throw Error('operation_not_found')}}try{await assert.rejects(begin({nome:'fixture',purpose:'renew',...f,Client}),/operation_not_found|unknown_requires_review/);assert.equal(f.events.includes('acquire'),false)}finally{fs.rmSync(f.root,{recursive:true,force:true})}}
+});

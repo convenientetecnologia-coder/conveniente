@@ -17,22 +17,29 @@ async function beginOnce({nome,purpose,intent='observe',hotUntil=0,signal,isRead
   if(type==='virtus'){const probe=new Client(config);const cap=await probe.capabilities();if(cap.virtusTurns!==true)throw Error('virtus_executor_upgrade_required');if(cap.rotation?.version!==1)throw Error('virtus_rotation_upgrade_required');}
   const old=fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):null;
   if(old?.sent&&old.result!=='confirmed')throw Error('cp2_unknown_requires_review:'+old.operationId);
+  let resumeUnaccepted=false;
   if(old&&old.phase!=='closed'){
    const previous=new Client({...config,edgeGeneration:old.edgeGeneration});
-   const status=await previous.request('/'+old.operationId);
-   if(!['released','canceled','expired','unknown','failed'].includes(status.state)){
+   let status;
+   try{status=await previous.request('/'+old.operationId)}catch(error){
+    // Admission may never have reached the authority during maintenance.
+    // Reuse the same ID and edge generation so a delayed enqueue is idempotent.
+    if(error.message!=='operation_not_found'||old.phase!=='queued'||old.sent!==false||old.result!=='not_started'||old.lease)throw error;
+    resumeUnaccepted=true;
+   }
+   if(status&&!['released','canceled','expired','unknown','failed'].includes(status.state)){
     const result=await previous.controlRequest('/'+old.operationId+(status.state==='queued'?'/cancel-queued':'/cancel'),status.state==='queued'?{expectedState:'queued'}:{leaseId:status.leaseId,leaseGeneration:status.leaseGeneration,carrierGeneration:status.carrierGeneration,businessResult:old.result==='confirmed'?'confirmed':'not_started'});
     if(!['released','canceled','expired'].includes(result.state))throw Error('cp2_previous_operation_not_closed');
    }
    // Preserve every prior journal before starting another operation.
   }
-  if(old){
+  if(old&&!resumeUnaccepted){
     if(type==='virtus'&&old.phase==='closed'&&(!old.sent||old.result==='confirmed')){
       const archive=file+'.completed.json';let history;try{history=JSON.parse(fs.readFileSync(archive,'utf8'))}catch{history={count:0,last:[]}}
       write(archive,{count:(history.count||0)+1,last:[...(history.last||[]),{operationId:old.operationId,at:old.at,sent:old.sent,result:old.result}].slice(-32)});
     }else{const archive=file+'.'+old.operationId+'.history';if(!fs.existsSync(archive))fs.copyFileSync(file,archive,fs.constants.COPYFILE_EXCL);else if(!fs.readFileSync(file).equals(fs.readFileSync(archive)))throw Error('cp2_history_conflict')}
   }
-  row={version:1,nome,type,...(type==='virtus'?{intent,operationSequence:(old?.operationSequence||0)+1}:{}),operationId:crypto.randomUUID(),edgeGeneration:crypto.randomUUID(),phase:'queued',sent:false,result:'not_started',at:Date.now()};persist();client=new Client({...config,edgeGeneration:row.edgeGeneration});
+  row=resumeUnaccepted?old:{version:1,nome,type,...(type==='virtus'?{intent,operationSequence:(old?.operationSequence||0)+1}:{}),operationId:crypto.randomUUID(),edgeGeneration:crypto.randomUUID(),phase:'queued',sent:false,result:'not_started',at:Date.now()};persist();client=new Client({...config,edgeGeneration:row.edgeGeneration});
   const started=Date.now();
   const acquire=resume=>client.acquire({operationId:row.operationId,accountId:nome,type,...(type==='virtus'?{intent,operationSequence:row.operationSequence,serverAccountCount:rotationAccountCount(nome),hotUntil}:{}),eligiblePhoneIds:config.eligiblePhoneIds,signal,isReady:async()=>{await resume();return isReady()},onWait:status=>{row.phase='queued';persist();waiting.set(nome,{type,intent,operationId:row.operationId,since:started,state:status.state});onWait(status)}});
   try{op=type==='virtus'?await acquire(async()=>{}):await require('../robeQueue').withoutActiveSlot(acquire)}finally{if(type!=='virtus')clock.addWait(Date.now()-started);waiting.delete(nome)}
