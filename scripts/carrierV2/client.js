@@ -22,8 +22,8 @@ class OperationClient {
     if(!response.ok||data.ok!==true)throw Error(data.error||'cp2_capabilities_unavailable');return data;
   }
   lease(row){return {leaseId:row.leaseId,leaseGeneration:row.leaseGeneration,carrierGeneration:row.carrierGeneration}}
-  async acquire({operationId=crypto.randomUUID(),accountId,type,intent,operationSequence,eligiblePhoneIds,signal,onWait=()=>{},isReady=async()=>true}){
-    const request={operationId,accountId,type,eligiblePhoneIds,...(type==='virtus'?{intent:intent||'observe',...(operationSequence===undefined?{}:{operationSequence})}:{})};let status;
+  async acquire({operationId=crypto.randomUUID(),accountId,type,intent,operationSequence,serverAccountCount,hotUntil,eligiblePhoneIds,signal,onWait=()=>{},isReady=async()=>true}){
+    const request={operationId,accountId,type,eligiblePhoneIds,...(type==='virtus'?{intent:intent||'observe',...(operationSequence===undefined?{}:{operationSequence}),...(serverAccountCount===undefined?{}:{serverAccountCount}),...(hotUntil===undefined?{}:{hotUntil})}:{})};let status;
     // O chamador conserva operationId antes deste método. O cancelamento não
     // presume que um timeout de enqueue significa que o pedido não foi salvo.
     try{

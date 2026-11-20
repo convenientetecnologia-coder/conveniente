@@ -11,13 +11,13 @@ async function create({nome,onState=()=>{},dependencies={}}){
  const cp2=dependencies.cp2||require('./carrierV2/accountOperation');
  await cp2.ensureConfig();
  const Client=dependencies.Client||require('./carrierV2/client').OperationClient;
- const available=await new Client(cp2.readConfig()).capabilities();
+ const available=await new Client(cp2.readConfig()).capabilities();let rotationPolicy=available.rotation||null;
  if(available.virtusTurns!==true)throw Error('virtus_proxy_transport_not_ready');
  const rails=dependencies.rails||require('./robeRail');
  const rail=rails.createDirectSwitch({requireProxy:true});let port;
  try{
   port=await rail.listen();
-  const turn=new VirtusTurn({rail,onState,beforeDisconnect:async()=>{if(browser)for(const page of await browser.pages())try{await page.setOfflineMode(true)}catch{}},acquire:({intent,signal})=>cp2.begin({nome,purpose:'virtus',intent,signal,isReady:async()=>true}),prove:async()=>{
+  const turn=new VirtusTurn({rail,onState,beforeDisconnect:async()=>{if(browser)for(const page of await browser.pages())try{await page.setOfflineMode(true)}catch{}},acquire:({intent,signal})=>cp2.begin({nome,purpose:'virtus',intent,hotUntil:Math.floor(activity.snapshot().hotUntil/1000),signal,isReady:async()=>true}),prove:async()=>{
    const raw=await rails.proveThroughRail(port);let payload;try{payload=JSON.parse(raw)}catch{throw Error('virtus_proxy_invalid_proof')}
    const proof=rails.readExit(payload);if(!proof.ip)throw Error('virtus_proxy_missing_ip');return proof;
   }});
@@ -50,7 +50,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
    visitNetwork(page){return {connectedAt,lastNetworkAt:lastSyncNetworkAt,pending:page?.__ctVirtusPendingInbox?.size||0}},
    setHealthCheck(fn){healthCheck=fn},
    noteInbox(result){lastInbox={...result,at:Date.now()};onState(api.snapshot())},
-   snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld,pilot:accountPilot,lastInbox,startupFinished,activity:activity.snapshot(),pendingBurst:burst.length,observer:{registered:!!observerOptions,lastTickAt:observerLastTickAt,skipReason:observerSkipReason,guard:observerOptions?.describeGuard?.()||null}}},
+   snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld,pilot:accountPilot,lastInbox,startupFinished,rotation:rotationPolicy,activity:activity.snapshot(),pendingBurst:burst.length,observer:{registered:!!observerOptions,lastTickAt:observerLastTickAt,skipReason:observerSkipReason,guard:observerOptions?.describeGuard?.()||null}}},
    async enterHuman(){
     if(humanTask)return humanTask.ready;
     humanHeld=true;api.finishBoot();let readyResolve,readyReject;const ready=new Promise((r,j)=>{readyResolve=r;readyReject=j});
@@ -63,7 +63,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
    async run(intent,action){
     if(intent==='reply'&&activeLease&&['observe','engaged'].includes(visitIntent)&&!humanHeld&&!visitReplied&&burst.length<1){return new Promise((resolve,reject)=>burst.push({action,resolve,reject}))}
     return turn.run(intent,async lease=>{
-      activeLease=lease;visitIntent=intent;visitReplied=false;
+      activeLease=lease;rotationPolicy=lease.snapshot().rotation||rotationPolicy;visitIntent=intent;visitReplied=false;
       try{
         const reconnectAt=Date.now();connectedAt=reconnectAt;
         const pages=await browser.pages();
@@ -108,7 +108,8 @@ async function create({nome,onState=()=>{},dependencies={}}){
       observerSkipReason=stopped||turn.closed?'closed':humanHeld?'human':observerBusy?'busy':!browser?.isConnected()?'browser_disconnected':!options?'unregistered':!options.canObserve()?'runtime_guard':null;
       if(observerSkipReason==='closed'){api.stopObserver();if(!stopped&&!humanHeld&&browser?.isConnected()){setTimeout(()=>browser.close().catch(()=>{}),0)}return}
       if(observerSkipReason)return;
-      const revisitMs=dependencies.revisitMs??(activity.snapshot().engaged?15000:60000);
+      const target=activity.snapshot().engaged?rotationPolicy?.hotIntervalMs:rotationPolicy?.coldIntervalMs;
+      const revisitMs=dependencies.revisitMs??Math.max(15000,Math.min(1800000,Number(target)||(activity.snapshot().engaged?15000:60000)));
       if(lastObserveAttemptAt&&Date.now()-lastObserveAttemptAt<revisitMs){observerSkipReason='revisit_interval';return}
       lastObserveAttemptAt=Date.now();observerBusy=true;
       try{await api.run(activity.snapshot().engaged?'engaged':'observe',async()=>{

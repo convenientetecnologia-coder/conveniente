@@ -9,12 +9,12 @@ function write(file,row){const tmp=file+'.'+process.pid+'.tmp';let fd;try{fd=fs.
 const locks=new Set();
 const waiting=new Map();
 function lock(file){const f=file+'.lock';if(locks.has(f))throw Error('cp2_account_operation_busy');for(let n=0;n<2;n++){try{const fd=fs.openSync(f,'wx',0o600);fs.writeFileSync(fd,JSON.stringify({pid:process.pid}));fs.fsyncSync(fd);fs.closeSync(fd);locks.add(f);return ()=>{locks.delete(f);fs.unlinkSync(f)}}catch(e){if(e.code!=='EEXIST')throw e;let old;try{old=JSON.parse(fs.readFileSync(f,'utf8'))}catch{throw Error('cp2_operation_lock_corrupt')}try{process.kill(old.pid,0)}catch(error){if(error.code==='ESRCH'){fs.unlinkSync(f);continue}throw Error('cp2_operation_owner_unreachable')}throw Error('cp2_account_operation_busy')}}throw Error('cp2_account_operation_busy')}
-async function beginOnce({nome,purpose,intent='observe',signal,isReady=async()=>true,onWait=()=>{},config=readConfig(),Client=OperationClient,root=ROOT}){
+async function beginOnce({nome,purpose,intent='observe',hotUntil=0,signal,isReady=async()=>true,onWait=()=>{},config=readConfig(),Client=OperationClient,root=ROOT}){
  if(!config)throw Error('cp2_not_enabled');const type={publish:'publish',renew:'renew',id:'identity',virtus:'virtus'}[purpose];if(!type)throw Error('cp2_flow_not_supported');
  fs.mkdirSync(root,{recursive:true});const journalType=type==='virtus'?'virtus_'+(intent==='reply'?'reply':intent==='human'?'human':'observe'):type;const file=root===ROOT?location(nome,journalType):path.join(root,crypto.createHash('sha256').update(nome+'\0'+journalType).digest('hex')+'.json'),unlock=lock(file);let row,client,op,closed=false;
  const persist=()=>write(file,row);
  try{
-  if(type==='virtus'){const probe=new Client(config);const cap=await probe.capabilities();if(cap.virtusTurns!==true)throw Error('virtus_executor_upgrade_required');}
+  if(type==='virtus'){const probe=new Client(config);const cap=await probe.capabilities();if(cap.virtusTurns!==true)throw Error('virtus_executor_upgrade_required');if(cap.rotation?.version!==1)throw Error('virtus_rotation_upgrade_required');}
   const old=fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):null;
   if(old?.sent&&old.result!=='confirmed')throw Error('cp2_unknown_requires_review:'+old.operationId);
   if(old&&old.phase!=='closed'){
@@ -34,7 +34,7 @@ async function beginOnce({nome,purpose,intent='observe',signal,isReady=async()=>
   }
   row={version:1,nome,type,...(type==='virtus'?{intent,operationSequence:(old?.operationSequence||0)+1}:{}),operationId:crypto.randomUUID(),edgeGeneration:crypto.randomUUID(),phase:'queued',sent:false,result:'not_started',at:Date.now()};persist();client=new Client({...config,edgeGeneration:row.edgeGeneration});
   const started=Date.now();
-  const acquire=resume=>client.acquire({operationId:row.operationId,accountId:nome,type,...(type==='virtus'?{intent,operationSequence:row.operationSequence}:{}),eligiblePhoneIds:config.eligiblePhoneIds,signal,isReady:async()=>{await resume();return isReady()},onWait:status=>{row.phase='queued';persist();waiting.set(nome,{type,intent,operationId:row.operationId,since:started,state:status.state});onWait(status)}});
+  const acquire=resume=>client.acquire({operationId:row.operationId,accountId:nome,type,...(type==='virtus'?{intent,operationSequence:row.operationSequence,serverAccountCount:rotationAccountCount(nome),hotUntil}:{}),eligiblePhoneIds:config.eligiblePhoneIds,signal,isReady:async()=>{await resume();return isReady()},onWait:status=>{row.phase='queued';persist();waiting.set(nome,{type,intent,operationId:row.operationId,since:started,state:status.state});onWait(status)}});
   try{op=type==='virtus'?await acquire(async()=>{}):await require('../robeQueue').withoutActiveSlot(acquire)}finally{if(type!=='virtus')clock.addWait(Date.now()-started);waiting.delete(nome)}
 
   row.phase='active';row.lease={leaseId:op.status.leaseId,leaseGeneration:op.status.leaseGeneration,carrierGeneration:op.status.carrierGeneration};persist();
@@ -44,7 +44,7 @@ async function beginOnce({nome,purpose,intent='observe',signal,isReady=async()=>
    async possibleSideEffect(){if(row.sent)return;if(op.heartbeatError||op.transportError)throw Error('cp2_transport_not_healthy');row.sent=true;row.result='unknown';persist();await client.possibleSideEffect(op)},
    confirm(){row.result='confirmed';op.result='confirmed';persist()},
    async close(){if(closed)return;closed=true;try{await client.release(op,row.result);row.phase='closed';persist()}finally{unlock()}},
-   snapshot(){return {operationId:row.operationId,type:row.type,phase:row.phase,sent:row.sent,result:row.result,healthy:!op.heartbeatError&&!op.transportError}}
+   snapshot(){return {operationId:row.operationId,type:row.type,phase:row.phase,sent:row.sent,result:row.result,healthy:!op.heartbeatError&&!op.transportError,rotation:op.status.rotation||null}}
   };
  }catch(error){if(op)try{await client.release(op,row?.result||'not_started')}catch{}unlock();throw error}
 }
@@ -59,5 +59,8 @@ async function begin(options){
    options.onWait?.({state:'waiting_authority',reason:'offer_expired_before_activation'});
   }
  }
+}
+function rotationAccountCount(nome){
+ try{const desired=JSON.parse(fs.readFileSync(path.join(__dirname,'../../dados/desired.json'),'utf8'));return Math.max(1,Object.values(desired.perfis||{}).filter(p=>p?.active===true&&!p?.humanHold).length)}catch{return 1}
 }
 module.exports={readConfig,ensureConfig,begin,getWaiting:nome=>waiting.get(nome)||null};
