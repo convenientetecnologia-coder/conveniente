@@ -22,7 +22,7 @@ test('Proxy Sim global aceita outras contas sem a antiga trava do piloto',async(
 
 test('novo runtime substitui callbacks do observador sem duplicar timer e stop antigo não cancela o novo',async()=>{
  const ticks=[];let clears=0,oldCalls=0,newCalls=0;
- const {session}=await operationalFixture({setObserverInterval:fn=>{ticks.push(fn);return {unref(){}}},clearObserverInterval:()=>clears++});
+ const {session}=await operationalFixture({revisitMs:0,setObserverInterval:fn=>{ticks.push(fn);return {unref(){}}},clearObserverInterval:()=>clears++});
  session.run=async(_intent,fn)=>fn();
  const old=session.startObserver({canObserve:()=>false,prepareInbox:async()=>{oldCalls++;throw Error('old')}});
  await ticks[0]();assert.equal(oldCalls,0);
@@ -32,3 +32,13 @@ test('novo runtime substitui callbacks do observador sem duplicar timer e stop a
  session.stopObserver(current);assert.equal(clears,1);
  session.startObserver({canObserve:()=>false});assert.equal(ticks.length,2);await session.close();
 });
+
+test('resposta pronta durante observação aproveita a cadeira ativa com confirmação correlacionada',async()=>{
+ const ticks=[];const {session,calls}=await operationalFixture({setObserverInterval:fn=>{ticks.push(fn);return {unref(){}}},clearObserverInterval:()=>{}});
+ let entered,release;const inside=new Promise(r=>entered=r),gate=new Promise(r=>release=r);
+ session.startObserver({prepareInbox:async()=>{entered();await gate;return {ok:true,state:'marketplace_ready'}}});
+ const tick=ticks[0]();await inside;
+ const reply=session.run('reply',async()=>{await session.beforeSend({threadKey:'burst',text:'Resposta pronta'});session.recordOutgoing({threadKey:'burst',text:'Resposta pronta',messageId:'server-burst',messageAt:Date.now()});await session.confirmSend();return {ok:true}});
+ release();assert.equal((await reply).ok,true);await tick;assert.equal(calls.filter(x=>x==='connect').length,1);assert.equal(calls.filter(x=>x==='confirmed').length,1);assert.equal(calls.filter(x=>x==='release').length,1);await session.close();
+});
+test('prazo humano devolve cadeira sem retomar automação por conta própria',async()=>{const {session,calls}=await operationalFixture({humanLeaseMs:20});await session.enterHuman();await new Promise(r=>setTimeout(r,50));assert.equal(session.snapshot().humanHeld,false);assert.equal(calls.filter(x=>x==='release').length,1);await session.close()});

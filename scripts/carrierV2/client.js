@@ -2,7 +2,7 @@
 const crypto=require('node:crypto'),net=require('node:net'),{once}=require('node:events'),WebSocket=require('ws');
 const {CarrierSession}=require('./session');
 class OperationClient {
-  constructor({baseUrl,serverId,token,edgeGeneration=crypto.randomUUID(),allowLoopbackTest=false,fetchImpl=fetch,requestTimeoutMs=10000,protocolTimeoutMs=10000}){
+  constructor({baseUrl,serverId,token,edgeGeneration=crypto.randomUUID(),allowLoopbackTest=false,fetchImpl=fetch,requestTimeoutMs=90000,protocolTimeoutMs=60000}){
     const url=new URL(baseUrl);if(url.protocol!=='https:'&&!(allowLoopbackTest&&url.protocol==='http:'&&url.hostname==='127.0.0.1'))throw Error('cp2_tls_required');
     if(!serverId&&!token)throw Error('cp2_server_id_required');
     if(serverId&&!/^[a-f0-9-]{36}$/i.test(serverId))throw Error('cp2_server_id_invalid');
@@ -43,7 +43,7 @@ class OperationClient {
       if(!await isReady()){await this.request('/'+operationId+'/cancel',{...this.lease(status),businessResult:'not_started'});throw Error('operation_context_lost')}
       let ready;
       for(let n=0;n<3;n++){
-        try{ready=await this.request('/'+operationId+'/ready',this.lease(status),signal);break}catch(e){if(!e.retryable||n===2)throw e;await this.wait(Math.max(1000,e.nextPollAfterMs||1000),signal)}
+        try{ready=await this.controlRequest('/'+operationId+'/ready',this.lease(status));break}catch(e){if(!e.retryable||n===2)throw e;await this.wait(Math.max(1000,e.nextPollAfterMs||1000),signal)}
       }
       if(ready.state!=='active'||!ready.binding)throw Error('cp2_activation_unconfirmed');
       const op={operationId,status:ready,binding:ready.binding,result:'not_started',route:null,heartbeatError:null};this.operations.set(operationId,op);return op;
@@ -67,11 +67,12 @@ class OperationClient {
     tail.finally(()=>{if(op.controlTail===tail)delete op.controlTail});return task;
   }
   async controlRequest(path,body){
+    const deadline=Date.now()+90000;
     for(let attempt=0;;attempt++){
       try{return await this.request(path,body)}catch(error){
         // Busy means this control was not executed. Never replay a browser action.
-        if(error.message!=='operation_control_in_flight'||attempt>=3)throw error;
-        await this.wait(500*(attempt+1));
+        if(error.message!=='operation_control_in_flight'||Date.now()>=deadline)throw error;
+        await this.wait(Math.min(2000,500*(attempt+1)));
       }
     }
   }
@@ -114,7 +115,7 @@ class OperationClient {
     return this.control(op,async()=>{
     let status;
     for(let attempt=0;attempt<3;attempt++){
-      try{status=await this.request('/'+op.operationId+'/release',{...this.lease(op.status),businessResult:result});break}catch(error){
+      try{status=await this.controlRequest('/'+op.operationId+'/release',{...this.lease(op.status),businessResult:result});break}catch(error){
         if(!error.retryable&&error.name!=='TimeoutError'&&error.name!=='TypeError')throw error;
         // Retrying closure is safe; never replay the business action. A GET
         // may show the terminal ACK already consumed after HTTP response loss.

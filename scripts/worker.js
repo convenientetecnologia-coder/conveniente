@@ -2775,6 +2775,11 @@ async function enterHumanMode(nome, ctrl, { reason = 'human_mode' } = {}) {
     if (await releaseIfOwnProfile(nome, ctrl, reason)) return;
   } catch {}
   try { robeQueue.skip && robeQueue.skip(nome); } catch {}
+  if(ctrl?.browser?.__ctVirtusProxy){
+    // Automatic human hold is local/offline; a manual invoke must obtain a seat.
+    ctrl.browser.__ctVirtusProxy.finishBoot();
+    await ctrl.browser.__ctVirtusProxy.leaveHuman();
+  }
   const live = isLiveBrowserCtrl(ctrl);
   const alreadyHold = readDesiredHumanHoldFlag(nome) === true;
   const alreadyCtrl = !!(live && ctrl && ctrl.humanControl === true);
@@ -15992,7 +15997,12 @@ const handlers = {
     };
   },
 
-  async ['human-resume']({ nome, noReconcile }) {
+  async ['human-resume']({ nome, noReconcile, proxyTurnOwned=false }) {
+    const proxy=controllers.get(nome)?.browser?.__ctVirtusProxy;
+    if(proxy&&!proxyTurnOwned){
+      await proxy.leaveHuman();
+      return proxy.run('human',()=>handlers['human-resume']({nome,noReconcile,proxyTurnOwned:true}));
+    }
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] human-resume chamada', { nome });
 
@@ -29606,6 +29616,7 @@ async function __deltaAttachCdpEar(nome, page) {
           continue;
         }
 
+        try{ctrl.browser?.__ctVirtusProxy?.noteIncoming(Number(tsForWindow))}catch{}
         if (fromWaitingRead) {
           try { __deltaMarkThreadActiveOnDiskSync(nome, threadKey, { ensureHandsCompleted: true }); } catch {}
         }

@@ -64,3 +64,5 @@ test('busy conhecido tenta somente controle; timeout incerto não é repetido',a
  assert.equal((await c.controlRequest('/control',{})).ok,true);assert.equal(n,3);
  n=0;c.request=async()=>{n++;throw Error('carrier_ack_timeout')};await assert.rejects(c.controlRequest('/control',{}),/ack_timeout/);assert.equal(n,1);
 });
+
+test('release ocupado aguarda apenas controle sem bloquear definitivamente o turno',async()=>{const c=client(),op={operationId:uuid(),status:{leaseId:'l',leaseGeneration:1,carrierGeneration:uuid()},result:'not_started'};let calls=0;c.request=async()=>{if(++calls<=5)throw Error('operation_control_in_flight');return {state:'released'}};const r=await c.release(op);assert.equal(r.state,'released');assert.equal(calls,6)});

@@ -19,7 +19,7 @@ class VirtusTurn {
         if(this.lease?.snapshot().healthy===false){this.closed=true;this.rail.flip(null);reject(Error('virtus_transport_lost_during_turn'))}
       },250);healthTimer.unref?.()});
       const result=await Promise.race([Promise.resolve().then(()=>action(this.lease)),unhealthy]);
-      if(intent==='observe'&&result?.ok!==false)this.lastCheckedAt=this.clock();return result;
+      if(['observe','engaged'].includes(intent)&&result?.ok!==false)this.lastCheckedAt=this.clock();return result;
     }finally{clearInterval(healthTimer)}
 
    }catch(error){this.failure=String(error.message||error);throw error}

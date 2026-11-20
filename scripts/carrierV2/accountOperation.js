@@ -21,7 +21,7 @@ async function beginOnce({nome,purpose,intent='observe',signal,isReady=async()=>
    const previous=new Client({...config,edgeGeneration:old.edgeGeneration});
    const status=await previous.request('/'+old.operationId);
    if(!['released','canceled','expired','unknown','failed'].includes(status.state)){
-    const result=await previous.request('/'+old.operationId+(status.state==='queued'?'/cancel-queued':'/cancel'),status.state==='queued'?{expectedState:'queued'}:{leaseId:status.leaseId,leaseGeneration:status.leaseGeneration,carrierGeneration:status.carrierGeneration,businessResult:old.result==='confirmed'?'confirmed':'not_started'});
+    const result=await previous.controlRequest('/'+old.operationId+(status.state==='queued'?'/cancel-queued':'/cancel'),status.state==='queued'?{expectedState:'queued'}:{leaseId:status.leaseId,leaseGeneration:status.leaseGeneration,carrierGeneration:status.carrierGeneration,businessResult:old.result==='confirmed'?'confirmed':'not_started'});
     if(!['released','canceled','expired'].includes(result.state))throw Error('cp2_previous_operation_not_closed');
    }
    // Preserve every prior journal before starting another operation.

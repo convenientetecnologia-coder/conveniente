@@ -1,5 +1,6 @@
 'use strict';
 const {VirtusTurn}=require('./virtusTurn');
+const {Activity}=require('./virtusActivity');
 async function create({nome,onState=()=>{},dependencies={}}){
  const config=dependencies.config||require('./serverConfig').readServerConfigEffective();
  const pilot=dependencies.pilot===undefined?readPilot():dependencies.pilot;
@@ -24,8 +25,9 @@ async function create({nome,onState=()=>{},dependencies={}}){
   const bootGate=new Promise(resolve=>bootResolve=resolve);
   const ready=new Promise((resolve,reject)=>{bootReady=resolve;bootReject=reject});
   const boot=()=>{const task=turn.run('warm',async()=>{bootReady();await bootGate});task.catch(bootReject);return ready};
-  let browser=null,timer=null,stopped=false,lastNetworkAt=0,lastSyncNetworkAt=0,connectedAt=Date.now(),observerBusy=false,observerOptions=null,observerLastTickAt=0,observerSkipReason=null,observerVersion=0,startupFinished=false,healthCheck=null,lastInbox=null,activeLease=null,expectedSend=null,outgoingEvidence=null,humanHeld=false,humanResolve=null,humanTask=null;
-  const api={turn,proxyServer:'127.0.0.1:'+port,boot,
+  let browser=null,timer=null,stopped=false,lastNetworkAt=0,lastSyncNetworkAt=0,connectedAt=Date.now(),observerBusy=false,observerOptions=null,observerLastTickAt=0,lastObserveAttemptAt=0,observerSkipReason=null,observerVersion=0,startupFinished=false,healthCheck=null,lastInbox=null,activeLease=null,expectedSend=null,outgoingEvidence=null,humanHeld=false,humanTimer=null,humanResolve=null,humanTask=null;
+  const activity=new Activity();const burst=[];let visitIntent=null,visitReplied=false;
+ const api={turn,proxyServer:'127.0.0.1:'+port,boot,
    attach(value){
     browser=value;browser.__ctVirtusProxy=api;
     const watch=page=>{
@@ -41,23 +43,27 @@ async function create({nome,onState=()=>{},dependencies={}}){
     browser.once('disconnected',()=>{api.close().catch(()=>{})});
    },
    finishBoot(){startupFinished=true;bootResolve()},
+   noteIncoming(at){activity.incoming(Number(at))},
+   noteConversationComplete(){activity.complete()},
    noteNetwork(){lastNetworkAt=Date.now()},
    noteSyncNetwork(){lastSyncNetworkAt=Date.now()},
    visitNetwork(page){return {connectedAt,lastNetworkAt:lastSyncNetworkAt,pending:page?.__ctVirtusPendingInbox?.size||0}},
    setHealthCheck(fn){healthCheck=fn},
    noteInbox(result){lastInbox={...result,at:Date.now()};onState(api.snapshot())},
-   snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld,pilot:accountPilot,lastInbox,startupFinished,observer:{registered:!!observerOptions,lastTickAt:observerLastTickAt,skipReason:observerSkipReason,guard:observerOptions?.describeGuard?.()||null}}},
+   snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld,pilot:accountPilot,lastInbox,startupFinished,activity:activity.snapshot(),pendingBurst:burst.length,observer:{registered:!!observerOptions,lastTickAt:observerLastTickAt,skipReason:observerSkipReason,guard:observerOptions?.describeGuard?.()||null}}},
    async enterHuman(){
     if(humanTask)return humanTask.ready;
     humanHeld=true;api.finishBoot();let readyResolve,readyReject;const ready=new Promise((r,j)=>{readyResolve=r;readyReject=j});
     const gate=new Promise(r=>humanResolve=r);
-    const task=api.run('human',async()=>{readyResolve();await gate});
-    humanTask={ready,task};task.catch(readyReject).finally(()=>{humanTask=null;humanHeld=false});return ready;
+    const task=api.run('human',async()=>{humanTimer=setTimeout(()=>{humanResolve?.();},dependencies.humanLeaseMs||5*60*1000);humanTimer.unref?.();readyResolve();await gate});
+    humanTask={ready,task};
+    task.then(()=>{},readyReject).finally(()=>{clearTimeout(humanTimer);humanTask=null;humanHeld=false}).catch(()=>{});return ready;
    },
-   async leaveHuman(){if(!humanTask){humanHeld=false;return}const task=humanTask.task;humanResolve?.();await task;humanHeld=false},
+   async leaveHuman(){if(!humanTask){humanHeld=false;return}const task=humanTask.task;clearTimeout(humanTimer);humanResolve?.();await task;humanHeld=false},
    async run(intent,action){
+    if(intent==='reply'&&activeLease&&['observe','engaged'].includes(visitIntent)&&!humanHeld&&!visitReplied&&burst.length<1){return new Promise((resolve,reject)=>burst.push({action,resolve,reject}))}
     return turn.run(intent,async lease=>{
-      activeLease=lease;
+      activeLease=lease;visitIntent=intent;visitReplied=false;
       try{
         const reconnectAt=Date.now();connectedAt=reconnectAt;
         const pages=await browser.pages();
@@ -71,7 +77,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
         if(lastNetworkAt<reconnectAt)throw Error('virtus_reconnect_not_confirmed');
         if(intent==='reply'&&healthCheck){const health=await healthCheck();if(!health.ok)throw Error('virtus_account_blocked:'+health.state)}
         return await action(lease);
-      }finally{activeLease=null}
+      }finally{visitIntent=null;activeLease=null;while(burst.length)burst.shift().reject(Error('virtus_visit_ended_before_reply'))}
     });
    },
    async beforeSend({threadKey,text}={}){
@@ -91,7 +97,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
     const until=Date.now()+(dependencies.confirmationTimeoutMs||45000);
     while(!outgoingEvidence&&Date.now()<until&&!stopped)await new Promise(r=>setTimeout(r,250));
     if(!outgoingEvidence)throw Error('virtus_send_server_ack_unconfirmed');
-    activeLease.confirm();expectedSend=null;return outgoingEvidence;
+    activeLease.confirm();visitReplied=true;activity.replied();expectedSend=null;return outgoingEvidence;
    },
    stopObserver(version){if(version!==undefined&&version!==observerVersion)return;observerOptions=null;(dependencies.clearObserverInterval||clearInterval)(timer);timer=null},
    startObserver({canObserve=()=>true,prepareInbox=async()=>{},describeGuard=()=>null}={}){
@@ -99,16 +105,20 @@ async function create({nome,onState=()=>{},dependencies={}}){
     if(timer)return version;
     const tick=async()=>{
       const options=observerOptions;observerLastTickAt=Date.now();
-      observerSkipReason=stopped?'closed':humanHeld?'human':observerBusy?'busy':!browser?.isConnected()?'browser_disconnected':!options?'unregistered':!options.canObserve()?'runtime_guard':null;
+      observerSkipReason=stopped||turn.closed?'closed':humanHeld?'human':observerBusy?'busy':!browser?.isConnected()?'browser_disconnected':!options?'unregistered':!options.canObserve()?'runtime_guard':null;
+      if(observerSkipReason==='closed'){api.stopObserver();if(!stopped&&!humanHeld&&browser?.isConnected()){setTimeout(()=>browser.close().catch(()=>{}),0)}return}
       if(observerSkipReason)return;
-      observerBusy=true;
-      try{await api.run('observe',async()=>{
+      const revisitMs=dependencies.revisitMs??(activity.snapshot().engaged?15000:60000);
+      if(lastObserveAttemptAt&&Date.now()-lastObserveAttemptAt<revisitMs){observerSkipReason='revisit_interval';return}
+      lastObserveAttemptAt=Date.now();observerBusy=true;
+      try{await api.run(activity.snapshot().engaged?'engaged':'observe',async()=>{
         const prepared=await options.prepareInbox();api.noteInbox(prepared);
         if(prepared?.ok===false)return prepared;
         const start=Date.now();let sawNetwork=lastNetworkAt>0;
         while(Date.now()-start<30000&&!stopped){
           if(lastNetworkAt>=start)sawNetwork=true;
-          if(sawNetwork&&Date.now()-lastNetworkAt>=2500)break;
+          while(burst.length){const job=burst.shift();visitReplied=true;try{if(healthCheck){const health=await healthCheck();if(!health.ok)throw Error('virtus_account_blocked:'+health.state)}job.resolve(await job.action(activeLease))}catch(error){job.reject(error)}}
+          if(sawNetwork&&Date.now()-lastNetworkAt>=2500&&!activity.snapshot().waitingBriefly)break;
           await new Promise(r=>setTimeout(r,500));
         }
         if(!sawNetwork)throw Error('virtus_reconnect_not_confirmed');
@@ -116,7 +126,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
       })}catch(error){api.noteInbox({ok:false,state:'incomplete',reason:String(error.message||error),details:error.details||null});onState({...api.snapshot(),error:String(error.message||error)})}
       finally{observerBusy=false}
     };
-    timer=(dependencies.setObserverInterval||setInterval)(()=>tick().catch(error=>onState({...api.snapshot(),error:String(error.message||error)})),30000);timer.unref?.();return version;
+    timer=(dependencies.setObserverInterval||setInterval)(()=>tick().catch(error=>onState({...api.snapshot(),error:String(error.message||error)})),5000);timer.unref?.();return version;
    },
    async close(){if(stopped)return;stopped=true;api.stopObserver();humanResolve?.();bootResolve();await turn.close()}
   };
