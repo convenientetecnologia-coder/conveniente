@@ -356,6 +356,37 @@ function Test-ConvenienteNpmModulesOk {
     }
 }
 
+function Invoke-ConvenientePinnedNpm {
+    param(
+        [Parameter(Mandatory = $true)]$Runtime,
+        [Parameter(Mandatory = $true)][string[]]$NpmArgs
+    )
+    $nodeExe = [string]$Runtime.NodeExe
+    $nodeDir = Split-Path -Parent $nodeExe
+    $npmCli = Join-Path $nodeDir 'node_modules/npm/bin/npm-cli.js'
+    if (-not (Test-Path -LiteralPath $nodeExe) -or -not (Test-Path -LiteralPath $npmCli)) {
+        throw 'pinned_npm_runtime_missing'
+    }
+    $savedPath = $env:PATH
+    $savedNpmNode = $env:npm_node_execpath
+    $savedNpmExec = $env:npm_execpath
+    $savedScriptsNode = $env:npm_config_scripts_prepend_node_path
+    try {
+        # Lifecycle scripts invoke bare "node": pin their PATH too, not only npm itself.
+        $env:PATH = $nodeDir + [IO.Path]::PathSeparator + $savedPath
+        $env:npm_node_execpath = $nodeExe
+        $env:npm_execpath = $npmCli
+        $env:npm_config_scripts_prepend_node_path = 'true'
+        & $nodeExe $npmCli @NpmArgs | Out-Host
+        return [int]$LASTEXITCODE
+    } finally {
+        $env:PATH = $savedPath
+        $env:npm_node_execpath = $savedNpmNode
+        $env:npm_execpath = $savedNpmExec
+        $env:npm_config_scripts_prepend_node_path = $savedScriptsNode
+    }
+}
+
 function Ensure-ConvenienteNpmModules {
     try {
         $repoRoot = Get-ConvenienteRepoRoot
@@ -390,9 +421,7 @@ function Ensure-ConvenienteNpmModules {
         $code = 1
         Push-Location $repoRoot
         try {
-            & $rt.NpmCmd install --no-fund --no-audit
-            $code = 0
-            try { $code = [int]$LASTEXITCODE } catch { $code = 0 }
+            $code = Invoke-ConvenientePinnedNpm -Runtime $rt -NpmArgs @('install', '--no-fund', '--no-audit')
         } finally {
             Pop-Location
         }
@@ -410,8 +439,7 @@ function Ensure-ConvenienteNpmModules {
             # npm install may keep a package built for another Node ABI unchanged.
             Push-Location $repoRoot
             try {
-                & $rt.NpmCmd rebuild better-sqlite3 --no-fund --no-audit
-                $code = [int]$LASTEXITCODE
+                $code = Invoke-ConvenientePinnedNpm -Runtime $rt -NpmArgs @('rebuild', 'better-sqlite3', '--no-fund', '--no-audit')
             } finally {
                 Pop-Location
             }
