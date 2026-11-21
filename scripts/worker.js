@@ -20837,6 +20837,7 @@ async function nurseTick() {
             } catch {}
             continue;
           }
+          if (liveWant.provisioningPending === true) continue;
         } catch {}
 
         if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) {

@@ -1457,7 +1457,7 @@ function __edgeRememberStockProvisionFinished(items) {
     if (!sid) continue;
     const profileName = String(it && it.profileName || '').trim();
     const real = !!(profileName && !profileName.startsWith('__ct_pending__'));
-    const error = real ? null : String(it && it.error || 'provision_finished_no_profile').slice(0, 180);
+    const error = it && it.ok === true && real ? null : String(it && it.error || (real ? 'provision_configuration_failed' : 'provision_finished_no_profile')).slice(0, 180);
     list.push({
       stockAccountId: sid,
       ok: !!(it && it.ok === true && real),
@@ -1688,6 +1688,7 @@ async function __edgePumpStockProvisionOutbox() {
         type: 'stock_provision',
         payload: (rec && rec.payload && typeof rec.payload === 'object') ? rec.payload : {}
       };
+      if (Number(rec.nextAttemptAt || 0) > Date.now()) continue;
       let provisionOut = null;
       try {
         // Só tira da fila quando o cadastro devolve. Timeout artificial aqui
@@ -1710,6 +1711,13 @@ async function __edgePumpStockProvisionOutbox() {
           });
         } catch {}
       }
+      const retry = require('./scripts/stockProvisionRetry').retryPlan(rec, provisionOut);
+      if (retry) {
+        const tmp = pendingPath + '.tmp';
+        fs.writeFileSync(tmp, JSON.stringify(retry), 'utf8');
+        fs.renameSync(tmp, pendingPath);
+        continue;
+      }
       try { __edgeNoteStockProvisionFinished(rec, provisionOut); } catch {}
       try {
         if (fs.existsSync(donePath)) {
@@ -1728,7 +1736,11 @@ async function __edgePumpStockProvisionOutbox() {
       const left = fs.readdirSync(STOCK_PROVISION_PENDING_DIR)
         .filter((f) => String(f || '').toLowerCase().endsWith('.json'));
       if (left.length) {
-        setTimeout(() => { __edgeKickStockProvisionPump(); }, 1500).unref?.();
+        let delay = 300000;
+        for (const name of left) {
+          try { const next = JSON.parse(fs.readFileSync(path.join(STOCK_PROVISION_PENDING_DIR, name), 'utf8')); delay = Math.min(delay, Math.max(1500, Number(next.nextAttemptAt || 0) - Date.now())); } catch { delay = 1500; }
+        }
+        setTimeout(() => { __edgeKickStockProvisionPump(); }, delay).unref?.();
       }
     } catch {}
   }

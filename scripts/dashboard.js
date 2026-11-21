@@ -2433,6 +2433,7 @@ async function execStockProvision(cmd) {
     const m = String(msg || '').toLowerCase();
     // Erros humanos/FB (captcha/checkpoint/login) NÃO são transitórios — retry só piora.
     if (isFatalConfigureErr(m)) return false;
+    if (require('./stockProvisionRetry').isTransient(m)) return true;
     return (
       m.includes('timeout') ||
       m.includes('already_opening') ||
@@ -2716,6 +2717,13 @@ async function execStockProvision(cmd) {
 
         // 1) criar perfil
         const created = await runStep('create_profile', async () => {
+          if (payload.resumeExistingOnly === true) {
+            const existingProfile = String(a && a.resumeProfileName || '').trim();
+            if (!existingProfile || !/^[\w.-]+$/.test(existingProfile)) throw new Error('resume_profile_missing');
+            const existing = await httpJson(`/api/perfis/${encodeURIComponent(existingProfile)}/manifest`);
+            if (!existing?.manifest || Number(existing.manifest.stockAccountId) !== Number(stockAccountId)) throw new Error('resume_profile_account_mismatch');
+            return { ok: true, perfil: { nome: existingProfile, cidade: city }, reusedExisting: true };
+          }
           const r = await httpJson('/api/perfis', {
             method: 'POST',
             headers: { 'x-operator': lockOwner },
