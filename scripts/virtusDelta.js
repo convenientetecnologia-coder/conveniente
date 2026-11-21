@@ -4338,14 +4338,14 @@ async function readLastConversationMessage(page, threadKey) {
   const text = String(raw.text || "").replace(/\s+/g, " ").trim();
   const age = parseMessengerAgeLabel(pickMessengerAgeToken(raw.ageBlob));
   if (!text) return { ok: true, empty: true, text: "", mine: false, within12h: false, messageAt: null };
-  // Hora lida e maior que 12h: não responde. Hora ilegível: a conversa já está aberta, responde.
+  // Idade desconhecida não comprova elegibilidade; o worker pode usar timestamp original de rede se o texto for o mesmo.
   const ageKnown = !!(age && Number.isFinite(age.ageMs));
   return {
     ok: true,
     empty: false,
     text,
     mine: !!raw.mine,
-    within12h: ageKnown ? !!age.within12h : true,
+    within12h: ageKnown ? !!age.within12h : false,
     messageAt: age ? age.messageAt : null,
     ageMs: age ? age.ageMs : null,
   };
@@ -8798,7 +8798,11 @@ async function prepareProxyInbox(page,healthCheck){
   ready:()=>require('./virtusMessagesDocument').ensure({page,onRecovery:e=>logInfo('[virtusDelta][proxy_document_recovery] '+JSON.stringify(e))}),
   active:()=>proxyMarketplaceListActive(page),visible:async()=>!!(await proxyMarketplaceTarget(page)),
   click:async()=>{const target=await proxyMarketplaceTarget(page);if(!target)throw Error('virtus_marketplace_target_disappeared');await page.mouse.click(target.x,target.y,{delay:clickDelayMs()})},
-  settled:()=>require('./virtusInboxReady').wait({probe:()=>require('./virtusInboxReady').snapshot(page),network:()=>page.__ctVirtusProxySession?.visitNetwork(page)||{}})
+  settled:async()=>{
+   const position=await require('./marketplaceListPosition').reset(page);
+   const readiness=await require('./virtusInboxReady').wait({probe:async()=>{const current=await page.evaluate(require('./marketplaceListPosition').position,false);if(!current.ok)return {ready:false,reason:current.reason,signature:''};return require('./virtusInboxReady').snapshot(page)},network:()=>page.__ctVirtusProxySession?.visitNetwork(page)||{}});
+   return {...readiness,listPosition:position.reason,listScrollResets:position.moved};
+  }
  });}catch(error){return {ok:false,state:'incomplete',reason:String(error.message||error),details:error.details||null};}
 }
 
