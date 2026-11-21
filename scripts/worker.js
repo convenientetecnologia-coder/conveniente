@@ -8601,6 +8601,7 @@ function releaseDetachedOpenSlot(token, { nome = '', result = 'ok' } = {}) {
 }
 
 async function activateOnce(nome, source = '', operator = '', {networkPurpose='auto'} = {}) {
+  if(isAccountProvisioningPending(nome)&&networkPurpose!=='cadastro'&&!/^stock_provision(?::|$)/i.test(String(operator||'')))return {ok:false,error:'account_configure_pending'};
   const boot = await __deltaAwaitHostBootReady();
   if (!boot.ready) {
     try {
@@ -20084,6 +20085,7 @@ async function nurseTick() {
                 continue;
               }
               const cur = d.perfis[nome] || {};
+              if(cur.provisioningPending===true)continue;
               if (cur.active !== true) {
                 d.perfis[nome] = { ...cur, active: true };
                 changed++;
@@ -20286,6 +20288,7 @@ async function nurseTick() {
             if (!n) continue;
             if (!inShard(n)) continue;
             const want = desired.perfis[n] || {};
+            if(want.provisioningPending===true)continue;
             if (want.active !== true || controllers.has(n)) continue;
             try {
               const rm = robeMeta[n] || {};

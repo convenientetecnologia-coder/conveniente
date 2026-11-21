@@ -2474,10 +2474,11 @@ module.exports = (app, workerClient, fileStore) => {
       // Flags não-terminais continuam sendo limpas/revalidadas na abertura (worker/probe).
       const eligibleNames = [];
       const skippedTerminal = [];
+      const cadastroDesired=fileStore.readJsonSafe(fileStore.desiredPath,{perfis:{}});
       for (const p of perfisArr) {
         if (!p || !p.nome) continue;
         const nome = String(p.nome);
-        let terminal = null;
+        let terminal = cadastroDesired?.perfis?.[nome]?.provisioningPending===true?'account_configure_pending':null;
         try {
           const man = await manifestStore.read(nome).catch(() => null);
           const f = (man && man.accountFlags) ? man.accountFlags : {};

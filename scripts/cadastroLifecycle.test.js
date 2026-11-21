@@ -22,3 +22,11 @@ test('bloqueio automático entra em humano offline sem solicitar cadeira manual'
  const enter=vm.runInNewContext(source.slice(start,end)+';enterHumanMode',{releaseIfOwnProfile:async()=>false,robeQueue:{skip(){}},isLiveBrowserCtrl:()=>true,readDesiredHumanHoldFlag:()=>false,fileStore:{withDesiredFileLockUpdate:async fn=>fn(desired)},syncDeltaHumanHoldBrowserGuard:async()=>{},stopVirtus:async()=>events.push('stop_virtus'),browserHelper:{invocarHumano:async()=>events.push('overlay'),enableGlassForHumanBrowser:async()=>{}},shouldSkipHumanInvokeNavigation:()=>true,ensureHumanOverlay:async()=>{},provisionAudit:{append(){}},snapshotStatusAndWrite:async()=>{},String,Date});
  await enter('account',ctrl,{reason:'captcha_checkpoint'});assert.equal(events.includes('acquire_human'),false);assert.deepEqual(events.slice(0,2),['finish_boot','release_human']);assert.equal(desired.perfis.account.humanHold,true);assert.equal(desired.perfis.account.virtus,'off');assert.equal(ctrl.trabalhando,false);
 });
+
+
+test('cadastro pendente nao ganha cadeira em abrir tudo ou nurse; cadastro explicito permanece permitido',async()=>{
+ const a=source.indexOf("async function activateOnce(nome,"),b=source.indexOf('  const boot = await __deltaAwaitHostBootReady();',a);const fn=vm.runInNewContext(source.slice(a,b)+"throw Error('allowed_to_open');}activateOnce",{isAccountProvisioningPending:()=>true,String});
+ for(const operator of ['open_all_map:fixture','ui','nurse',''])assert.equal((await fn('account','open_all_24h',operator)).error,'account_configure_pending');
+ await assert.rejects(fn('account','activate','stock_provision:fixture'),/allowed_to_open/);
+ await assert.rejects(fn('account','cadastro_prepare','ui',{networkPurpose:'cadastro'}),/allowed_to_open/);
+});
