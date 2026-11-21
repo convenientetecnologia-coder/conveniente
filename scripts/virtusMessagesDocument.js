@@ -38,7 +38,7 @@ async function ensure({page,probe=wait,clock=Date.now,cooldownMs=600000,onRecove
   if(previous!==undefined&&clock()-previous<cooldownMs)throw error;
   recoveryTimes.set(page,clock());onRecovery({reason,at:clock()});
   await page.reload({waitUntil:'domcontentloaded',timeout:120000});
-  return probe({page});
+  return probe({page,timeoutMs:60000});
  }
 }
 async function recoverBrowserError({page,clock=Date.now,cooldownMs=600000,onRecovery=()=>{}}){

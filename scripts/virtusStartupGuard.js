@@ -1,5 +1,7 @@
 'use strict';
-function install({browser,session,timeoutMs=240000,setTimer=setTimeout,clearTimer=clearTimeout,onError=()=>{}}){
+// Leave room for initial navigation, bounded document repair and inbox settlement.
+// This remains below the ten-minute Virtus lease; failure still closes and releases.
+function install({browser,session,timeoutMs=360000,setTimer=setTimeout,clearTimer=clearTimeout,onError=()=>{}}){
  let fired=false;
  const timer=setTimer(()=>{
   if(fired||session.snapshot().startupFinished)return;fired=true;
