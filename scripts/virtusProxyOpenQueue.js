@@ -11,4 +11,5 @@ class ProxyOpeningCoordinator {
  async settled(){await Promise.all(this.running.values())}
 }
 function readyMayRunDuringBatch({proxy,kind,owner}={}){return !!proxy&&(kind==='open_all_map'||(!kind&&/^open_all_map:/i.test(String(owner||''))))}
-module.exports={ProxyOpeningCoordinator,readyMayRunDuringBatch};
+function mayOpenAlongsideStock({proxy,pending,kind,owner}={}){return !!proxy&&pending===false&&(kind==='stock_provision'||/^stock_provision:/i.test(String(owner||'')))}
+module.exports={ProxyOpeningCoordinator,readyMayRunDuringBatch,mayOpenAlongsideStock};

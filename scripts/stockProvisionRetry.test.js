@@ -6,6 +6,7 @@ test('temporary transport failure retains only failed actions, reusing account a
  const next=retryPlan(record,output,1000);assert.equal(next.id,record.id);assert.deepEqual(next.stockAccountIds,[2]);assert.equal(next.nextAttemptAt,31000);assert.equal(record.payload.actions.length,3);
 });
 test('retry survives restart with bounded delay and never retries identity or authentication errors',()=>{
+ assert.equal(isTransient('timeout'),true);
  const record={id:'same',retryCount:999999,payload:{actions:[{stockAccountId:1}]}};
  const output={results:[{type:'stock_provision',error:'provision_lock_busy'}]};const next=retryPlan(JSON.parse(JSON.stringify(record)),output,1000);assert.equal(next.retryCount,1000000);assert.equal(next.nextAttemptAt,301000);
  for(const error of ['identity_required','configure_blocked_url_checkpoint','still_login_required:login_wall','unauthorized','captcha timeout'])assert.equal(isTransient(error),false);

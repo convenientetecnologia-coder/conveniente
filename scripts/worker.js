@@ -8741,10 +8741,9 @@ async function activateOnce(nome, source = '', operator = '', {networkPurpose='a
           kind === 'open_all_map' ||
           (owner && /^open_all_map:/i.test(owner));
         const shouldBlockOpen =
-          kind === 'stock_provision' ||
+          ((kind === 'stock_provision' || /^stock_provision:/i.test(owner)) && !require('./virtusProxyOpenQueue').mayOpenAlongsideStock({proxy:proxyOpeningEnabled(),pending:isAccountProvisioningPending(nome),kind,owner})) ||
           kind === 'close_all' ||
           kind === 'renew_then_close' ||
-          (owner && /^stock_provision:/i.test(owner)) ||
           (owner && /^close_all:/i.test(owner)) ||
           (owner && /^renew_then_close:/i.test(owner)) ||
           (owner && /^admin_configure:/i.test(owner));

@@ -289,11 +289,16 @@ function podeAbrirNovoSlot(perfil, opts = {}) {
       const isOpenAll =
         kind === 'open_all_map' ||
         (owner && /^open_all_map:/i.test(owner));
+      let independentStockOpen = false;
+      try {
+        const desired = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'dados', 'desired.json'), 'utf8'));
+        const account = desired?.perfis?.[perfil];
+        independentStockOpen = require('./virtusProxyOpenQueue').mayOpenAlongsideStock({proxy:require('./serverConfig').readServerConfigEffective().virtus?.proxyEnabled===true,pending:account ? account.provisioningPending===true : undefined,kind,owner});
+      } catch {}
       const shouldBlockOpen =
         // Bloqueios que devem impedir abertura:
-        kind === 'stock_provision' ||
+        ((kind === 'stock_provision' || /^stock_provision:/i.test(owner)) && !independentStockOpen) ||
         kind === 'close_all' ||
-        (owner && /^stock_provision:/i.test(owner)) ||
         (owner && /^close_all:/i.test(owner)) ||
         // Compat: admin_configure também isola abertura para evitar corrida durante injeção
         (owner && /^admin_configure:/i.test(owner));

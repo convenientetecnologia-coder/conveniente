@@ -2396,12 +2396,23 @@ module.exports = (app, workerClient, fileStore) => {
     const issues = require('./issues.js');
     const op = String(req.headers['x-operator'] || 'bulk_open_all');
     let lockOwner = null;
+    let independentProxy = false;
+    const releaseOpenAllLock = () => { if (!independentProxy && lockOwner) provisionLock.release({ owner: String(lockOwner) }); };
 
     try {
+      independentProxy = serverConfig.readServerConfigEffective().virtus?.proxyEnabled === true;
       // 0) Lock global: pausa Virtus/Robe durante o mapeamento (open_all_map).
       // - Evita que login_remediate/virtus/robe rodem durante a abertura e baguncem o estado/ordem.
       // - O nurse continua abrindo/probando 1 por vez (owner atravessa o lock).
       lockOwner = `open_all_map:${Date.now()}`;
+      if (independentProxy) {
+        const current = provisionLock.get();
+        const kind = String(current?.lock?.meta?.kind || '');
+        const owner = String(current?.lock?.owner || '');
+        if (current?.active && !/^(stock_provision|open_all_map)$/.test(kind) && !/^(stock_provision:|open_all_map:)/.test(owner)) {
+          return res.json({ ok: false, error: 'open_all_lock_busy owner=' + owner });
+        }
+      } else {
       try {
         // TTL curto e renovável: workers fazem keepalive enquanto houver perfis do shard a abrir.
         const ttl0 = Math.max(60_000, Number(process.env.OPEN_ALL_LOCK_TTL_MS || (2 * 60 * 1000)) || (2 * 60 * 1000));
@@ -2453,6 +2464,8 @@ module.exports = (app, workerClient, fileStore) => {
         return res.json({ ok: false, error: `open_all_lock_error ${(e && e.message) || String(e)}` });
       }
 
+      }
+
       const startedGen = readEncerrarGen(fileStore);
       if (isAutomaticOpenAllOperator(op)) {
         let holdStop = false;
@@ -2463,7 +2476,7 @@ module.exports = (app, workerClient, fileStore) => {
         let latch = false;
         try { latch = require('./cellLifecycle.js').isCellsStopped(); } catch {}
         if (holdStop || latch) {
-          try { provisionLock.release({ owner: String(lockOwner), force: true }); } catch {}
+          try { releaseOpenAllLock(); } catch {}
           return res.json({ ok: false, error: 'human_hold_stop_workers' });
         }
       }
@@ -2508,7 +2521,8 @@ module.exports = (app, workerClient, fileStore) => {
         // - workers coordenam via desired.json (cross-process).
         const queueDone = eligibleNames.length === 0;
         desired._openAll = {
-          active: !queueDone,
+          active: !queueDone && !independentProxy,
+          mode: independentProxy ? 'proxy_independent' : 'mapped',
           startedAt: Date.now(),
           doneAt: queueDone ? Date.now() : undefined,
           idx: 0,
@@ -2532,13 +2546,14 @@ module.exports = (app, workerClient, fileStore) => {
         for (const p of perfisArr) {
           if (!p || !p.nome) continue;
           const nome = p.nome;
+          if (cadastroDesired.perfis?.[nome]?.provisioningPending === true) continue;
           if (eligibleSet.has(nome)) {
             desired.perfis[nome] = {
               ...(desired.perfis[nome] || {}),
               active: true,
               // Durante mapeamento, manter Virtus pausado.
               // O probe decide quais ficam virtus='on' (ok), mas o provision_lock segura a execução até o fim.
-              virtus: 'off',
+              virtus: independentProxy ? 'on' : 'off',
               humanHold: false
             };
           } else {
@@ -2555,14 +2570,14 @@ module.exports = (app, workerClient, fileStore) => {
       }, { resumeCells: true });
       } catch (eWrite) {
         if (/cancelled_by_encerrar/.test(String((eWrite && eWrite.code) || (eWrite && eWrite.message) || ''))) {
-          try { provisionLock.release({ owner: String(lockOwner), force: true }); } catch {}
+          try { releaseOpenAllLock(); } catch {}
           return res.json({ ok: false, error: 'cancelled_by_encerrar' });
         }
         throw eWrite;
       }
 
       if (readEncerrarGen(fileStore) !== startedGen) {
-        try { provisionLock.release({ owner: String(lockOwner), force: true }); } catch {}
+        try { releaseOpenAllLock(); } catch {}
         return res.json({ ok: false, error: 'cancelled_by_encerrar' });
       }
 
@@ -2587,13 +2602,13 @@ module.exports = (app, workerClient, fileStore) => {
           if (workerClient && typeof workerClient.haltRespawn === 'function') workerClient.haltRespawn();
           else if (workerClient && typeof workerClient.beginStop === 'function') workerClient.beginStop();
         } catch {}
-        try { provisionLock.release({ owner: String(lockOwner), force: true }); } catch {}
+        try { releaseOpenAllLock(); } catch {}
         return res.json({ ok: false, error: 'cancelled_by_encerrar' });
       }
 
       let clusterReshuffle = null;
       try {
-        if (workerClient && typeof workerClient.reshuffleFairIfIdle === 'function') {
+        if (!independentProxy && workerClient && typeof workerClient.reshuffleFairIfIdle === 'function') {
           clusterReshuffle = await workerClient.reshuffleFairIfIdle('open_all_24h');
         }
       } catch (eReshuffle) {
@@ -2603,7 +2618,7 @@ module.exports = (app, workerClient, fileStore) => {
 
       // Se não há ninguém elegível, libera o lock imediatamente (missão concluída: nada a abrir).
       if (eligibleNames.length === 0) {
-        try { provisionLock.release({ owner: String(lockOwner), force: true }); } catch {}
+        try { releaseOpenAllLock(); } catch {}
         try {
           provisionAudit.append({
             ts: Date.now(),
@@ -2667,7 +2682,7 @@ module.exports = (app, workerClient, fileStore) => {
 
     } catch (e) {
       // Se falhou após adquirir o lock, liberar (best-effort).
-      try { if (lockOwner) provisionLock.release({ owner: String(lockOwner), force: true }); } catch {}
+      try { if (lockOwner) releaseOpenAllLock(); } catch {}
       return res.json({ ok: false, error: (e && e.message) || String(e) });
     }
   });
