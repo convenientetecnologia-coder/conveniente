@@ -29659,6 +29659,11 @@ async function __deltaAttachCdpEar(nome, page) {
           initAtMs > 0 &&
           tsForWindow <= (initAtMs + DELTA_FIRST_BOOT_BASELINE_GRACE_MS)
         );
+        if(require('./initialConversationReview').shouldReview({fromWaitingRead,firstBootSeed:shouldSkipFirstBootSeed,outsideLookback:shouldSkipOutsideLookback,messageAt:tsForWindow,now:nowWindowRef,lookbackMs:DELTA_HISTORY_LOOKBACK_MS})){
+          __deltaScheduleWaitingThreadRead(nome,threadKey);
+          try{__forensicEdgeEmit({account_login:String(nome||''),thread_key:threadKey,flow_stage:'first_boot_recent_message_review',details:{message_at:tsForWindow,reason:'verify_last_message_before_historical_dismissal'}})}catch{}
+          continue;
+        }
         if (!fromWaitingRead && (shouldSkipOutsideLookback || shouldSkipFirstBootSeed)) {
           const skipReason = shouldSkipOutsideLookback
             ? 'outside_12h_lookback_window'
