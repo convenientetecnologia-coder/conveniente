@@ -15,3 +15,7 @@ Correções preparadas:
 Validação: 47 testes passaram, incluindo visita, PIN/avisos, estabilidade, sessão proxy, devolução de cadeira e confirmação de envio. Testes com DOM simulado não substituem validação real em produção.
 
 Não aplicado aos servidores. Revisão dos demais servidores continua. Ainda pendente validar em ambiente real o comportamento de reconexão da lista e recebimento/envio das mensagens observadas pelo operador.
+
+## Mãe 7
+
+Página sem estilos e splash repetem os sintomas da Mãe 5. Snapshot confirma visitas incompletas e também um caso distinto: perfil ativo em `about:blank`, sessão proxy fechada e `startup_timeout` persistido. O callback de timeout fechava a sessão sem garantir fechamento do navegador; sua própria rotina de encerramento desativava a limpeza periódica. Corrigido para fechar o navegador ao vencer a abertura, inclusive quando a limpeza da sessão falha. Não reinicia cadastro nem ignora checkpoints. Duas verificações direcionadas cobrem timeout com erro e preservação de navegador cujo startup concluiu.

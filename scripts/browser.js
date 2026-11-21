@@ -2721,7 +2721,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
     browser.__ctNetworkPurpose=networkMode.cadastro?'cadastro':'virtus';
     browser.__ctCadastroNetworkMode=networkMode.cadastro?(networkMode.proxy?'proxy':'direct'):null;
     if(cadastroProxySession)cadastroProxySession.attach(browser);
-    if(virtusProxySession){virtusProxySession.attach(browser);const bootTimeout=setTimeout(()=>{if(!virtusProxySession.snapshot().startupFinished){virtusProxySession.noteInbox({ok:false,state:'startup_timeout'});virtusProxySession.close().catch(()=>{})}},240000);bootTimeout.unref?.();browser.once('disconnected',()=>clearTimeout(bootTimeout))}
+    if(virtusProxySession){virtusProxySession.attach(browser);require('./virtusStartupGuard').install({browser,session:virtusProxySession,onError:error=>{try{logger.warn('[VIRTUS_PROXY] startup cleanup failed',{error:String(error.message||error)})}catch{}}})}
     if (directSwitch) {
       browser.__ctDirectSwitch = directSwitch;
       browser.on('disconnected', () => {
