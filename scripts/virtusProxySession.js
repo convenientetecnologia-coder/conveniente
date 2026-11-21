@@ -28,7 +28,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
   let browser=null,timer=null,stopped=false,lastNetworkAt=0,lastSyncNetworkAt=0,connectedAt=Date.now(),observerBusy=false,observerOptions=null,observerLastTickAt=0,lastObserveAttemptAt=0,observerSkipReason=null,observerVersion=0,startupFinished=false,healthCheck=null,lastInbox=null,activeLease=null,expectedSend=null,outgoingEvidence=null,humanHeld=false,humanTimer=null,humanResolve=null,humanTask=null;
   const deliveryLedger=dependencies.deliveryLedger||require("./virtusDeliveryLedger");
   let closedBrowserTimer=null,recoveringClosedBrowser=false;
-  let lastDocumentNavigation=null,documentNavigations=0,plannedNavigationReason=null;
+  let lastDocumentNavigation=null,documentNavigations=0,plannedNavigationReason=null,lastBootGate=null;
   const activity=new Activity();const inboundByThread=new Map();let lastReplyTiming=null;const burst=[];let visitIntent=null,visitReplied=false;
  const api={turn,proxyServer:'127.0.0.1:'+port,boot,
    attach(value){
@@ -65,10 +65,11 @@ async function create({nome,onState=()=>{},dependencies={}}){
    noteConversationComplete(){activity.complete()},
    noteNetwork(){lastNetworkAt=Date.now()},
    noteSyncNetwork(){lastSyncNetworkAt=Date.now()},
+   noteBootGate(result){lastBootGate={...result};onState(api.snapshot())},
    visitNetwork(page){return {connectedAt,lastNetworkAt:lastSyncNetworkAt,pending:page?.__ctVirtusPendingInbox?.size||0}},
    setHealthCheck(fn){healthCheck=fn},
    noteInbox(result){lastInbox={...result,at:Date.now()};onState(api.snapshot())},
-   snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld,pilot:accountPilot,lastInbox,startupFinished,documentNavigations,lastDocumentNavigation,rotation:rotationPolicy,lastReplyTiming,activity:activity.snapshot(),pendingBurst:burst.length,observer:{registered:!!observerOptions,lastTickAt:observerLastTickAt,skipReason:observerSkipReason,guard:observerOptions?.describeGuard?.()||null}}},
+   snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld,pilot:accountPilot,lastInbox,startupFinished,documentNavigations,lastDocumentNavigation,lastBootGate,rotation:rotationPolicy,lastReplyTiming,activity:activity.snapshot(),pendingBurst:burst.length,observer:{registered:!!observerOptions,lastTickAt:observerLastTickAt,skipReason:observerSkipReason,guard:observerOptions?.describeGuard?.()||null}}},
    async enterHuman(){
     if(humanTask)return humanTask.ready;
     humanHeld=true;api.finishBoot();let readyResolve,readyReject;const ready=new Promise((r,j)=>{readyResolve=r;readyReject=j});

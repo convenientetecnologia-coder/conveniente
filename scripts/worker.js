@@ -755,12 +755,9 @@ function __deltaMarkBootEarState(nome, patch = {}) {
   } catch {}
   return st;
 }
-function __deltaIsBootEarReady(nome) {
-  const st = __deltaGetBootEarState(nome);
-  if (!st) return false;
-  if (!st.earAttached || !(Number(st.earAttachedAt || 0) > 0)) return false;
-  if (Number(st.wsSignatureCandidateAt || 0) > 0) return true;
-  return false;
+function __deltaIsBootEarReady(nome, page = null) {
+  // Capture must be installed before navigation; incoming frames require navigation first.
+  return require('./virtusBootInterlock').listenerReady(controllers.get(nome),page,{shuttingDown:_shuttingDown});
 }
 async function __deltaPrepareBootInterlockEar(nome, page) {
   try {
@@ -1039,7 +1036,7 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
     bootInterlockEnabled: String(process.env.DELTA_BOOT_INTERLOCK_ENABLED || '1').trim() !== '0',
     bootInterlockHoldMs: Math.max(3000, Number(process.env.DELTA_BOOT_INTERLOCK_HOLD_MS || 3000) || 3000),
     bootInterlockBeforeNavigate: ({ page }) => __deltaPrepareBootInterlockEar(nome, page),
-    bootInterlockIsEarReady: () => __deltaIsBootEarReady(nome),
+    bootInterlockIsEarReady: (page) => __deltaIsBootEarReady(nome, page),
     onMessagesBootStableShrink: (payload) => shrinkRootPidAfterMessagesBoot(nome, browser, payload),
   };
   if (eng === 'delta') {
@@ -25098,7 +25095,7 @@ async function __deltaResolveVirtusRunner(nome, { need = 'greeting' } = {}) {
       bootInterlockEnabled: bypassInterlockForReply ? false : bootInterlockEnabled,
       bootInterlockHoldMs: bypassInterlockForReply ? 0 : bootInterlockHoldMs,
       bootInterlockBeforeNavigate: bypassInterlockForReply ? null : ({ page }) => __deltaPrepareBootInterlockEar(nome, page),
-      bootInterlockIsEarReady: bypassInterlockForReply ? null : () => __deltaIsBootEarReady(nome),
+      bootInterlockIsEarReady: bypassInterlockForReply ? null : (page) => __deltaIsBootEarReady(nome, page),
     });
     const booted = await resolveRunner(ctrl.virtus);
     // Se humano entrou durante o boot, mata o runtime recém-criado e entrega null.

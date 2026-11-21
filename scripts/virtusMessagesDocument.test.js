@@ -1,4 +1,13 @@
 'use strict';const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),{inspectDocument,wait}=require('./virtusMessagesDocument');
+test('proxy reply fallback cannot navigate over a loading or broken document; network mode remains unchanged',async()=>{
+ const {threadNavigationGuard}=require('./virtusMessagesDocument');let evaluations=0;
+ const page={__ctVirtusProxySession:{},evaluate:async()=>{evaluations++;return {ready:false,reason:'document_loading'}}};
+ assert.equal((await threadNavigationGuard(page)).allowed,false);
+ page.evaluate=async()=>({ready:true});assert.equal((await threadNavigationGuard(page)).allowed,true);
+ page.evaluate=async()=>{throw Error('target_lost')};assert.equal((await threadNavigationGuard(page)).allowed,false);
+ const direct={evaluate:async()=>{throw Error('must_not_probe_network_mode')}};assert.equal((await threadNavigationGuard(direct)).allowed,true);
+ assert.equal(evaluations,1);
+});
 function probe({heading=true,grid=true,links=2,loading=0,font='Arial',text='Conversas',state='complete',sheets}={}){
  const element={innerText:'Conversas',getAttribute:()=> 'Conversas',getBoundingClientRect:()=>({width:200,height:200})};
  const document={readyState:state,styleSheets:sheets,body:{innerText:text},querySelectorAll:s=>s.startsWith('h1')?(heading?[element]:[]):s.startsWith('[role="grid"')?(grid?[element]:[]):s.startsWith('a[')?Array(links).fill(element):Array(loading).fill(element)};
@@ -11,6 +20,7 @@ test('skeleton, splash, missing styles and explicit load failure cannot validate
 test('missing or disabled stylesheets fail even when font is Arial',()=>{
  assert.equal(probe({sheets:[]}).reason,'styles_unavailable');
  assert.equal(probe({sheets:[{disabled:true}]}).ready,false);
+ assert.equal(probe({sheets:[{disabled:false,ownerNode:{id:'virtus_antiselect_style_v1',sheet:{}}}]}).reason,'styles_unavailable');
  assert.equal(probe({sheets:[{disabled:false}]}).ready,true);
 });
 test('stalled shell requires full timeout evidence, online browser and cooldown; reload is never success',async()=>{

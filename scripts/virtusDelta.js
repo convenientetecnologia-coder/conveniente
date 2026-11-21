@@ -387,61 +387,16 @@ function attachDeltaNavigationFirewall(page, { profileName = "" } = {}) {
           typeof bootInterlock.matches === "function" &&
           bootInterlock.matches(url)
         ) {
-          if (bootInterlock.requestHeld) return;
+          if (bootInterlock.requestHeld) { request.abort("aborted").catch(() => {}); return; }
           bootInterlock.requestHeld = true;
-          const holdMs = Math.max(3000, Number(bootInterlock.holdMs || 3000) || 3000);
-          const earReadyFn = (typeof bootInterlock.isEarReady === "function") ? bootInterlock.isEarReady : null;
-          const startedAt = Date.now();
-          (async () => {
-            let earReady = !earReadyFn;
-            try {
-              // Retenção mínima obrigatória do boot.
-              while ((Date.now() - startedAt) < holdMs) {
-                if (earReadyFn) {
-                  try {
-                    const probe = await Promise.resolve(earReadyFn());
-                    if (probe === true) { earReady = true; break; }
-                  } catch (_) {}
-                }
-                const remaining = Math.max(0, holdMs - (Date.now() - startedAt));
-                if (remaining <= 0) break;
-                await sleep(Math.min(120, remaining));
-              }
-              // Regra rígida: só libera quando ouvido de borda estiver autenticamente pronto.
-              if (earReadyFn && !earReady) {
-                let lastWaitLogAt = 0;
-                while (!earReady) {
-                  try { earReady = !!(await Promise.resolve(earReadyFn())); } catch (_) { earReady = false; }
-                  if (earReady) break;
-                  const now = Date.now();
-                  if (!lastWaitLogAt || (now - lastWaitLogAt) >= 5000) {
-                    lastWaitLogAt = now;
-                    try {
-                      logInfo(
-                        `[DELTA_BOOT_INTERLOCK] waiting_ear_ready profile=${String(profileName || "").trim() || "unknown"} waited_ms=${Math.max(0, now - startedAt)}`
-                      );
-                    } catch (_) {}
-                  }
-                  await sleep(120);
-                }
-              }
-            } catch (_) {}
-            if (!earReady) return;
-            try { request.continue().catch(() => {}); } catch (_) {}
-            bootInterlock.released = true;
-            bootInterlock.active = false;
-            bootInterlock.releasedAt = Date.now();
-            bootInterlock.earReadyAtRelease = !!earReady;
-            try {
-              logInfo(
-                `[DELTA_BOOT_INTERLOCK] release profile=${String(profileName || "").trim() || "unknown"} hold_ms=${Math.max(0, Date.now() - startedAt)} ear_ready=${earReady ? "sim" : "nao"}`
-              );
-            } catch (_) {}
-            if (bootInterlock.disableInterceptionAfterRelease !== false) {
-              try { await page.setRequestInterception(false); } catch (_) {}
+          require("./virtusBootInterlock").holdNavigation({
+            page, request, state: bootInterlock,
+            ready: typeof bootInterlock.isEarReady === "function" ? bootInterlock.isEarReady : () => true,
+            onResult: (result) => {
+              try { page.__ctVirtusProxySession?.noteBootGate(result); } catch {}
+              logInfo("[DELTA_BOOT_INTERLOCK] " + JSON.stringify(result));
             }
-            try { delete page.__deltaBootInterlock; } catch (_) {}
-          })().catch(() => {});
+          }).catch(() => {});
           return;
         }
         if (!isAllowedNavUrl(url)) {
@@ -486,6 +441,7 @@ async function __gotoWithBootInterlock(page, targetUrl, {
     return await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
   }
   const holdMs = Math.max(3000, Number(bootInterlockHoldMs || 3000) || 3000);
+  let armedState = null;
   try {
     if (typeof bootInterlockBeforeNavigate === "function") {
       await Promise.resolve(bootInterlockBeforeNavigate({ page, targetUrl: url, holdMs, profileName }));
@@ -496,6 +452,8 @@ async function __gotoWithBootInterlock(page, targetUrl, {
       active: true,
       released: false,
       requestHeld: false,
+      cancelled: false,
+      deadlineAt: Date.now() + timeoutMs,
       holdMs,
       isEarReady: (typeof bootInterlockIsEarReady === "function") ? bootInterlockIsEarReady : null,
       disableInterceptionAfterRelease: true,
@@ -515,6 +473,7 @@ async function __gotoWithBootInterlock(page, targetUrl, {
         }
       }
     };
+    armedState = page.__deltaBootInterlock;
     await page.setRequestInterception(true).catch(() => {});
     logInfo(
       `[DELTA_BOOT_INTERLOCK] armed profile=${String(profileName || "").trim() || "unknown"} hold_ms=${holdMs} url=${url}`
@@ -524,14 +483,14 @@ async function __gotoWithBootInterlock(page, targetUrl, {
     return await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
   } finally {
     try {
-      const state = page && page.__deltaBootInterlock ? page.__deltaBootInterlock : null;
-      if (state && state.active === true && state.released !== true) {
+      const state = page && page.__deltaBootInterlock;
+      if (state && state === armedState && !state.released) {
         state.active = false;
-        state.released = true;
-        state.releasedAt = Date.now();
-        if (state.requestHeld !== true) {
-          try { await page.setRequestInterception(false); } catch (_) {}
-          try { delete page.__deltaBootInterlock; } catch (_) {}
+        state.cancelled = true;
+        if (typeof state.cancel === "function") await state.cancel();
+        if (page.__deltaBootInterlock === state) {
+          await page.setRequestInterception(false).catch(() => {});
+          delete page.__deltaBootInterlock;
         }
       }
     } catch (_) {}
@@ -3668,6 +3627,8 @@ function __deltaGotoCircuitTrip(account, thread, reason, { immediate = true } = 
 }
 
 async function __deltaTryOpenThreadByDirectGoto(page, threadKey, { forensicAccountLogin = null, stepAError = null } = {}) {
+  const navigationGuard=await require('./virtusMessagesDocument').threadNavigationGuard(page);
+  if(!navigationGuard.allowed)return {ok:false,error:'proxy_document_not_ready',document:navigationGuard.document,opened_via:'none'};
   try {
     if (page && page.__virtusDeltaHumanHold === true) {
       return { ok: false, error: "identity_hold", skipped: true, opened_via: "direct_goto" };

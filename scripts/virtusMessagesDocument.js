@@ -12,7 +12,7 @@ function inspectDocument(){
  const loading=[...document.querySelectorAll('[role="progressbar"],[aria-busy="true"],[data-visualcompletion="loading-state"]')].filter(visible).length;
  const styled=getComputedStyle(document.body).fontFamily.toLowerCase();
  const sheets=document.styleSheets;
- const hasStyles=sheets===undefined||[...sheets].some(s=>!s.disabled&&(!s.ownerNode||s.ownerNode.sheet));
+ const hasStyles=sheets===undefined||[...sheets].some(s=>!s.disabled&&s.ownerNode?.id!=='virtus_antiselect_style_v1'&&(!s.ownerNode||s.ownerNode.sheet));
  if(!hasStyles||/times new roman/.test(styled))return {ready:false,reason:'styles_unavailable'};
  if(!heading||!grid)return {ready:false,reason:'messages_shell_incomplete'};
  if(loading)return {ready:false,reason:'messages_loading',loading};
@@ -55,4 +55,11 @@ async function recoverBrowserError({page,clock=Date.now,cooldownMs=600000,onReco
  await page.reload({waitUntil:'domcontentloaded',timeout:120000});
  return {reloaded:true};
 }
-module.exports={inspectDocument,wait,ensure,recoverBrowserError};
+async function threadNavigationGuard(page){
+ try{
+  if(!page?.__ctVirtusProxySession&&!page?.browser?.()?.__ctVirtusProxy)return {allowed:true};
+  const document=await page.evaluate(inspectDocument);
+  return {allowed:document.ready===true,document};
+ }catch{return {allowed:false,document:{ready:false,reason:'document_probe_failed'}};}
+}
+module.exports={inspectDocument,wait,ensure,recoverBrowserError,threadNavigationGuard};
