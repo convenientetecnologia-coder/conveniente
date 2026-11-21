@@ -1,12 +1,29 @@
 'use strict';const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),{inspectDocument,wait}=require('./virtusMessagesDocument');
-function probe({heading=true,grid=true,links=2,loading=0,font='Arial',text='Conversas',state='complete'}={}){
+function probe({heading=true,grid=true,links=2,loading=0,font='Arial',text='Conversas',state='complete',sheets}={}){
  const element={innerText:'Conversas',getAttribute:()=> 'Conversas',getBoundingClientRect:()=>({width:200,height:200})};
- const document={readyState:state,body:{innerText:text},querySelectorAll:s=>s.startsWith('h1')?(heading?[element]:[]):s.startsWith('[role="grid"')?(grid?[element]:[]):s.startsWith('a[')?Array(links).fill(element):Array(loading).fill(element)};
+ const document={readyState:state,styleSheets:sheets,body:{innerText:text},querySelectorAll:s=>s.startsWith('h1')?(heading?[element]:[]):s.startsWith('[role="grid"')?(grid?[element]:[]):s.startsWith('a[')?Array(links).fill(element):Array(loading).fill(element)};
  return vm.runInNewContext('('+inspectDocument.toString()+')()',{document,getComputedStyle:()=>({fontFamily:font,visibility:'visible',display:'block'})});
 }
 test('skeleton, splash, missing styles and explicit load failure cannot validate inbox',()=>{
  for(const options of [{heading:false,grid:false,links:0},{loading:3},{font:'Times New Roman'},{text:'Não foi possível carregar as conversas'},{links:0},{state:'loading'}])assert.equal(probe(options).ready,false);
  assert.equal(probe().ready,true);assert.equal(probe({links:0,text:'Conversas Nenhuma conversa'}).ready,true);
+});
+test('missing or disabled stylesheets fail even when font is Arial',()=>{
+ assert.equal(probe({sheets:[]}).reason,'styles_unavailable');
+ assert.equal(probe({sheets:[{disabled:true}]}).ready,false);
+ assert.equal(probe({sheets:[{disabled:false}]}).ready,true);
+});
+test('stalled shell requires full timeout evidence, online browser and cooldown; reload is never success',async()=>{
+ const {ensure}=require('./virtusMessagesDocument');let reloads=0,online=true,attempt=0;
+ const page={evaluate:async()=>online,reload:async()=>reloads++};
+ const fail=(waitedMs,unchangedReasonMs)=>{const e=Error('incomplete');e.details={reason:'messages_shell_incomplete',waitedMs,unchangedReasonMs};return e};
+ for(const evidence of [[119999,60000],[120000,29999]])await assert.rejects(ensure({page,probe:async()=>{throw fail(...evidence)}}));
+ assert.equal(reloads,0);online=false;
+ await assert.rejects(ensure({page,probe:async()=>{throw fail(120000,120000)}}));assert.equal(reloads,0);
+ online=true;
+ await assert.rejects(ensure({page,clock:()=>1000,probe:async()=>{attempt++;throw fail(120000,120000)}}));
+ assert.equal(attempt,2);assert.equal(reloads,1);
+ await assert.rejects(ensure({page,clock:()=>2000,probe:async()=>{throw fail(120000,120000)}}));assert.equal(reloads,1);
 });
 test('Chrome network error never counts as a ready Facebook document',()=>{assert.equal(probe({text:'ERR_INTERNET_DISCONNECTED'}).reason,'browser_network_error')});
 test('Chrome error is reloaded only after online switch and only once per recovery window',async()=>{

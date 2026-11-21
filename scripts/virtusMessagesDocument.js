@@ -11,7 +11,9 @@ function inspectDocument(){
  const links=[...document.querySelectorAll('a[href*="/messages/t/"],a[href*="/messages/e2ee/t/"]')].filter(visible).length;
  const loading=[...document.querySelectorAll('[role="progressbar"],[aria-busy="true"],[data-visualcompletion="loading-state"]')].filter(visible).length;
  const styled=getComputedStyle(document.body).fontFamily.toLowerCase();
- if(/times new roman/.test(styled))return {ready:false,reason:'styles_unavailable'};
+ const sheets=document.styleSheets;
+ const hasStyles=sheets===undefined||[...sheets].some(s=>!s.disabled&&(!s.ownerNode||s.ownerNode.sheet));
+ if(!hasStyles||/times new roman/.test(styled))return {ready:false,reason:'styles_unavailable'};
  if(!heading||!grid)return {ready:false,reason:'messages_shell_incomplete'};
  if(loading)return {ready:false,reason:'messages_loading',loading};
  const empty=/nenhuma (conversa|mensagem)|no (chats|messages|conversations)|suas mensagens|your messages/.test(text);
@@ -19,16 +21,19 @@ function inspectDocument(){
  return {ready:true,reason:'ready',links,empty};
 }
 async function wait({page,timeoutMs=120000,stableMs=2000,clock=Date.now,sleep=ms=>new Promise(r=>setTimeout(r,ms))}){
- const start=clock();let since=null,last;
- while(clock()-start<=timeoutMs){last=await page.evaluate(inspectDocument);if(last.ready){if(since===null)since=clock();if(clock()-since>=stableMs)return last;}else since=null;await sleep(250);}
- const error=Error('virtus_messages_document_not_ready');error.details=last;throw error;
+ const start=clock();let since=null,last,reasonSince=start,reason;
+ while(clock()-start<=timeoutMs){last=await page.evaluate(inspectDocument);if(last.reason!==reason){reason=last.reason;reasonSince=clock();}if(last.ready){if(since===null)since=clock();if(clock()-since>=stableMs)return last;}else since=null;await sleep(250);}
+ const error=Error('virtus_messages_document_not_ready');error.details={...last,waitedMs:clock()-start,unchangedReasonMs:clock()-reasonSince};throw error;
 }
 const recoveryTimes=new WeakMap();
 async function ensure({page,probe=wait,clock=Date.now,cooldownMs=600000,onRecovery=()=>{}}){
  try{return await probe({page});}catch(error){
   const reason=error.details?.reason;
   // A reload is justified only by explicit broken-document evidence, never silence or absence of new messages.
-  if(!['styles_unavailable','conversations_load_failed','browser_network_error'].includes(reason)||typeof page.reload!=='function')throw error;
+  const stalled=['messages_shell_incomplete','messages_loading','conversation_list_unconfirmed','document_loading'].includes(reason)&&error.details.waitedMs>=120000&&error.details.unchangedReasonMs>=30000;
+  if((!['styles_unavailable','conversations_load_failed','browser_network_error'].includes(reason)&&!stalled)||typeof page.reload!=='function')throw error;
+  // This function runs inside a proven proxy turn. Never navigate after the browser goes offline.
+  if(typeof page.evaluate==='function'&&!(await page.evaluate(()=>navigator.onLine===true)))throw error;
   const previous=recoveryTimes.get(page);
   if(previous!==undefined&&clock()-previous<cooldownMs)throw error;
   recoveryTimes.set(page,clock());onRecovery({reason,at:clock()});

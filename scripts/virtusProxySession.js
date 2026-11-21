@@ -90,10 +90,21 @@ async function create({nome,onState=()=>{},dependencies={}}){
         const page=pages.find(p=>/facebook\.com\/messages|messenger\.com/.test(p.url()))||pages[0];
         if(!page)throw Error('virtus_proxy_page_missing');
         await require('./virtusMessagesDocument').recoverBrowserError({page,onRecovery:e=>{api.noteInbox({ok:false,state:'recovering_browser_document',reason:e.reason});}});
-        await page.waitForFunction(()=>document.readyState!=='loading'&&!!document.body,{timeout:120000});
-        const until=Date.now()+60000;
+        try{await page.waitForFunction(()=>document.readyState!=='loading'&&!!document.body,{timeout:120000});}
+        catch(error){
+          if(error.name!=='TimeoutError')throw error;
+          await require('./virtusMessagesDocument').ensure({page,onRecovery:e=>api.noteInbox({ok:false,state:'recovering_browser_document',reason:e.reason})});
+        }
+        const until=Date.now()+(dependencies.reconnectWaitMs??60000);
         while(lastNetworkAt<reconnectAt&&Date.now()<until&&!stopped)await new Promise(r=>setTimeout(r,250));
-        if(lastNetworkAt<reconnectAt)throw Error('virtus_reconnect_not_confirmed');
+        if(lastNetworkAt<reconnectAt){
+          // A broken document may have no surviving socket to produce a reconnect event.
+          // A complete, quiet inbox must never be reloaded merely for being quiet.
+          const documents=require('./virtusMessagesDocument');
+          const state=await page.evaluate(documents.inspectDocument);
+          if(!state.ready)await documents.ensure({page,onRecovery:e=>api.noteInbox({ok:false,state:'recovering_browser_document',reason:e.reason})});
+          if(lastNetworkAt<reconnectAt)throw Error('virtus_reconnect_not_confirmed');
+        }
         if(intent==='reply'&&healthCheck){const health=await healthCheck();if(!health.ok)throw Error('virtus_account_blocked:'+health.state)}
         return await action(lease);
       }finally{if(expectedSend?.delivery){deliveryLedger.markUncertain?.(expectedSend.delivery);expectedSend=null}visitIntent=null;activeLease=null;while(burst.length)burst.shift().reject(Error('virtus_visit_ended_before_reply'))}
