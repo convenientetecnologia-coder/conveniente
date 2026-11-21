@@ -39,3 +39,7 @@ Limite de 12 horas preservado. A revisão inicial não se aplica a conversas já
 ## Mãe 2 — erro do Chrome
 
 Texto de falha de conversas repete caso anterior. Captura adicional mostra `ERR_INTERNET_DISCONNECTED` do Chrome. Novo tratamento somente dentro de turno concedido, após prova de proxy e retirada do modo offline: confirmar documento de erro explícito e `navigator.onLine`, recarregar uma vez e voltar às verificações de rede/documento. Offline ainda ativo impede recuperação; cooldown de dez minutos evita tempestade de reload. Não se infere desse erro, sozinho, que a conexão física do servidor caiu. Produção segue sem atualização.
+
+## Mãe 1 — Neto Tavares
+
+Conta `curitiba-1795270698795`: registro às 1795274590927 mostra descarte da mensagem de timestamp 1795258929975, thread `1730625818739456`, por `first_boot_seed_without_delta_history`; segunda mensagem da mesma thread sofre o mesmo filtro. Ambas anteriores à intervenção humana relatada pelo operador. O trecho da fila recuperado não contém encaminhamento dessa conta. Mesmo padrão do Osvaldo, coberto pela revisão de primeiro início, sem remover o limite temporal. Teste com os timestamps reais confirma elegibilidade dentro da janela, recusa após 12h e bloqueio quando há estado de atendimento persistido. Não se afirma confirmação do nome do cliente ou entrega de resposta com base nesses eventos.
