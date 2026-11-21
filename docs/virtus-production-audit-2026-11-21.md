@@ -19,3 +19,9 @@ Não aplicado aos servidores. Revisão dos demais servidores continua. Ainda pen
 ## Mãe 7
 
 Página sem estilos e splash repetem os sintomas da Mãe 5. Snapshot confirma visitas incompletas e também um caso distinto: perfil ativo em `about:blank`, sessão proxy fechada e `startup_timeout` persistido. O callback de timeout fechava a sessão sem garantir fechamento do navegador; sua própria rotina de encerramento desativava a limpeza periódica. Corrigido para fechar o navegador ao vencer a abertura, inclusive quando a limpeza da sessão falha. Não reinicia cadastro nem ignora checkpoints. Duas verificações direcionadas cobrem timeout com erro e preservação de navegador cujo startup concluiu.
+
+## Mãe 6 — atendimento, postagem e identificação
+
+Pamela associada por registro à conta `anapolis-1795215264742`, com coleta/cidade resolvida; ainda não equivale a confirmação de entrega. Brenda associada pelo operador a `florianopolis-1795274260369`; a conta da Ester ainda não foi identificada. Postagem com prévia quebrada associada a `aracaju-1795068496714`; upload e prévia ainda devem ser distinguidos pelos registros.
+
+Identificação local acrescentada às páginas: etiqueta discreta com nome/cidade e ID no atributo de descrição, sem rede, navegação, login Chrome ou cadeira. Não depende do modo humano e não intercepta cliques. O pedido humano hoje espera cadeira antes de concluir preparação visual; não foi alterada sua governança nesta etapa.

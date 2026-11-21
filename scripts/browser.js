@@ -2718,6 +2718,7 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       throw new Error('Browser não iniciou após 3 tentativas. Veja logs acima e o arquivo chrome_launch.log do perfil.');
     }
     browser = browserTry;
+    try{await require('./browserAccountIdentity').attach({browser,name:nome,label:manifest.label||manifest.nome||nome,city:manifest.cidade||manifest.city||'',onError:()=>{}})}catch{}
     browser.__ctNetworkPurpose=networkMode.cadastro?'cadastro':'virtus';
     browser.__ctCadastroNetworkMode=networkMode.cadastro?(networkMode.proxy?'proxy':'direct'):null;
     if(cadastroProxySession)cadastroProxySession.attach(browser);
