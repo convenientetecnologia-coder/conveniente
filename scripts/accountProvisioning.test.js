@@ -2,6 +2,18 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const {stopForConfigure}=require('./runtimeStop');
 const source=fs.readFileSync(require('node:path').join(__dirname,'worker.js'),'utf8');
+test('stock rejects HTTP success envelopes containing failed activation or start-work',()=>{
+ const dashboard=fs.readFileSync(require('node:path').join(__dirname,'dashboard.js'),'utf8');
+ for(const number of [4,8]){
+  const start=dashboard.indexOf('          const rr'+number+' ='),end=dashboard.indexOf('          return r'+number+';',start);
+  assert.ok(start>0&&end>start);
+  const check=vm.runInNewContext('(function(r'+number+'){'+dashboard.slice(start,end)+'return true;})');
+  assert.throws(()=>check({ok:true,result:{ok:false,error:'account_configure_pending'}}),/account_configure_pending/);
+  assert.throws(()=>check({ok:true,result:{}}));
+  assert.equal(check({ok:true,result:{ok:true}}),true);
+  assert.equal(check({ok:true}),true);
+ }
+});
 test('cadastro recusa espera infinita e para o runtime se ele resolver atrasado',async()=>{
  let resolve,stopped=0;const pending=new Promise(r=>{resolve=r});
  await assert.rejects(stopForConfigure([pending],15),/configure_virtus_stop_timeout/);

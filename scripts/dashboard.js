@@ -2824,7 +2824,8 @@ async function execStockProvision(cmd) {
             timeoutMs: Math.max(20_000, Math.min(25 * 60 * 1000, budgetLeftMs() + 20_000)),
             body: {}
           });
-          if (!r4 || r4.ok === false) throw new Error((r4 && r4.error) ? String(r4.error) : 'activate_failed');
+          const rr4 = r4 && typeof r4.result === 'object' ? r4.result : r4;
+          if (!r4 || r4.ok !== true || !rr4 || rr4.ok !== true) throw new Error(String(rr4?.error || r4?.error || 'activate_failed'));
           return r4;
         });
 
@@ -2940,7 +2941,8 @@ async function execStockProvision(cmd) {
             retries: 0,
             body: {}
           });
-          if (!r8 || r8.ok === false) throw new Error((r8 && r8.error) ? String(r8.error) : 'start_work_failed');
+          const rr8 = r8 && typeof r8.result === 'object' ? r8.result : r8;
+          if (!r8 || r8.ok !== true || !rr8 || rr8.ok !== true) throw new Error(String(rr8?.error || r8?.error || 'start_work_failed'));
           return r8;
         });
 
