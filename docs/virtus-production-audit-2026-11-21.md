@@ -35,3 +35,7 @@ Capturas mostram lista posicionada em conversas de seis/sete semanas; ao voltar 
 ### Preservação de tempo e estado
 
 Limite de 12 horas preservado. A revisão inicial não se aplica a conversas já presentes no estado persistido de atendimento. A releitura anteriormente injetava `Date.now()+1500`; isso foi substituído pelo timestamp original da rede quando o texto conferido é o mesmo, ou pelo horário verificável da mensagem lida. Mensagem sem horário comprovado, futura ou fora da janela não é encaminhada. Uma nova leitura/reconexão não renova a idade de uma mensagem antiga. Testes cobrem reinício com estado persistido, envelhecimento além de 12h, resposta nossa, divergência de texto e horário ausente.
+
+## Mãe 2 — erro do Chrome
+
+Texto de falha de conversas repete caso anterior. Captura adicional mostra `ERR_INTERNET_DISCONNECTED` do Chrome. Novo tratamento somente dentro de turno concedido, após prova de proxy e retirada do modo offline: confirmar documento de erro explícito e `navigator.onLine`, recarregar uma vez e voltar às verificações de rede/documento. Offline ainda ativo impede recuperação; cooldown de dez minutos evita tempestade de reload. Não se infere desse erro, sozinho, que a conexão física do servidor caiu. Produção segue sem atualização.

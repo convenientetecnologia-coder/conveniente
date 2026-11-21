@@ -89,6 +89,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
         // Reconnection must have a ready document before any account action.
         const page=pages.find(p=>/facebook\.com\/messages|messenger\.com/.test(p.url()))||pages[0];
         if(!page)throw Error('virtus_proxy_page_missing');
+        await require('./virtusMessagesDocument').recoverBrowserError({page,onRecovery:e=>{api.noteInbox({ok:false,state:'recovering_browser_document',reason:e.reason});}});
         await page.waitForFunction(()=>document.readyState!=='loading'&&!!document.body,{timeout:120000});
         const until=Date.now()+60000;
         while(lastNetworkAt<reconnectAt&&Date.now()<until&&!stopped)await new Promise(r=>setTimeout(r,250));

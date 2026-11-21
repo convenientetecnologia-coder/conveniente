@@ -8,6 +8,15 @@ test('skeleton, splash, missing styles and explicit load failure cannot validate
  for(const options of [{heading:false,grid:false,links:0},{loading:3},{font:'Times New Roman'},{text:'Não foi possível carregar as conversas'},{links:0},{state:'loading'}])assert.equal(probe(options).ready,false);
  assert.equal(probe().ready,true);assert.equal(probe({links:0,text:'Conversas Nenhuma conversa'}).ready,true);
 });
+test('Chrome network error never counts as a ready Facebook document',()=>{assert.equal(probe({text:'ERR_INTERNET_DISCONNECTED'}).reason,'browser_network_error')});
+test('Chrome error is reloaded only after online switch and only once per recovery window',async()=>{
+ const {recoverBrowserError}=require('./virtusMessagesDocument');let online=false,reloads=0;
+ const page={evaluate:async()=>({error:true,online}),reload:async()=>reloads++};
+ await assert.rejects(recoverBrowserError({page,clock:()=>1000}),/still_offline/);assert.equal(reloads,0);
+ online=true;assert.equal((await recoverBrowserError({page,clock:()=>1000})).reloaded,true);assert.equal(reloads,1);
+ await assert.rejects(recoverBrowserError({page,clock:()=>2000}),/cooldown/);assert.equal(reloads,1);
+ page.evaluate=async()=>({error:false,online:true});assert.equal((await recoverBrowserError({page})).reloaded,false);
+});
 test('document must remain ready; timeout retains exact failure evidence',async()=>{
  let now=0;const page={evaluate:async()=>({ready:now>=500,reason:'messages_loading'})};
  const ready=await wait({page,clock:()=>now,sleep:async ms=>now+=ms,stableMs:500,timeoutMs:1500});assert.equal(ready.ready,true);assert.equal(now,1000);
