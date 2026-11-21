@@ -4,6 +4,8 @@ async function check(page,{browser=require('./browser'),clock=Date.now}={}){
  const captcha=await browser.detectCaptchaChallenge(page);if(captcha.ok===false)throw Error('virtus_captcha_probe_failed');if(captcha.present)return {ok:false,state:'captcha',reason:'captcha_present'};
  const identity=await browser.detectVirtusIdentityBlock(page);if(identity.blocked)return {ok:false,state:'identity',reason:identity.reason};
  const login=await browser.detectLoginRequired(page);if(login.loginRequired)return {ok:false,state:'login',reason:login.reason};
+ const storage=await require('./messengerStorageNotice').dismiss(page);
+ if(storage.present&&!storage.closed)return {ok:false,state:'storage_notice',reason:'close_unconfirmed'};
  const restore=await restoreNotice(page);
  if(restore.present){if(!restore.closed)return {ok:false,state:'restore_notice',reason:'close_unconfirmed'};}
  const historyWarning=await page.evaluate(()=>{const t=String(document.body?.innerText||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ');return t.includes('o historico da conversa esta faltando')&&t.includes('inserir pin')});

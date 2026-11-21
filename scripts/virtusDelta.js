@@ -8765,7 +8765,7 @@ async function startVirtusDeltaRuntime() {
 async function proxyMarketplaceListActive(page){
  return page.evaluate(()=>{
   const norm=s=>String(s||'').replace(/\s+/g,' ').trim().toLowerCase();
-  return Array.from(document.querySelectorAll('h1,[role="heading"],[role="grid"][aria-label]')).some(el=>{
+  return Array.from(document.querySelectorAll('[role="grid"][aria-label]')).some(el=>{
    const r=el.getBoundingClientRect();if(r.width<2||r.height<2)return false;
    return norm(el.getAttribute('aria-label')||el.textContent)==='marketplace';
   });
@@ -8795,7 +8795,7 @@ async function proxyMarketplaceTarget(page){
 async function prepareProxyInbox(page,healthCheck){
  if(healthCheck){const health=await healthCheck(page);if(!health.ok)return {ok:false,state:'blocked',health:health.state,reason:health.reason};}
  try{return await require('./virtusInboxVisit').visit({
-  ready:()=>page.waitForFunction(()=>document.readyState!=='loading'&&!!document.body,{timeout:120000}),
+  ready:()=>require('./virtusMessagesDocument').ensure({page,onRecovery:e=>logInfo('[virtusDelta][proxy_document_recovery] '+JSON.stringify(e))}),
   active:()=>proxyMarketplaceListActive(page),visible:async()=>!!(await proxyMarketplaceTarget(page)),
   click:async()=>{const target=await proxyMarketplaceTarget(page);if(!target)throw Error('virtus_marketplace_target_disappeared');await page.mouse.click(target.x,target.y,{delay:clickDelayMs()})},
   settled:()=>require('./virtusInboxReady').wait({probe:()=>require('./virtusInboxReady').snapshot(page),network:()=>page.__ctVirtusProxySession?.visitNetwork(page)||{}})
