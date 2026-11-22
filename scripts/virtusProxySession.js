@@ -17,7 +17,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
  const rail=rails.createDirectSwitch({requireProxy:true});let port;
  try{
   port=await rail.listen();
-  const turn=new VirtusTurn({rail,onState,beforeDisconnect:async()=>{if(browser)for(const page of await browser.pages())try{await page.setOfflineMode(true)}catch{}},acquire:({intent,signal})=>cp2.begin({nome,purpose:'virtus',intent,messageIsolation:true,observationRecovery:['warm','observe','engaged'].includes(intent)&&!!deliveryLedger.accountBlocked?.(nome),hotUntil:Math.floor(activity.snapshot().hotUntil/1000),signal,isReady:dependencies.isReady||(()=>accountStillWanted(nome))}),prove:async()=>{
+  const turn=new VirtusTurn({rail,onState,onTrace:dependencies.onTrace||(trace=>require('./virtusTurnEvidence').record(nome,trace)),beforeDisconnect:async()=>{if(browser)for(const page of await browser.pages())try{await page.setOfflineMode(true)}catch{}},acquire:({intent,signal})=>cp2.begin({nome,purpose:'virtus',intent,messageIsolation:true,observationRecovery:['warm','observe','engaged'].includes(intent)&&!!deliveryLedger.accountBlocked?.(nome),hotUntil:Math.floor(activity.snapshot().hotUntil/1000),signal,isReady:dependencies.isReady||(()=>accountStillWanted(nome))}),prove:async()=>{
    const raw=await rails.proveThroughRail(port);let payload;try{payload=JSON.parse(raw)}catch{throw Error('virtus_proxy_invalid_proof')}
    const proof=rails.readExit(payload);if(!proof.ip)throw Error('virtus_proxy_missing_ip');return proof;
   }});

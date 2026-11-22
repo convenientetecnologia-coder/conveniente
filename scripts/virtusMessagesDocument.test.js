@@ -8,11 +8,13 @@ test('proxy reply fallback cannot navigate over a loading or broken document; ne
  const direct={evaluate:async()=>{throw Error('must_not_probe_network_mode')}};assert.equal((await threadNavigationGuard(direct)).allowed,true);
  assert.equal(evaluations,1);
 });
-function probe({heading=true,grid=true,links=2,loading=0,font='Arial',text='Conversas',state='complete',sheets}={}){
+function probe({heading=true,grid=true,links=2,loading=0,loadingOutside=false,font='Arial',text='Conversas',state='complete',sheets}={}){
  const element={innerText:'Conversas',getAttribute:()=> 'Conversas',getBoundingClientRect:()=>({width:200,height:200})};
- const document={readyState:state,styleSheets:sheets,body:{innerText:text},querySelectorAll:s=>s.startsWith('h1')?(heading?[element]:[]):s.startsWith('[role="grid"')?(grid?[element]:[]):s.startsWith('a[')?Array(links).fill(element):Array(loading).fill(element)};
- return vm.runInNewContext('('+inspectDocument.toString()+')()',{document,getComputedStyle:()=>({fontFamily:font,visibility:'visible',display:'block'})});
+ const placeholder=loadingOutside?{...element,getBoundingClientRect:()=>({width:200,height:100,top:1200,bottom:1300})}:element;
+ const document={readyState:state,styleSheets:sheets,body:{innerText:text},querySelectorAll:s=>s.startsWith('h1')?(heading?[element]:[]):s.startsWith('[role="grid"')?(grid?[element]:[]):s.startsWith('a[')?Array(links).fill(element):Array(loading).fill(placeholder)};
+ return vm.runInNewContext('('+inspectDocument.toString()+')()',{document,window:{innerHeight:800},getComputedStyle:()=>({fontFamily:font,visibility:'visible',display:'block'})});
 }
+test('offscreen placeholders do not block a ready visible inbox; visible skeletons still block',()=>{assert.equal(probe({loading:6,loadingOutside:true}).ready,true);assert.equal(probe({loading:6}).ready,false);assert.equal(probe({links:0,loading:6,loadingOutside:true}).ready,false)});
 test('skeleton, splash, missing styles and explicit load failure cannot validate inbox',()=>{
  for(const options of [{heading:false,grid:false,links:0},{loading:3},{font:'Times New Roman'},{text:'Não foi possível carregar as conversas'},{links:0},{state:'loading'}])assert.equal(probe(options).ready,false);
  assert.equal(probe().ready,true);assert.equal(probe({links:0,text:'Conversas Nenhuma conversa'}).ready,true);

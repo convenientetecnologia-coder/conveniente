@@ -1,7 +1,7 @@
 'use strict';
 function inspectDocument(){
  const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
- const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>2&&r.height>2&&s.display!=='none'&&s.visibility!=='hidden'};
+ const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e),h=typeof window!=='undefined'?window.innerHeight:0;const inView=!h||typeof r.top!=='number'||typeof r.bottom!=='number'||r.bottom>0&&r.top<h;return inView&&r.width>2&&r.height>2&&s.display!=='none'&&s.visibility!=='hidden'};
  if(!document.body||document.readyState==='loading')return {ready:false,reason:'document_loading'};
  const text=norm(document.body.innerText||document.body.textContent);
  if(/err_internet_disconnected|err_proxy_connection_failed|err_tunnel_connection_failed|err_connection_reset/.test(text))return {ready:false,reason:'browser_network_error'};

@@ -6627,7 +6627,18 @@ async function detectLoginRequired(page) {
         ));
 
       // 7) Sinais de identidade no body (fallback quando o recorte de h1 não contém)
-      const hasSelfVideo = bodyTxt.includes('self') && bodyTxt.includes('video');
+      // Only visible account-verification UI can require a selfie. Raw page
+      // data can contain CSS "align-self" and video features before rendering;
+      // ordinary chat messages can also mention both words.
+      const visibleIdentityText = norm(document.body ? (document.body.innerText || '') : '');
+      const identitySurfaceConfirmed = /\/(checkpoint|two_step_verification|security)\b/i.test(path0) ||
+        Array.from(document.querySelectorAll('h1,h2,[role="heading"],[role="dialog"],[aria-modal="true"]')).some(el => {
+          const rect = el.getBoundingClientRect(), style = getComputedStyle(el);
+          if (rect.width <= 2 || rect.height <= 2 || style.display === 'none' || style.visibility === 'hidden') return false;
+          const text = norm(el.innerText || '');
+          return /confirm(?:e|ar|acao)? (?:a |sua )?identidade|confirm your identity|(?:grave|gravar|record).{0,40}(?:self|video)/.test(text);
+        });
+      const hasSelfVideo = identitySurfaceConfirmed && visibleIdentityText.includes('self') && visibleIdentityText.includes('video');
       const bodyHasIdentityHints =
         bodyTxt.includes('confirme sua identidade') ||
         bodyTxt.includes('confirm your identity') ||
