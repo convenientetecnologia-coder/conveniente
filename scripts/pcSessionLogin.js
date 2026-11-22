@@ -249,6 +249,13 @@ async function whatsappScreen(page) {
 }
 
 async function markWhatsappConfirm(nome) {
+  if (!require('./accountProvisioningState').cadastroIsWriting()) {
+    try {
+      const fileStore = require('./fileStore');
+      const d = fileStore.readJsonSafe(fileStore.desiredPath, { perfis: {} });
+      if (d && d.perfis && d.perfis[nome] && d.perfis[nome].provisioningPending === true) return { ok: false, skipped: 'cadastro_pending' };
+    } catch {}
+  }
   await manifestStore.update(String(nome || ''), (m) => {
     m = m || {};
     m.accountFlags = m.accountFlags || {};

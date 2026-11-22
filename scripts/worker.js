@@ -2134,7 +2134,24 @@ async function emitUaFpEventToCT(nome, { eventKind = '', url = '', title = '' } 
   }
 }
 
+function refuseOutsideCadastroMark(nome) {
+  let pending = false;
+  try {
+    const d = readJsonFile(desiredPath, { perfis: {} });
+    pending = !!(d && d.perfis && d.perfis[nome] && d.perfis[nome].provisioningPending === true);
+  } catch {}
+  if (require('./accountProvisioningState').mayWriteCadastroMark(require('./accountProvisioningState').cadastroIsWriting(), pending)) return false;
+  const rm = robeMeta[nome] = robeMeta[nome] || {};
+  const now = Date.now();
+  if (!rm.cadastroMarkRefusedAt || now - rm.cadastroMarkRefusedAt > 60000) {
+    rm.cadastroMarkRefusedAt = now;
+    try { provisionAudit.append({ ts: now, event: 'cadastro_mark_refused', nome: String(nome || '') }); } catch {}
+  }
+  return true;
+}
+
 async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
+  if (refuseOutsideCadastroMark(nome)) return;
   // Guardrail enterprise: identidade (selfie/vídeo) não deve virar "loginRequired" genérico.
   // Ela tem semântica própria (humano + monitor 1h quando submetido).
   try {
@@ -2625,6 +2642,7 @@ async function nurseEnsureTerminalHumanOnce(nome, ctrl, want, reason) {
 // Contrato ops: captcha/checkpoint → NÃO fecha browser, marca flag, INVOCA humano.
 // Usuário verifica no dia; exclusão diária fecha+exclui no horário configurado.
 async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = '', title = '' } = {}) {
+  if (refuseOutsideCadastroMark(nome)) return;
   if (browserHelper.isMarketplaceDocCheckpointUrl(url)) {
     try {
       const prevDoc = await readAccountFlags(nome).catch(() => null);
@@ -2696,6 +2714,7 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
 // Contrato ops: ID Virtus (Messenger "para enviar mensagens") → flag + INVOCA humano.
 // Distinto de identityRequired (selfie/vídeo), que NÃO invoca humano.
 async function setIdVirtusFlag(nome, { reason = '', source = '', url = '', title = '' } = {}) {
+  if (refuseOutsideCadastroMark(nome)) return;
   if (await ownProfileProofIsFresh(nome, controllers.get(nome))) return;
   let already = false;
   try {
@@ -2878,6 +2897,7 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
   try {
     if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'no_browser' };
     if (!pg) return { ok: false, error: 'no_page' };
+    if (refuseOutsideCadastroMark(nome)) return { ok: false, skipped: true, reason: 'cadastro_pending' };
     // Se humano está no controle, não operar.
     if (ctrl && ctrl.humanControl === true) {
       try { provisionAudit.append({ ts: Date.now(), event: 'captcha_flow_skipped_human_control', nome: String(nome||''), flowId: id, source: String(source||'').slice(0, 80) }); } catch {}
@@ -4834,6 +4854,7 @@ function isFacebookMessagesUrl(raw) {
 // - não deixa "invocar humano" virar estado final por engano
 // Retorna { ok, state, reason }
 async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {}) {
+  if (refuseOutsideCadastroMark(nome)) return { ok: true, skipped: true, reason: 'cadastro_pending' };
   try {
     // Ultra enterprise: em alguns boots o ctrl.mainPage pode ainda não estar setado (race).
     // Não podemos "ficar cego" e pular o probe — isso causa o sintoma "às vezes clica Continuar, às vezes não".
@@ -5289,6 +5310,7 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
 }
 
 async function setAppealSubmittedFlag(nome, { source = '', url = '', title = '' } = {}) {
+  if (refuseOutsideCadastroMark(nome)) return;
   try {
     await manifestStore.update(nome, (man) => {
       man = man || {};
@@ -5787,6 +5809,7 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
   try {
     if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'no_browser' };
     if (!pg) return { ok: false, error: 'no_page' };
+    if (refuseOutsideCadastroMark(nome)) return { ok: false, skipped: true, reason: 'cadastro_pending' };
     // Regra do lead: invocou humano => sistema NÃO trabalha.
     if (ctrl && ctrl.humanControl === true) {
       try { provisionAudit.append({ ts: Date.now(), event: 'identity_flow_skipped_human_control', nome: String(nome||''), flowId: id, source: String(source||'').slice(0,80) }); } catch {}
@@ -6003,6 +6026,7 @@ async function runIdentityFlow(nome, ctrl, pg, { source = 'unknown', flowId = ''
 }
 
 async function setIdentityRequiredFlag(nome, { source = '', url = '', title = '' } = {}) {
+  if (refuseOutsideCadastroMark(nome)) return;
   try {
     await manifestStore.update(nome, (man) => {
       man = man || {};
@@ -6067,6 +6091,7 @@ async function setIdentityRequiredFlag(nome, { source = '', url = '', title = ''
 }
 
 async function setIdentitySubmittedFlag(nome, { source = '', url = '', title = '' } = {}) {
+  if (refuseOutsideCadastroMark(nome)) return;
   const now = Date.now();
   try {
     const next = now + IDENTITY_CFG.firstDelayMs;
@@ -6359,6 +6384,7 @@ async function identityMonitorCheckNow(nome, ctrl) {
 }
 
 async function setBannedFlag(nome, { reason = '', snippet = '' } = {}) {
+  if (refuseOutsideCadastroMark(nome)) return;
   try { invalidateAccountFlagsCache(nome); } catch {}
   return lockProfileAction(nome, async () => {
     if (await ownProfileProofIsFresh(nome, controllers.get(nome))) return { ok: true, skipped: 'own_profile' };
@@ -6605,6 +6631,7 @@ async function setMarketplaceDisabledFlag(nome, { reason = 'cannot_buy_or_sell',
 // 2FA (two-factor) => manter conta no host (sem exclusão automática).
 // Regra atual: bloquear automação, entrar em modo humano e marcar flag persistente.
 async function setTwoFactorFlag(nome, { reason = 'two_factor', snippet = '' } = {}) {
+  if (refuseOutsideCadastroMark(nome)) return;
   try { invalidateAccountFlagsCache(nome); } catch {}
   return lockProfileAction(nome, async () => {
     if (await ownProfileProofIsFresh(nome, controllers.get(nome))) return { ok: true, skipped: 'own_profile' };
@@ -12441,6 +12468,9 @@ async function completeAccountProvisioning(nome, source, {verifiedAuth=false}={}
   await fileStore.withDesiredFileLockUpdate(d => {
     if (d.perfis?.[nome]) delete d.perfis[nome].provisioningPending;
     if (d.perfis?.[nome]) delete d.perfis[nome].provisioningResult;
+    if (d.perfis?.[nome]) delete d.perfis[nome].provisioningAttempts;
+    if (d.perfis?.[nome]) delete d.perfis[nome].provisioningNextAt;
+    if (d.perfis?.[nome]) delete d.perfis[nome].provisioningLastError;
     return d;
   });
   try { provisionAudit.append({ ts: Date.now(), event: 'account_provisioning_ready', nome, source }); } catch {}
@@ -12450,6 +12480,11 @@ async function finishAccountProvisioningResult(nome,result){
   await require('./accountProvisioningState').settle([{...result,profileName:nome}],{
     update:fn=>fileStore.withDesiredFileLockUpdate(fn),audit:row=>provisionAudit.append(row)
   });
+  try {
+    const d = readJsonFile(desiredPath, { perfis: {} });
+    const reason = d && d.perfis && d.perfis[nome] && d.perfis[nome].provisioningResult && d.perfis[nome].provisioningResult.reason;
+    if (reason && reason !== 'identity_required') await clearIdentityFlags(nome);
+  } catch {}
   return result;
 }
 
@@ -13531,6 +13566,10 @@ const handlers = {
 },
 
   async configure({ nome, operator } = {}) {
+    if (!require('./accountProvisioningState').cadastroIsWriting()) {
+      const bound = this && typeof this.configure === 'function' ? this.configure.bind(this) : null;
+      if (bound) return require('./accountProvisioningState').runAsCadastro(() => bound({ nome, operator }));
+    }
     const boot = await __deltaAwaitHostBootReady();
     if (!boot.ready) return { ok: false, error: 'host_boot_not_ready' };
     let cadastroBrowser=null;
@@ -14282,8 +14321,7 @@ const handlers = {
           if (isStockProvision) {
             try { await applyNewAccountRobePause24h(nome, { operator: op || null, via: 'configure_pin_pending' }); } catch {}
           }
-          // Não aborta como fatal de humano — deixa stock/nurse seguir.
-          return { ok: true, pinPending: true, closedForRam };
+          return { ok: false, error: 'messenger_pin' };
         }
 
         // Mid-cadastro (humano/erro): ainda assim conta nova não pode postar Robe.
@@ -14397,6 +14435,10 @@ const handlers = {
 
   // ===== NOVO: login_remediate (cookies -> login/senha -> humano) =====
   async login_remediate({ nome, operator, options } = {}) {
+    if (!require('./accountProvisioningState').cadastroIsWriting()) {
+      const bound = this && typeof this.login_remediate === 'function' ? this.login_remediate.bind(this) : null;
+      if (bound) return require('./accountProvisioningState').runAsCadastro(() => bound({ nome, operator, options }));
+    }
     const boot = await __deltaAwaitHostBootReady();
     if (!boot.ready) return { ok: false, error: 'host_boot_not_ready' };
     let cadastroBrowser=null;
@@ -19987,6 +20029,55 @@ async function reconcileHumanState(nome, ctrl, { source = 'nurse' } = {}) {
   }
 }
 
+let cadastroRetryBusy = false;
+function kickCadastroRetry() {
+  if (cadastroRetryBusy) return;
+  let desired;
+  try { desired = readJsonFile(desiredPath, { perfis: {} }); } catch { return; }
+  if (desired && desired._openAll && desired._openAll.active === true) return;
+  try { if (provisionLock.isActive()) return; } catch { return; }
+  const state = require('./accountProvisioningState');
+  const stillOpening = Object.keys((desired && desired.perfis) || {}).some((nome) => {
+    const w = desired.perfis[nome] || {};
+    if (w.active !== true || w.humanHold === true || state.unready(w) || controllers.has(nome)) return false;
+    const held = Number((robeMeta[nome] && robeMeta[nome].activationHeldUntil) || 0) || 0;
+    return held <= Date.now();
+  });
+  if (stillOpening) return;
+  const pick = state.nextCadastro(desired.perfis, Date.now(), inShard);
+  if (!pick || !pick.nome) return;
+  const nome = pick.nome;
+  cadastroRetryBusy = true;
+  setImmediate(() => { resumeOneCadastro(nome).catch(() => {}).finally(() => { cadastroRetryBusy = false; }); });
+}
+async function resumeOneCadastro(nome) {
+  const owner = 'stock_provision:cadastro_retry';
+  let locked = false;
+  try {
+    const current = readJsonFile(desiredPath, { perfis: {} });
+    if (!(current && current.perfis && current.perfis[nome] && current.perfis[nome].provisioningPending === true)) return;
+    if (provisionLock.isActive()) return;
+    const lk = provisionLock.tryAcquire({ owner, ttlMs: 20 * 60 * 1000, meta: { kind: 'stock_provision', batchId: 'cadastro_retry' } });
+    if (!lk || lk.ok !== true) return;
+    locked = true;
+    const again = readJsonFile(desiredPath, { perfis: {} });
+    if (!(again && again.perfis && again.perfis[nome] && again.perfis[nome].provisioningPending === true)) return;
+    const result = await handlers.configure({ nome, operator: owner });
+    if (result && result.ok === true && result.pinPending !== true) {
+      await fileStore.withDesiredFileLockUpdate((d) => {
+        const cur = d.perfis && d.perfis[nome];
+        if (cur && cur.provisioningPending !== true && !(cur.provisioningResult && ['blocked', 'failed'].includes(cur.provisioningResult.state))) {
+          d.perfis[nome] = { ...cur, active: true, virtus: 'on' };
+        }
+        return d;
+      });
+    }
+    try { provisionAudit.append({ ts: Date.now(), event: 'cadastro_retry_done', nome: String(nome || ''), ok: !!(result && result.ok), error: result && result.error ? String(result.error).slice(0, 180) : null }); } catch {}
+  } finally {
+    if (locked) { try { provisionLock.release({ owner }); } catch {} }
+  }
+}
+
 async function nurseTick() {
   if (!__deltaIsHostBootReady()) return;
   if (_nurseTickRunning) return;
@@ -20153,6 +20244,7 @@ async function nurseTick() {
       // Se NÃO há intenção de abrir, pode sair cedo (economia).
       // (mutex/suppress: finally do nurseTick limpa _nurseTickRunning + depth)
       if (!hasOpenIntent) {
+        try { kickCadastroRetry(); } catch {}
         return;
       }
       // Se há intenção de abrir, continua para o fluxo completo (vai abrir).
@@ -20393,6 +20485,8 @@ async function nurseTick() {
         }
       }
     } catch {}
+
+    try { kickCadastroRetry(); } catch {}
 
     // ===== PRIORIDADE ENTERPRISE: Recurso em análise (Pronto!) =====
     // Se existir qualquer perfil com appealSubmitted=true e appealNextCheckAt<=now e ainda sem controller,

@@ -9,9 +9,29 @@ test('falha técnica permanece recuperável e sucesso antigo não é rebaixado p
  for(const error of ['HTTP/1.1 502 Bad Gateway','cp2_uncertain_transport_not_closed','timeout']){const d={perfis:{account:{provisioningPending:true}}};await settle([{profileName:'account',ok:false,error}],{update:async fn=>fn(d)});assert.equal(d.perfis.account.provisioningPending,true);assert.equal(d.perfis.account.provisioningResult,undefined)}
  const d={perfis:{account:{active:true}}};await settle([{profileName:'account',ok:false,error:'identity_required'}],{update:async fn=>fn(d)});assert.equal(d.perfis.account.provisioningResult,undefined);assert.equal(d.perfis.account.active,true);
 });
-test('erro sem retry termina com falha técnica explícita, sem inventar restrição de identidade',async()=>{
- for(const error of ['cadastro_account_identity_mismatch','cadastro_expected_identity_missing','unexpected_worker_error']){
-  const d={perfis:{account:{provisioningPending:true}}};await settle([{profileName:'account',ok:false,error}],{update:async fn=>fn(d)});
-  assert.equal(d.perfis.account.provisioningPending,false);assert.equal(d.perfis.account.provisioningResult.state,'failed');assert.equal(d.perfis.account.provisioningResult.reason,'technical_failure');assert.equal(unready(d.perfis.account),true);
- }
+test('explosão sem marca fica pendente, vai para o fim e para na quinta',async()=>{
+ const d={perfis:{account:{provisioningPending:true},other:{provisioningPending:true}}};
+ await settle([{profileName:'account',ok:false,error:'unexpected_worker_error'}],{update:async fn=>fn(d),now:()=>1000});
+ assert.equal(d.perfis.account.provisioningPending,true);assert.equal(d.perfis.account.provisioningAttempts,1);assert.equal(d.perfis.account.provisioningNextAt,31000);assert.equal(d.perfis.account.provisioningResult,undefined);
+ const {nextCadastro}=require('./accountProvisioningState');
+ assert.equal(nextCadastro(d.perfis,1000).nome,'other');
+ d.perfis.account.provisioningAttempts=4;d.perfis.account.provisioningNextAt=0;
+ await settle([{profileName:'account',ok:false,error:'cadastro_account_identity_mismatch'}],{update:async fn=>fn(d),now:()=>2000});
+ assert.equal(d.perfis.account.provisioningPending,false);assert.equal(d.perfis.account.provisioningResult.reason,'cadastro_attempts_exhausted');assert.equal(unready(d.perfis.account),true);
+});
+test('recurso e mercado fecham o pendente; espera de cadeado não conta tentativa',async()=>{
+ const appeal={perfis:{account:{provisioningPending:true}}};await settle([{profileName:'account',ok:false,error:'appeal_submitted'}],{update:async fn=>fn(appeal),now:()=>100});
+ assert.equal(appeal.perfis.account.provisioningPending,false);assert.equal(appeal.perfis.account.provisioningResult.reason,'appeal_submitted');
+ const pin={perfis:{account:{provisioningPending:true}}};await settle([{profileName:'account',ok:false,error:'messenger_pin'}],{update:async fn=>fn(pin),now:()=>100});
+ assert.equal(pin.perfis.account.provisioningPending,false);assert.equal(pin.perfis.account.provisioningResult.reason,'messenger_pin');
+ const wait={perfis:{account:{provisioningPending:true,provisioningAttempts:2}}};await settle([{profileName:'account',ok:false,error:'provision_lock_busy owner=stock'}],{update:async fn=>fn(wait),now:()=>1000});
+ assert.equal(wait.perfis.account.provisioningPending,true);assert.equal(wait.perfis.account.provisioningAttempts,2);assert.equal(wait.perfis.account.provisioningNextAt,31000);
+});
+test('fila pega uma conta vencida e a que explodiu espera a vez',()=>{
+ const {nextCadastro,mayWriteCadastroMark,runAsCadastro,cadastroIsWriting}=require('./accountProvisioningState');
+ const perfis={a:{provisioningPending:true,provisioningNextAt:9000},b:{provisioningPending:true,provisioningNextAt:0},c:{provisioningPending:false}};
+ assert.equal(nextCadastro(perfis,1000).nome,'b');
+ assert.equal(nextCadastro({a:perfis.a},1000).nome,null);assert.equal(nextCadastro({a:perfis.a},1000).waitMs,8000);
+ assert.equal(mayWriteCadastroMark(false,true),false);assert.equal(mayWriteCadastroMark(true,true),true);assert.equal(mayWriteCadastroMark(false,false),true);
+ assert.equal(cadastroIsWriting(),false);runAsCadastro(()=>assert.equal(cadastroIsWriting(),true));
 });

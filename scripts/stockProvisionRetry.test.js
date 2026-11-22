@@ -16,4 +16,6 @@ test('retry survives restart with bounded delay and never retries identity or au
  const output={results:[{type:'stock_provision',error:'provision_lock_busy'}]};const next=retryPlan(JSON.parse(JSON.stringify(record)),output,1000);assert.equal(next.retryCount,1000000);assert.equal(next.nextAttemptAt,301000);
  for(const error of ['identity_required','configure_blocked_url_checkpoint','still_login_required:login_wall','unauthorized','captcha timeout'])assert.equal(isTransient(error),false);
  assert.equal(retryPlan(record,{results:[{type:'stock_provision',error:'identity_required'}]}),null);
+ const queued={id:'same',payload:{actions:[{stockAccountId:2}]}};
+ assert.equal(retryPlan(queued,{results:[{type:'stock_provision',details:{results:[{stockAccountId:2,profileName:'cidade-1',ok:false,error:'carrier_unavailable'}]}}]},1000),null);
 });

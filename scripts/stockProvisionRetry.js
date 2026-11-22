@@ -11,10 +11,11 @@ function retryPlan(record, output, now=Date.now()) {
  const actions=row?.details?.results;
  const original=Array.isArray(record?.payload?.actions)?record.payload.actions:[];
  let retry;
+ const queueOwns=a=>!!(a&&a.profileName)&&!require('./accountProvisioningState').restriction(a.error||row?.error);
  if(Array.isArray(actions)&&actions.length){
-  const ids=new Set(actions.filter(a=>a?.ok!==true&&isTransient(a?.error||row?.error)).map(a=>Number(a.stockAccountId)));
+  const ids=new Set(actions.filter(a=>a?.ok!==true&&isTransient(a?.error||row?.error)&&!queueOwns(a)).map(a=>Number(a.stockAccountId)));
   retry=original.filter(a=>ids.has(Number(a.stockAccountId||a.stock_account_id)));
- } else retry=isTransient(row?.error)?original:[];
+ } else retry=isTransient(row?.error)&&!queueOwns(row)?original:[];
  if(!retry.length)return null;
  const retryCount=Math.min(1000000,Math.max(0,Number(record.retryCount)||0)+1);
  const delay=Math.min(300000,30000*2**Math.min(4,retryCount-1));
