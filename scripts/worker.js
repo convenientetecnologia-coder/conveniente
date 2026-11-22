@@ -12446,6 +12446,13 @@ async function completeAccountProvisioning(nome, source, {verifiedAuth=false}={}
   try { provisionAudit.append({ ts: Date.now(), event: 'account_provisioning_ready', nome, source }); } catch {}
 }
 
+async function finishAccountProvisioningResult(nome,result){
+  await require('./accountProvisioningState').settle([{...result,profileName:nome}],{
+    update:fn=>fileStore.withDesiredFileLockUpdate(fn),audit:row=>provisionAudit.append(row)
+  });
+  return result;
+}
+
 async function prepareCadastroBrowser(nome, operator) {
   const proxy=require('./serverConfig').readServerConfigEffective().cadastro?.proxyEnabled===true;
   const current=controllers.get(nome),expected=proxy?'proxy':'direct';
@@ -14370,8 +14377,8 @@ const handlers = {
         } catch {}
         await snapshotStatusAndWrite();
       }
-    });
-    } catch(error){return {ok:false,error:String(error.message||error)}}
+    }).then(result=>finishAccountProvisioningResult(nome,result));
+    } catch(error){return await finishAccountProvisioningResult(nome,{ok:false,error:String(error.message||error)})}
     finally{await closeCadastroBrowser(nome,cadastroBrowser)}
   },
 
@@ -15414,8 +15421,8 @@ const handlers = {
           }
         } catch {}
       }
-    });
-    } catch(error){return {ok:false,error:String(error.message||error)}}
+    }).then(result=>finishAccountProvisioningResult(nome,result));
+    } catch(error){return await finishAccountProvisioningResult(nome,{ok:false,error:String(error.message||error)})}
     finally{await closeCadastroBrowser(nome,cadastroBrowser)}
   },
 

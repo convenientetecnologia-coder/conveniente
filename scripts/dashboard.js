@@ -2285,10 +2285,6 @@ async function execMigrateProfiles(cmd) {
 
   const okCount = results.filter(r => r && r.ok).length;
   const failCount = results.length - okCount;
-  await require('./accountProvisioningState').settle(results,{
-    update:fn=>fileStore.withDesiredFileLockUpdate(fn),
-    audit:row=>provisionAudit.append(row)
-  });
   migrationsLogAppend({ event: 'migrate_batch_done', batchId, cmdId: cmd && cmd.id, okCount, failCount });
   const out = {
     ok: failCount === 0,
