@@ -14405,8 +14405,7 @@ const handlers = {
       const startedAt = Date.now();
       const op = String(operator || '').trim() || `login_remediate:${String(nome || '').trim()}:${startedAt}`;
       const opts = (options && typeof options === 'object') ? options : {};
-      const authModeRaw = String(opts.authMode || process.env.STOCK_PROVISION_AUTH_MODE || 'cookies_first').trim().toLowerCase();
-      const authMode = (authModeRaw === 'password_first') ? 'password_first' : 'cookies_first';
+      const authMode = 'cookies_first';
       const skipAttempt1InjectCookies = (
         authMode === 'password_first' ||
         opts.skipAttempt1InjectCookies === true ||
@@ -14676,31 +14675,8 @@ const handlers = {
       const pSession = pagesNow && pagesNow[0];
       const hasFreshCreds = !!(pSession && String(loginGate || '').trim() && String(passGate || '').trim());
       // Senha primeiro não pode pular a digitação só porque o arranque já marcou trabalhando.
-      if (ctrl.trabalhando && !(authMode === 'password_first' && hasFreshCreds)) {
+      if (ctrl.trabalhando) {
         pushStep({ step: 'attempt1_inject_cookies_skipped', reason: 'already_posting' });
-      } else if (authMode === 'password_first' && hasFreshCreds) {
-        if (!(await beginCredentialAttempt())) {
-          return { ok: false, error: 'login_attempt_budget', steps, closedForRam, pausedVirtus };
-        }
-        credentialAttempted = true;
-        try {
-          pushStep({ step: 'open_fresh_login' });
-          await pcGate.openFreshLoginPage(pSession, nome);
-          const entered = await pcGate.attemptCredentialRelogin(pSession, nome, {
-            login: String(loginGate).trim(),
-            password: String(passGate)
-          });
-          sessionRestored = !!(entered && entered.ok === true);
-          pushStep({ step: 'attempt_credential_relogin', ok: sessionRestored, error: entered && entered.error ? String(entered.error) : null });
-          if (entered && entered.error === 'whatsapp_confirm') {
-            try { await enterHumanMode(nome, controllers.get(nome), { reason: 'whatsapp_confirm' }); } catch {}
-            try { await ensureHumanOverlay(nome, controllers.get(nome), { reason: 'whatsapp_confirm' }); } catch {}
-            try { await snapshotStatusAndWrite(); } catch {}
-            return { ok: false, error: 'whatsapp_confirm', steps, closedForRam, pausedVirtus };
-          }
-        } catch (e) {
-          pushStep({ step: 'attempt_credential_relogin_fail', error: (e && e.message) || String(e) });
-        }
       } else if (pSession) {
         try {
           pushStep({ step: 'attempt1_restore_cookies' });

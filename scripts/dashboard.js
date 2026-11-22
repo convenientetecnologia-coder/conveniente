@@ -2305,8 +2305,7 @@ async function execStockProvision(cmd) {
 
   const tBatch0 = Date.now();
   const sleepMs = (ms) => new Promise(r => setTimeout(r, Math.max(0, Number(ms) || 0)));
-  const stockAuthModeRaw = String(process.env.STOCK_PROVISION_AUTH_MODE || 'cookies_first').trim().toLowerCase();
-  const stockAuthMode = (stockAuthModeRaw === 'password_first') ? 'password_first' : 'cookies_first';
+  const stockAuthMode = 'cookies_first';
 
   // Hardening: lock global com TTL para isolamento total durante provisão.
   // Evita concorrência (already_opening / slot storms) e permite hard-recovery com segurança.
@@ -2829,37 +2828,8 @@ async function execStockProvision(cmd) {
           return r4;
         });
 
-        // 5) Cadastro por modo de autenticação (flag runtime):
-        // - cookies_first (canônico atual): /configure
-        // - password_first (novo): /login-remediate com authMode=password_first
-        if (stockAuthMode === 'password_first') {
-          await runStep('login_remediate_password_first', async () => {
-            const longTimeoutMs = Math.max(120_000, Math.min(25 * 60 * 1000, budgetLeftMs() + 45_000));
-            const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/login-remediate`, {
-              method: 'POST',
-              headers: { 'x-operator': lockOwner },
-              timeoutMs: longTimeoutMs,
-              retries: 0,
-              body: {
-                options: {
-                  authMode: 'password_first',
-                  skipAttempt1InjectCookies: true,
-                  overrideHumanHold: true
-                }
-              }
-            });
-            const rr = (r5 && r5.result && typeof r5.result === 'object') ? r5.result : r5;
-            if (!r5 || r5.ok === false || !rr || rr.ok === false) {
-              const err = String(
-                (rr && rr.error) ||
-                (r5 && r5.error) ||
-                'login_remediate_failed'
-              );
-              throw new Error(err);
-            }
-            return r5;
-          });
-        } else {
+        // 5) Cadastro: cookies primeiro. A senha só entra se a tela pedir.
+        {
           await runStep('configure', async () => {
             const longTimeoutMs = Math.max(60_000, Math.min(25 * 60 * 1000, budgetLeftMs() + 30_000));
             const r5 = await httpJson(`/api/perfis/${encodeURIComponent(nome)}/configure`, {

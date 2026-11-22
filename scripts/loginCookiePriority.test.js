@@ -46,7 +46,7 @@ test('Virtus ignora flags antigas de proxy, mas o Robe isolado mantém seu túne
 });
 
 for (const mode of ['cookies_first', 'password_first']) {
-  test(`remediação respeita o modo ${mode} com credenciais disponíveis`, async () => {
+  test(`remediação entra por cookies mesmo se pedirem ${mode}`, async () => {
     const source = read('worker.js');
     const start = source.indexOf('      // 4) Padrão: cookies primeiro.');
     const end = source.indexOf('      // 5) validar loginRequired', start);
@@ -63,12 +63,12 @@ for (const mode of ['cookies_first', 'password_first']) {
       authMode: mode, nome: 'test', pushStep: () => {}, beginCredentialAttempt: async () => true
     });
     assert.equal(result, true);
-    assert.deepEqual(calls, [mode === 'cookies_first' ? 'cookies' : 'password']);
+    assert.deepEqual(calls, ['cookies']);
   });
 }
 
 for (const restored of [true, false]) {
-  test(`cadastro: cookies ${restored ? 'válidos dispensam' : 'recusados acionam'} senha`, async () => {
+  test(`cadastro: cookies ${restored ? 'válidos dispensam' : 'recusados não puxam'} senha aqui`, async () => {
     const source = read('browser.js');
     const start = source.indexOf("  const pcLogin = require('./pcSessionLogin.js');", source.indexOf('async function configureProfile('));
     const end = source.indexOf('  try {\n    provisionAudit.append', start);
@@ -82,7 +82,7 @@ for (const restored of [true, false]) {
       }),
       manifest: { login: 'synthetic-user', password: 'synthetic-pass' }, p0: {}, nome: 'test', dbg: false
     });
-    assert.equal(result, true);
-    assert.deepEqual(calls, restored ? ['cookies'] : ['cookies', 'password']);
+    assert.equal(result, restored);
+    assert.deepEqual(calls, ['cookies']);
   });
 }

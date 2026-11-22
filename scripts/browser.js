@@ -5423,26 +5423,12 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   // Cookie já autenticado (com 2FA) entra primeiro, em mbasic.
   // Senha e 2FA só se esse cookie não deixar a conta logada.
   const restored = await pcLogin.tryExistingPcSession(p0, nome, { url: 'https://mbasic.facebook.com/login/' });
-  let sessionIn = !!(restored && restored.in === true);
-  let via = sessionIn ? 'cookie' : '';
-  let credentialResult=null,credentialStartedAt=0,credentialDurationMs=0;
-  if (!sessionIn && String(loginNow || '').trim() && String(passNow || '').trim()) {
-    await pcLogin.openFreshLoginPage(p0, nome);
-    credentialStartedAt=Date.now();
-    const entered = await pcLogin.attemptCredentialRelogin(p0, nome, {
-      login: String(loginNow).trim(),
-      password: String(passNow)
-    });
-    credentialDurationMs=Date.now()-credentialStartedAt;
-    credentialResult=entered;
-    if (entered && entered.error === 'whatsapp_confirm') {
-      const stop = new Error('whatsapp_confirm');
-      throw stop;
-    }
-    sessionIn = !!(entered && entered.ok === true);
-    via = 'password';
-    if (!sessionIn && dbg) logger.debug('[CONFIG] credential login failed', { nome, error: entered && entered.error });
-  }
+  const sessionIn = !!(restored && restored.in === true);
+  const via = sessionIn ? 'cookie' : '';
+  const credentialResult = null;
+  const credentialStartedAt = 0;
+  const credentialDurationMs = 0;
+  if (!sessionIn && dbg) logger.debug('[CONFIG] cookie nao entrou; a tela decide o proximo fluxo', { nome, hasLogin: !!String(loginNow || '').trim(), hasPass: !!String(passNow || '').trim() });
   try {
     provisionAudit.append({
       ts: Date.now(),
@@ -5456,7 +5442,6 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
       cookieReason: restored && restored.reason ? String(restored.reason) : null
     });
   } catch {}
-  if (!sessionIn) return;
   try { await p0.goto(fb0Url, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(()=>{}); } catch {}
   try { await sleep(900); } catch {}
   try {
