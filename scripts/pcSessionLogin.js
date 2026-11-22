@@ -157,7 +157,7 @@ async function prepareFreshLogin(page, nome) {
 
 async function openFreshLoginPage(page, nome) {
   await prepareFreshLogin(page, nome);
-  await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+  await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(error => { throw Error('pc_login_navigation_failed:'+String(error.message||error)); });
   await sleep(700);
   logger.info('[LOGIN][pc] cookie velho apagado. Login aberto antes de digitar.', { nome });
   return LOGIN_URL;
@@ -407,7 +407,7 @@ async function tryExistingPcSession(page, nome, opts) {
   if (!cookiesHaveSession(cookies)) return { ok: false, loggedOut: true, reason: 'no_session' };
   const startUrl = (opts && opts.url) ? String(opts.url) : HOME_URL;
   await placeCookies(page, cookies);
-  await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+  await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(error => { throw Error('pc_login_navigation_failed:'+String(error.message||error)); });
   await sleep(1200);
   if (await feedOpened(page)) {
     logger.info('[LOGIN][pc] o feed abriu com o jar salvo. Não digito senha.', { nome });

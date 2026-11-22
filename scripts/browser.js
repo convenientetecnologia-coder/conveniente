@@ -5425,12 +5425,16 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   const restored = await pcLogin.tryExistingPcSession(p0, nome, { url: 'https://mbasic.facebook.com/login/' });
   let sessionIn = !!(restored && restored.in === true);
   let via = sessionIn ? 'cookie' : '';
+  let credentialResult=null,credentialStartedAt=0,credentialDurationMs=0;
   if (!sessionIn && String(loginNow || '').trim() && String(passNow || '').trim()) {
     await pcLogin.openFreshLoginPage(p0, nome);
+    credentialStartedAt=Date.now();
     const entered = await pcLogin.attemptCredentialRelogin(p0, nome, {
       login: String(loginNow).trim(),
       password: String(passNow)
     });
+    credentialDurationMs=Date.now()-credentialStartedAt;
+    credentialResult=entered;
     if (entered && entered.error === 'whatsapp_confirm') {
       const stop = new Error('whatsapp_confirm');
       throw stop;
@@ -5445,6 +5449,10 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
       event: 'configure_login_via',
       nome: String(nome || ''),
       via: via || 'none',
+      credentialAttempted:credentialResult!==null,
+      credentialOk:credentialResult?.ok===true,
+      credentialError:credentialResult?.error?String(credentialResult.error).slice(0,120):null,
+      credentialDurationMs,
       cookieReason: restored && restored.reason ? String(restored.reason) : null
     });
   } catch {}
