@@ -12,7 +12,8 @@
  * - marketplaceDisabled
  * - idVirtus (Messenger "para enviar mensagens")
  *
- * Nunca exclui: login requerido genérico (login_form, session, aymh, login_other,
+ * Selfie de vídeo só entra na exclusão se deleteKinds.selfie_video estiver marcado.
+ * Sem essa marca, nunca exclui: login requerido genérico (login_form, session, aymh, login_other,
  * identity selfie/vídeo, consent, appeal, password_reset, hacked_review).
  */
 
@@ -29,7 +30,8 @@ const DEFAULT_DELETE_KINDS = Object.freeze({
   captcha: true,
   two_factor: true,
   marketplace_disabled: true,
-  id_virtus: true
+  id_virtus: true,
+  selfie_video: false
 });
 
 function now() { return Date.now(); }
@@ -95,7 +97,8 @@ function resolveDeleteKinds(termCleanOrKinds) {
     captcha: dk.captcha === true,
     two_factor: dk.two_factor === true,
     marketplace_disabled: dk.marketplace_disabled === true,
-    id_virtus: dk.id_virtus === true
+    id_virtus: dk.id_virtus === true,
+    selfie_video: dk.selfie_video === true
   };
 }
 
@@ -106,7 +109,8 @@ function deleteKindsSignature(kinds) {
     k.captcha ? '1' : '0',
     k.two_factor ? '1' : '0',
     k.marketplace_disabled ? '1' : '0',
-    k.id_virtus ? '1' : '0'
+    k.id_virtus ? '1' : '0',
+    k.selfie_video ? '1' : '0'
   ].join('');
 }
 
@@ -246,7 +250,19 @@ function classifyTerminalDelete(flags, opts = {}) {
     };
   }
 
-  // 7) Resto (inclui identityRequired/Submitted)
+  // 7) Selfie de vídeo. Nasce desmarcada: só exclui se o servidor ligar essa opção.
+  if (f.identityRequired === true || f.identitySubmitted === true) {
+    if (!kinds.selfie_video) {
+      return { delete: false, category: 'selfie_video_skipped', detail: 'kind_disabled' };
+    }
+    return {
+      delete: true,
+      category: 'selfie_video',
+      detail: f.identitySubmitted === true ? 'identity_submitted' : 'identity_required'
+    };
+  }
+
+  // 8) Resto
   return { delete: false, category: 'keep', detail: null };
 }
 
@@ -333,14 +349,14 @@ async function runDailyTerminalCleanup({
     lastFailed: 0,
     lastScanned: perfis.length,
     lastCandidates: candidates.length,
-    lastByCategory: { banned: 0, two_factor: 0, captcha: 0, marketplace_disabled: 0, id_virtus: 0 },
+    lastByCategory: { banned: 0, two_factor: 0, captcha: 0, marketplace_disabled: 0, id_virtus: 0, selfie_video: 0 },
     lastDeleteKinds: kinds,
     lastClaimedAt: now()
   });
 
   let deleted = 0;
   let failed = 0;
-  const byCategory = { banned: 0, two_factor: 0, captcha: 0, marketplace_disabled: 0, id_virtus: 0 };
+  const byCategory = { banned: 0, two_factor: 0, captcha: 0, marketplace_disabled: 0, id_virtus: 0, selfie_video: 0 };
   const failures = [];
 
   try {

@@ -6510,6 +6510,9 @@ async function detectLoginRequired(page) {
         t.includes('confirm your identity') ||
         t.includes('gravar uma selfie de video') ||
         t.includes('grave uma selfie de video') ||
+        t.includes('gravar uma self de video') ||
+        t.includes('grave uma self de video') ||
+        t.includes('self de video') ||
         t.includes('video selfie') ||
         (t.includes('selfie') && t.includes('video'))
       );
@@ -6566,6 +6569,8 @@ async function detectLoginRequired(page) {
         bodyTxt.includes('proteja seus detalhes de login') ||
         bodyTxt.includes('conta pode ter sido invadida') ||
         bodyTxt.includes('pode ter sido invadida') ||
+        bodyTxt.includes('conta pode ter sido hackeada') ||
+        bodyTxt.includes('pode ter sido hackeada') ||
         bodyTxt.includes('restringimos sua conta') ||
         bodyTxt.includes('etapas para voltar ao facebook') ||
         bodyTxt.includes('voltar ao facebook') && bodyTxt.includes('etapas') ||
@@ -6612,11 +6617,14 @@ async function detectLoginRequired(page) {
       // Critério: exigir sinais fortes e específicos de identidade/selfie/vídeo.
       const identityStrongHints =
         bodyTxt.includes('selfie de video') ||
+        bodyTxt.includes('self de video') ||
         bodyTxt.includes('video selfie') ||
         bodyTxt.includes('selfie') && bodyTxt.includes('video') ||
         (bodyTxt.includes('carregamento desse video') && bodyTxt.includes('confirmar sua identidade')) ||
         (bodyTxt.includes('grave') && bodyTxt.includes('selfie') && bodyTxt.includes('video')) ||
-        (bodyTxt.includes('gravar') && bodyTxt.includes('selfie') && bodyTxt.includes('video'));
+        (bodyTxt.includes('gravar') && bodyTxt.includes('selfie') && bodyTxt.includes('video')) ||
+        (bodyTxt.includes('grave') && bodyTxt.includes('self de video')) ||
+        (bodyTxt.includes('gravar') && bodyTxt.includes('self de video'));
 
       // Anti-falso-positivo crítico:
       // Em telas de identidade o FB usa texto "pessoa real" (parece captcha), mas é IDENTIDADE (selfie/vídeo).
@@ -6634,6 +6642,7 @@ async function detectLoginRequired(page) {
         ));
 
       // 7) Sinais de identidade no body (fallback quando o recorte de h1 não contém)
+      const hasSelfVideo = bodyTxt.includes('self') && bodyTxt.includes('video');
       const bodyHasIdentityHints =
         bodyTxt.includes('confirme sua identidade') ||
         bodyTxt.includes('confirm your identity') ||
@@ -6644,7 +6653,7 @@ async function detectLoginRequired(page) {
       return {
         hasRoyal, hasInputs, hasEmailInput, hasPassInput, hasLoginUiHints, hasPersonaText, hasCheckpointText,
         hasIdentityText, hasTwoFactorText, hasAppealSubmitted, hasIdentitySubmitted, identityStrongHints,
-        bodyHasIdentityHints, hasHackedReview, hasPasswordResetRequired, hasBackToFacebookUnlocked,
+        hasSelfVideo, bodyHasIdentityHints, hasHackedReview, hasPasswordResetRequired, hasBackToFacebookUnlocked,
         hasContentNotAvailable, hasPageNotAvailable, hasHumanConfirmPreScreen, hasCaptchaPromptText,
         hasCaptchaImg, hasCaptchaInput, hasContinueBtn, isAymhContinue, hasUsarOutroPerfil,
         hasCriarNovaConta, hasContinuarChooserBtn, hasAymhEntryPoint, href0, path0, title0
@@ -6664,6 +6673,7 @@ async function detectLoginRequired(page) {
     const hasIdentityText = !!(v && v.hasIdentityText);
     const hasIdentitySubmitted = !!(v && v.hasIdentitySubmitted);
     const identityStrongHints = !!(v && v.identityStrongHints);
+    const hasSelfVideo = !!(v && v.hasSelfVideo);
     const bodyHasIdentityHints = !!(v && v.bodyHasIdentityHints);
     const hasTwoFactorText = !!(v && v.hasTwoFactorText);
     const hasAppealSubmitted = !!(v && v.hasAppealSubmitted);
@@ -6960,21 +6970,8 @@ async function detectLoginRequired(page) {
         evidence: { path }
       };
     }
-    // Identidade (selfie/vídeo) deve ser reconhecida mesmo fora de /checkpoint.
-    // Motivo: em alguns fluxos o FB renderiza a etapa dentro de / (home) com modal/SPA.
-    // Blindagem anti-falso-positivo: exigir hints fortes (selfie+vídeo) para considerar.
-    // /ixt/ e ixtselfie continuam sendo selfie. /authentication/ não entra aqui.
-    if (/\/ixt\/|ixtselfie/i.test(String(path || '') + String(href || ''))) {
-      return {
-        loginRequired: true,
-        reason: 'identity_confirm_selfie',
-        domain,
-        url: (v && v.href0) ? String(v.href0) : href,
-        title,
-        evidence: { path }
-      };
-    }
-    if (hasIdentitySubmitted || (identityStrongHints && bodyHasIdentityHints) || (hasIdentityText && (strongLoginPath || /checkpoint/i.test(title)))) {
+    // Selfie de vídeo: as palavras self e vídeo na mesma tela. Endereço sozinho não marca.
+    if (hasSelfVideo) {
       return {
         loginRequired: true,
         reason: hasIdentitySubmitted ? 'identity_submitted' : 'identity_confirm_selfie',
@@ -7946,6 +7943,33 @@ async function identityAssistStep(page, { maxWaitMs = 60_000, tries = 2 } = {}) 
  * Assistente safe para fluxo "conta restringida / pode ter sido invadida" (hacked cleanup + reset de senha).
  * Objetivo: clicar CTAs (Começar/Avançar/Continuar/Voltar) e, quando aparecer, preencher "nova senha" e clicar "Salvar alterações".
  */
+async function clickMetaAccountStart(page) {
+  try {
+    const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
+    if (!/(facebook|messenger)\.com/i.test(href)) return { ok: false, reason: 'not_fb' };
+    return await page.evaluate(() => {
+      function norm(s) {
+        try { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
+        catch { return String(s || '').toLowerCase(); }
+      }
+      const body = norm(document.body ? (document.body.innerText || '') : '');
+      if (body.includes('self') && body.includes('video')) return { ok: false, reason: 'already_selfie' };
+      const gate = body.includes('pode ter sido hackeada') || body.includes('pode ter sido invadida') || (body.includes('conta da meta') && body.includes('desbloque'));
+      if (!gate) return { ok: false, reason: 'not_gate' };
+      const els = Array.from(document.querySelectorAll('button,div[role="button"],a[role="button"],a')).slice(0, 400);
+      for (const el of els) {
+        const t = norm(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+        const aria = norm(el.getAttribute && el.getAttribute('aria-label') || '');
+        if (t !== 'comecar' && aria !== 'comecar' && t !== 'get started' && aria !== 'get started') continue;
+        try { el.click(); return { ok: true }; } catch {}
+      }
+      return { ok: false, reason: 'no_button' };
+    });
+  } catch (e) {
+    return { ok: false, error: (e && e.message) ? String(e.message) : 'click_failed' };
+  }
+}
+
 async function hackedAssistStep(page, { newPassword = '', maxWaitMs = 45_000, tries = 2 } = {}) {
   const start = Date.now();
   const budget = Math.max(2_000, Number(maxWaitMs || 0) || 0);
@@ -7970,6 +7994,8 @@ async function hackedAssistStep(page, { newPassword = '', maxWaitMs = 45_000, tr
           bodyTxt.includes('proteja seus detalhes de login') ||
           bodyTxt.includes('pode ter sido invadida') ||
           bodyTxt.includes('conta pode ter sido invadida') ||
+          bodyTxt.includes('pode ter sido hackeada') ||
+          bodyTxt.includes('conta pode ter sido hackeada') ||
           bodyTxt.includes('restringimos sua conta') ||
           bodyTxt.includes('etapas para voltar ao facebook') ||
           bodyTxt.includes('desbloquear sua conta') ||
@@ -8777,6 +8803,7 @@ module.exports = {
   solveFacebookImageCaptcha,
   solveCaptchaWithGroq,
   identityAssistStep,
+  clickMetaAccountStart,
   hackedAssistStep,
   tryLoginEmailPass,
   tryExistingPcSession: (page, nome) => require('./pcSessionLogin.js').tryExistingPcSession(page, nome),

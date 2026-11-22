@@ -4382,8 +4382,8 @@ async function _installOverlayOnPage(nome, page) {
             else if (f.twoFactor) statusTxt = '2FA requerido (Humano)';
             else if (f.captchaCheckpoint) statusTxt = 'Captcha/Checkpoint (humano)';
             else if (f.idVirtus) statusTxt = 'ID Virtus (humano)';
-            else if (f.identitySubmitted) statusTxt = 'Identidade em análise (monitor 1h)';
-            else if (f.identityRequired) statusTxt = 'Confirmação de identidade (selfie/vídeo)';
+            else if (f.identitySubmitted) statusTxt = 'Selfie de vídeo em análise (monitor 1h)';
+            else if (f.identityRequired) statusTxt = 'Selfie de vídeo';
             else if (f.appealSubmitted) statusTxt = 'Recurso em análise (monitor 1h)';
             else if (f.loginRemediateFailed) statusTxt = 'Login/Cookies falhou (humano)';
             else if (f.loginRequired) statusTxt = 'Login requerido';
@@ -13750,6 +13750,19 @@ const handlers = {
           const scanned = await scanHardBlock();
           best = scanned.best;
           bestPage = scanned.bestPage;
+        } catch {}
+        try {
+          const pages = await ctrl.browser.pages().catch(() => []);
+          for (const pg of (pages || []).slice(0, 8)) {
+            const started = await browserHelper.clickMetaAccountStart(pg).catch(() => null);
+            if (!(started && started.ok)) continue;
+            await sleep(1500);
+            const again = await scanHardBlock();
+            best = again.best;
+            bestPage = again.bestPage;
+            try { provisionAudit.append({ ts: Date.now(), event: 'configure_meta_start_clicked', nome: String(nome||''), operator: op || null }); } catch {}
+            break;
+          }
         } catch {}
         try {
           provisionAudit.append({

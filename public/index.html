@@ -1445,6 +1445,9 @@
               <label class="muted" style="display:flex;align-items:center;gap:8px;">
                 <input type="checkbox" id="srvTcKindIdVirtus" checked /> ID Virtus
               </label>
+              <label class="muted" style="display:flex;align-items:center;gap:8px;">
+                <input type="checkbox" id="srvTcKindSelfie" /> Selfie vídeo
+              </label>
             </div>
             <div class="muted" style="margin-top:6px;">Independente do renovar/fechar/abrir. Se Não: não exclui. Se Sim: sorteia 1 horário na janela e limpa 1×/dia só os tipos marcados. Não afeta login/AYMH/identity selfie.</div>
           </div>
@@ -1931,6 +1934,7 @@
           setKind('#srvTcKindTwoFactor', { key: 'two_factor', fallback: true });
           setKind('#srvTcKindMkt', { key: 'marketplace_disabled', fallback: true });
           setKind('#srvTcKindIdVirtus', { key: 'id_virtus', fallback: true });
+          setKind('#srvTcKindSelfie', { key: 'selfie_video', fallback: false });
         }
         const wm = String(robe.workMode || 'v3_pmg');
         workModeEl.value = (wm === 'v4_bairros' || wm === 'v3_pmg' || wm === 'v2_auto') ? wm : 'v1';
@@ -2330,7 +2334,8 @@
                 captcha: !!(box.querySelector('#srvTcKindCaptcha') && box.querySelector('#srvTcKindCaptcha').checked),
                 two_factor: !!(box.querySelector('#srvTcKindTwoFactor') && box.querySelector('#srvTcKindTwoFactor').checked),
                 marketplace_disabled: !!(box.querySelector('#srvTcKindMkt') && box.querySelector('#srvTcKindMkt').checked),
-                id_virtus: !!(box.querySelector('#srvTcKindIdVirtus') && box.querySelector('#srvTcKindIdVirtus').checked)
+                id_virtus: !!(box.querySelector('#srvTcKindIdVirtus') && box.querySelector('#srvTcKindIdVirtus').checked),
+                selfie_video: !!(box.querySelector('#srvTcKindSelfie') && box.querySelector('#srvTcKindSelfie').checked)
               }
             },
             country: {
