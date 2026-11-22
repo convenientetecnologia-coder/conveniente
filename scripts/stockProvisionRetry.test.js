@@ -1,6 +1,7 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),{retryPlan,isTransient}=require('./stockProvisionRetry');
 test('falhas técnicas observadas em produção não encerram cadastro como falha definitiva',()=>{
+ for(const error of ['maintenance','carrier_maintenance','operation_control_in_flight','carrier_ack_timeout'])assert.equal(isTransient(error),true,error);
  for(const error of ['HTTP/1.1 502 Bad Gateway','HTTP/1.1 503 Service Unavailable','HTTP/1.1 504 Gateway Timeout','cp2_uncertain_transport_not_closed','cp2_previous_operation_not_closed'])assert.equal(isTransient(error),true,error);
  for(const error of ['HTTP/1.1 401 Unauthorized','HTTP/1.1 403 Forbidden','identity_required','still_login_required:login_form','captcha timeout'])assert.equal(isTransient(error),false,error);
 });
