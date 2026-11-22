@@ -37,10 +37,20 @@ test('conclusão só libera conta explicitamente pendente e preserva flags alhei
  const start=source.indexOf('function isAccountProvisioningPending('),end=source.indexOf('function automationAllowed(',start);
  const desired={perfis:{test:{provisioningPending:true,humanHold:true,active:true,virtus:'off'}}};let manifestWrites=0;
  const api=vm.runInNewContext(source.slice(start,end)+'\n({isAccountProvisioningPending,completeAccountProvisioning})',{
-  readJsonFile:()=>desired,desiredPath:'synthetic',manifestStore:{update:async(_n,fn)=>{manifestWrites++;assert.ok(fn({}).configuredAt)}},fileStore:{withDesiredFileLockUpdate:async fn=>fn(desired)},provisionAudit:{append(){}},Date
+  require,readJsonFile:()=>desired,desiredPath:'synthetic',manifestStore:{update:async(_n,fn)=>{manifestWrites++;assert.ok(fn({}).configuredAt)}},fileStore:{withDesiredFileLockUpdate:async fn=>fn(desired)},provisionAudit:{append(){}},Date
  });assert.equal(api.isAccountProvisioningPending('test'),true);await api.completeAccountProvisioning('test','verified');
  assert.equal(api.isAccountProvisioningPending('test'),false);assert.equal(desired.perfis.test.humanHold,true);assert.equal(desired.perfis.test.virtus,'off');
  await api.completeAccountProvisioning('test','verified');assert.equal(manifestWrites,1);
+});
+test('revalidação autenticada remove bloqueio antigo somente após verificação positiva',async()=>{
+ const start=source.indexOf('function isAccountProvisioningPending('),end=source.indexOf('function automationAllowed(',start);
+ const desired={perfis:{test:{provisioningPending:false,provisioningResult:{state:'blocked',reason:'identity_required'}}}},cleared=[];
+ const api=vm.runInNewContext(source.slice(start,end)+'\n({isAccountProvisioningPending,completeAccountProvisioning})',{
+  require,readJsonFile:()=>desired,desiredPath:'fixture',manifestStore:{update:async(_n,fn)=>fn({})},fileStore:{withDesiredFileLockUpdate:async fn=>fn(desired)},clearAccountFlags:async(n,flags)=>cleared.push({n,flags:Array.from(flags)}),provisionAudit:{append(){}},Date
+ });
+ assert.equal(api.isAccountProvisioningPending('test'),true);
+ await api.completeAccountProvisioning('test','verified',{verifiedAuth:true});
+ assert.equal(api.isAccountProvisioningPending('test'),false);assert.deepEqual(cleared,[{n:'test',flags:['identity','idVirtus']}]);assert.equal(desired.perfis.test.provisioningResult,undefined);
 });
 test('caminho soberano e fila automática também respeitam cadastro pendente',()=>{
  const start=source.indexOf('async function __deltaResolveVirtusRunner(');
@@ -53,7 +63,7 @@ test('caminho soberano e fila automática também respeitam cadastro pendente',(
 test('painel usa execução real, e cadastro pendente nunca é anunciado online',()=>{
  const html=fs.readFileSync(require('node:path').join(__dirname,'../public/index.html'),'utf8');
  assert.match(html,/p\.provisioningPending \? 'Cadastro pendente' : 'Virtus '\+\(p\.virtusOnline/);
- const marker=source.indexOf('  provisioningPending: isAccountProvisioningPending(nome),');
+ const marker=source.indexOf('  provisioningPending: readJsonFile(');
  assert.ok(marker>0);
  const expression=source.slice(marker,marker+1600).match(/virtusOnline: ([^\r\n]+),/)[1];
  for(const pending of [true,false])for(const configuring of [true,false])for(const runtime of [true,false]){

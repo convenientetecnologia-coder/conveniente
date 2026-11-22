@@ -2491,7 +2491,8 @@ module.exports = (app, workerClient, fileStore) => {
       for (const p of perfisArr) {
         if (!p || !p.nome) continue;
         const nome = String(p.nome);
-        let terminal = cadastroDesired?.perfis?.[nome]?.provisioningPending===true?'account_configure_pending':null;
+        const provisioning=cadastroDesired?.perfis?.[nome];
+        let terminal = provisioning?.provisioningPending===true?'account_configure_pending':['blocked','failed'].includes(provisioning?.provisioningResult?.state)?'account_configure_'+provisioning.provisioningResult.state+':'+provisioning.provisioningResult.reason:null;
         try {
           const man = await manifestStore.read(nome).catch(() => null);
           const f = (man && man.accountFlags) ? man.accountFlags : {};
@@ -2546,7 +2547,7 @@ module.exports = (app, workerClient, fileStore) => {
         for (const p of perfisArr) {
           if (!p || !p.nome) continue;
           const nome = p.nome;
-          if (cadastroDesired.perfis?.[nome]?.provisioningPending === true) continue;
+          if (cadastroDesired.perfis?.[nome]?.provisioningPending === true || ['blocked','failed'].includes(cadastroDesired.perfis?.[nome]?.provisioningResult?.state)) continue;
           if (eligibleSet.has(nome)) {
             desired.perfis[nome] = {
               ...(desired.perfis[nome] || {}),

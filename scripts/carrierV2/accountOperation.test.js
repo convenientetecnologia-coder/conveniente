@@ -54,5 +54,16 @@ test('crash após efeito não prende Virtus quando CT já encerrou transporte, s
 
 test('cadastro retomado preserva histórico de autenticação e só abre após transporte anterior terminal',async()=>{
  const crypto=require('node:crypto');for(const terminal of [false,true]){const f=fixture(),old={version:1,nome:'fixture',type:'provision',operationId:crypto.randomUUID(),edgeGeneration:crypto.randomUUID(),phase:'active',sent:true,result:'unknown',at:Date.now()};const file=path.join(f.root,crypto.createHash('sha256').update('fixture\0provision').digest('hex')+'.json');fs.writeFileSync(file,JSON.stringify(old));class Client extends f.Client{async capabilities(){return {accountProvision:true}}async request(){return {state:terminal?'released':'active'}}}
- try{if(!terminal){await assert.rejects(begin({nome:'fixture',purpose:'provision',authenticationRecovery:true,...f,Client}),/transport_not_closed/);assert.equal(f.events.includes('acquire'),false)}else{const h=await begin({nome:'fixture',purpose:'provision',authenticationRecovery:true,...f,Client});assert.notEqual(h.operationId,old.operationId);const archive=fs.readdirSync(f.root).find(n=>n.endsWith('.history'));assert.equal(JSON.parse(fs.readFileSync(path.join(f.root,archive))).result,'unknown');await h.close()}}finally{fs.rmSync(f.root,{recursive:true,force:true})}}
+ try{if(!terminal){await assert.rejects(begin({nome:'fixture',purpose:'provision',authenticationRecovery:true,...f,Client}),/previous_identity_missing/);assert.equal(f.events.includes('acquire'),false)}else{const h=await begin({nome:'fixture',purpose:'provision',authenticationRecovery:true,...f,Client});assert.notEqual(h.operationId,old.operationId);const archive=fs.readdirSync(f.root).find(n=>n.endsWith('.history'));assert.equal(JSON.parse(fs.readFileSync(path.join(f.root,archive))).result,'unknown');await h.close()}}finally{fs.rmSync(f.root,{recursive:true,force:true})}}
+});
+test('cadastro cancela lease abandonado, confirma fechamento e preserva histórico antes de nova autenticação',async()=>{
+ const crypto=require('node:crypto'),f=fixture(),old={version:1,nome:'fixture',type:'provision',operationId:crypto.randomUUID(),edgeGeneration:crypto.randomUUID(),phase:'active',sent:true,result:'unknown',at:Date.now()};
+ const file=path.join(f.root,crypto.createHash('sha256').update('fixture\0provision').digest('hex')+'.json');fs.writeFileSync(file,JSON.stringify(old));let closed=false;
+ class Client extends f.Client{
+  async capabilities(){return {accountProvision:true}}
+  async request(){return closed?{state:'unknown'}:{state:'active',leaseId:'lease',leaseGeneration:1,carrierGeneration:'generation'}}
+  async controlRequest(path,body){assert.equal(path,'/'+old.operationId+'/cancel');assert.equal(body.businessResult,'unknown');closed=true;return {state:'unknown'}}
+  async acquire(r){assert.equal(closed,true);return super.acquire(r)}
+ }
+ try{const h=await begin({nome:'fixture',purpose:'provision',authenticationRecovery:true,...f,Client});assert.notEqual(h.operationId,old.operationId);assert.equal(JSON.parse(fs.readFileSync(file+'.'+old.operationId+'.history')).result,'unknown');await h.close()}finally{fs.rmSync(f.root,{recursive:true,force:true})}
 });

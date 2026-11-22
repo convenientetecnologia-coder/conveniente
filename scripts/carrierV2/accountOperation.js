@@ -24,7 +24,8 @@ async function beginOnce({nome,purpose,intent='observe',hotUntil=0,observationRe
    const durableBarrier=type==='virtus'&&!isolatedVirtus?(Ledger||require('../virtusDeliveryLedger')).accountBlocked(nome):false;
    const messageIsolatedReply=type==='virtus'&&intent==='reply'&&durableBarrier;
    if(!isolatedVirtus&&!authenticationRetry&&((!observationRecovery&&!messageIsolatedReply)||old.phase!=='closed'||!durableBarrier))throw Error('cp2_unknown_requires_review:'+old.operationId);
-   const previous=new Client({...config,edgeGeneration:old.edgeGeneration});const terminal=await previous.request('/'+old.operationId);
+   const previous=new Client({...config,edgeGeneration:old.edgeGeneration});let terminal=await previous.request('/'+old.operationId);
+   if(authenticationRetry)terminal=await require('./authenticationTransportRecovery').reconcile({client:previous,old,status:terminal,signal});
    if(!['released','canceled','expired','unknown','failed'].includes(terminal.state))throw Error('cp2_uncertain_transport_not_closed');
   }
   let resumeUnaccepted=false;

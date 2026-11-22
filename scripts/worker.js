@@ -12431,14 +12431,16 @@ function resolveChromeUserDataRoot() {
 
 function isAccountProvisioningPending(nome) {
   const desired = readJsonFile(desiredPath, { perfis: {} });
-  return desired?.perfis?.[nome]?.provisioningPending === true;
+  return require('./accountProvisioningState').unready(desired?.perfis?.[nome]);
 }
 
-async function completeAccountProvisioning(nome, source) {
+async function completeAccountProvisioning(nome, source, {verifiedAuth=false}={}) {
   if (!isAccountProvisioningPending(nome)) return;
+  if(verifiedAuth)await clearAccountFlags(nome,['identity','idVirtus']);
   await manifestStore.update(nome, m => ({ ...m, configuredAt: Date.now() }));
   await fileStore.withDesiredFileLockUpdate(d => {
     if (d.perfis?.[nome]) delete d.perfis[nome].provisioningPending;
+    if (d.perfis?.[nome]) delete d.perfis[nome].provisioningResult;
     return d;
   });
   try { provisionAudit.append({ ts: Date.now(), event: 'account_provisioning_ready', nome, source }); } catch {}
@@ -13526,8 +13528,8 @@ const handlers = {
     if (!boot.ready) return { ok: false, error: 'host_boot_not_ready' };
     let cadastroBrowser=null;
     try {
-      const prepared=await prepareCadastroBrowser(nome,operator);cadastroBrowser=prepared.browser;
     return await lockProfileAction(nome, async () => {
+      const prepared=await prepareCadastroBrowser(nome,operator);cadastroBrowser=prepared.browser;
       logger.info('[HANDLER] configure chamada', { nome });
       const ctrl = controllers.get(nome);
       if (!ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
@@ -13778,7 +13780,8 @@ const handlers = {
           if (isHumanGateReason(rr)) {
             enteredHuman = true;
             try {
-              await setCaptchaCheckpointFlag(nome, {
+              if(/two_factor|2fa/.test(rr))await setTwoFactorFlag(nome,{reason:rr});
+              else await setCaptchaCheckpointFlag(nome, {
                 reason: rr || 'captcha_checkpoint',
                 source: 'configure',
                 url: best.url || '',
@@ -13879,7 +13882,8 @@ const handlers = {
             if (isHumanGateReason(afterReason)) {
               enteredHuman = true;
               try {
-                await setCaptchaCheckpointFlag(nome, {
+                if(/two_factor|2fa/.test(afterReason))await setTwoFactorFlag(nome,{reason:afterReason});
+                else await setCaptchaCheckpointFlag(nome, {
                   reason: afterReason,
                   source: 'configure_login_fallback',
                   url: after.url || '',
@@ -14179,7 +14183,7 @@ const handlers = {
           await manifestStore.update(nome,m=>({...m,cookies:fresh.cookies,cookiesUpdatedAt:Date.now()}));
         }
         ctrl.browser.__ctCadastroProxy?.confirm();
-        await completeAccountProvisioning(nome, 'configure_success');
+        await completeAccountProvisioning(nome, 'configure_success', {verifiedAuth:ctrl.browser.__ctNetworkPurpose==='cadastro'});
         try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed']); } catch {}
         try { provisionAudit.append({ ts: Date.now(), event: 'configure_success', nome: String(nome||''), operator: op || null, closedForRamCount: closedForRam.length, isStockProvision: !!isStockProvision }); } catch {}
         logger.info('[HANDLER] configure ok', { nome, closedForRamCount: closedForRam.length });
@@ -14377,7 +14381,6 @@ const handlers = {
     if (!boot.ready) return { ok: false, error: 'host_boot_not_ready' };
     let cadastroBrowser=null;
     try {
-      if(isAccountProvisioningPending(nome)||/^stock_provision/i.test(String(operator||''))){const prepared=await prepareCadastroBrowser(nome,operator);cadastroBrowser=prepared.browser;}
     return await lockProfileAction(nome, async () => {
       const startedAt = Date.now();
       const op = String(operator || '').trim() || `login_remediate:${String(nome || '').trim()}:${startedAt}`;
@@ -14582,6 +14585,7 @@ const handlers = {
       let prevConfigurando = false;
       try {
       // 0.5) se este login_remediate foi explicitamente disparado (operador), pode limpar humanHold para permitir execução.
+      if(isAccountProvisioningPending(nome)||/^stock_provision/i.test(String(operator||''))){const prepared=await prepareCadastroBrowser(nome,operator);cadastroBrowser=prepared.browser;}
       if (overrideHumanHold) {
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
@@ -15165,7 +15169,7 @@ const handlers = {
           await require('./cadastroVerification').verify({browser:ctrl.browser,cookies:expected});
         }
         ctrl.browser.__ctCadastroProxy?.confirm();
-        await completeAccountProvisioning(nome, 'login_remediate_success');
+        await completeAccountProvisioning(nome, 'login_remediate_success', {verifiedAuth:ctrl.browser.__ctNetworkPurpose==='cadastro'});
         if(cadastroBrowser){await closeCadastroBrowser(nome,cadastroBrowser);cadastroBrowser=null;}
         try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed']); } catch {}
         try { await snapshotStatusAndWrite(); } catch {}
@@ -17693,7 +17697,8 @@ perfis.push({
   uaPresetId: p.uaPresetId,
   active: controllers.has(nome),
   trabalhando: !isAccountProvisioningPending(nome) && controllers.get(nome)?.configurando !== true && !!(controllers.get(nome)?.trabalhando),
-  provisioningPending: isAccountProvisioningPending(nome),
+  provisioningPending: readJsonFile(desiredPath,{perfis:{}})?.perfis?.[nome]?.provisioningPending===true,
+  provisioningResult: readJsonFile(desiredPath,{perfis:{}})?.perfis?.[nome]?.provisioningResult||null,
   virtusEngineDesired: desiredEngineRuntime,
   virtusEngineRuntime: (() => {
     try {
@@ -20081,7 +20086,7 @@ async function nurseTick() {
                 continue;
               }
               const cur = d.perfis[nome] || {};
-              if(cur.provisioningPending===true)continue;
+              if(require('./accountProvisioningState').unready(cur))continue;
               if (cur.active !== true) {
                 d.perfis[nome] = { ...cur, active: true };
                 changed++;
@@ -20284,7 +20289,7 @@ async function nurseTick() {
             if (!n) continue;
             if (!inShard(n)) continue;
             const want = desired.perfis[n] || {};
-            if(want.provisioningPending===true)continue;
+            if(require('./accountProvisioningState').unready(want))continue;
             if (want.active !== true || controllers.has(n)) continue;
             try {
               const rm = robeMeta[n] || {};
@@ -20833,7 +20838,7 @@ async function nurseTick() {
             } catch {}
             continue;
           }
-          if (liveWant.provisioningPending === true) continue;
+          if (require('./accountProvisioningState').unready(liveWant)) continue;
         } catch {}
 
         if (robeMeta[nome]?.activationHeldUntil && robeMeta[nome].activationHeldUntil > Date.now()) {

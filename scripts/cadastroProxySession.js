@@ -4,7 +4,7 @@ function mode({purpose='auto',pending=false,config}){
  const cadastro=purpose==='cadastro'||(purpose==='auto'&&pending);
  return {cadastro,proxy:cadastro?config.cadastro?.proxyEnabled===true:config.virtus?.proxyEnabled===true};
 }
-function pending(nome){const desired=JSON.parse(fs.readFileSync(path.join(__dirname,'../dados/desired.json'),'utf8'));return desired.perfis?.[nome]?.provisioningPending===true}
+function pending(nome){const desired=JSON.parse(fs.readFileSync(path.join(__dirname,'../dados/desired.json'),'utf8'));return require('./accountProvisioningState').unready(desired.perfis?.[nome])}
 async function create({nome,onState=()=>{},dependencies={}}){
  const cp2=dependencies.cp2||require('./carrierV2/accountOperation'),rails=dependencies.rails||require('./robeRail');
  await cp2.ensureConfig();

@@ -1,5 +1,9 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),{retryPlan,isTransient}=require('./stockProvisionRetry');
+test('falhas técnicas observadas em produção não encerram cadastro como falha definitiva',()=>{
+ for(const error of ['HTTP/1.1 502 Bad Gateway','HTTP/1.1 503 Service Unavailable','HTTP/1.1 504 Gateway Timeout','cp2_uncertain_transport_not_closed','cp2_previous_operation_not_closed'])assert.equal(isTransient(error),true,error);
+ for(const error of ['HTTP/1.1 401 Unauthorized','HTTP/1.1 403 Forbidden','identity_required','still_login_required:login_form','captcha timeout'])assert.equal(isTransient(error),false,error);
+});
 test('temporary transport failure retains only failed actions, reusing account and command',()=>{
  const record={id:'same-command',payload:{actions:[{stockAccountId:1},{stockAccountId:2},{stockAccountId:3}]}};
  const output={results:[{type:'stock_provision',details:{results:[{stockAccountId:1,ok:true},{stockAccountId:2,ok:false,error:'carrier_unavailable'},{stockAccountId:3,ok:false,error:'identity_required'}]}}]};
