@@ -10,9 +10,9 @@ class VirtusTurn {
    if(this.closed)throw Error('virtus_turn_closed');this.lastTurn={intent,requestedAt:this.clock(),outcome:'waiting'};const trafficBefore=this.rail.trafficSnapshot();this.set('waiting');
    try{
     this.lease=await this.acquire({intent,signal:this.abort.signal});
-    this.lastTurn.acquiredAt=this.clock();this.lastTurn.operationId=this.lease.operationId||null;
+    this.lastTurn.acquiredAt=this.clock();this.lastTurn.operationId=this.lease.operationId||null;this.lastTurn.outcome='acquired';
     if(this.closed)throw Error('virtus_turn_closed');
-    this.rail.flip(this.lease.hop);await this.prove();this.lastTurn.provedAt=this.clock();
+    this.rail.flip(this.lease.hop);await this.prove();this.lastTurn.provedAt=this.clock();this.lastTurn.outcome='working';
     if(this.lease.snapshot().healthy===false)throw Error('virtus_transport_unhealthy');
     this.set('online');let healthTimer;
     try{
@@ -21,7 +21,7 @@ class VirtusTurn {
       },250);healthTimer.unref?.()});
       const result=await Promise.race([Promise.resolve().then(()=>action(this.lease)),unhealthy]);
       this.lastTurn.actionEndedAt=this.clock();this.lastTurn.outcome=result?.ok===false?'incomplete':'action_completed';this.lastTurn.reason=result?.reason||result?.state||null;this.failure=result?.ok===false?String(this.lastTurn.reason||'visit_incomplete'):null;
-      if(['observe','engaged'].includes(intent)&&result?.ok===true){this.lastCheckedAt=this.clock();this.lastTurn.checkConfirmed=true;}return result;
+      if(['warm','observe','engaged'].includes(intent)&&result?.ok===true){this.lastCheckedAt=this.clock();this.lastTurn.checkConfirmed=true;}return result;
     }finally{clearInterval(healthTimer)}
 
    }catch(error){this.failure=String(error.message||error);this.lastTurn.outcome='failed';this.lastTurn.reason=this.failure;throw error}

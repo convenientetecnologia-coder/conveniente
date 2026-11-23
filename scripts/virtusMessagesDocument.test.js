@@ -59,3 +59,11 @@ test('reload only repairs proven broken document, is bounded and requires readin
  const quiet={reload:async()=>reloads++};await assert.rejects(ensure({page:quiet,probe:async()=>{const e=broken();e.details.reason='messages_shell_incomplete';throw e}}));assert.equal(reloads,1);
  now+=600001;await assert.rejects(ensure({page,clock:()=>now,probe:async()=>{throw broken()}}));assert.equal(reloads,2);
 });
+test('failed document recovery retries on a new lease, once per lease, without ten-minute dead time',async()=>{
+ const {ensure}=require('./virtusMessagesDocument');let reloads=0;
+ const page={evaluate:async()=>true,reload:async()=>{reloads++}};
+ const probe=async()=>{if(reloads<2){const e=Error('incomplete');e.details={reason:'styles_unavailable'};throw e}return {ready:true}};
+ await assert.rejects(ensure({page,probe,recoveryKey:'lease-1',clock:()=>1000}));assert.equal(reloads,1);
+ await assert.rejects(ensure({page,probe,recoveryKey:'lease-1',clock:()=>1100}));assert.equal(reloads,1);
+ assert.equal((await ensure({page,probe,recoveryKey:'lease-2',clock:()=>1200})).ready,true);assert.equal(reloads,2);
+});

@@ -26,7 +26,9 @@ async function wait({page,timeoutMs=120000,stableMs=2000,clock=Date.now,sleep=ms
  const error=Error('virtus_messages_document_not_ready');error.details={...last,waitedMs:clock()-start,unchangedReasonMs:clock()-reasonSince};throw error;
 }
 const recoveryTimes=new WeakMap();
-async function ensure({page,probe=wait,clock=Date.now,cooldownMs=600000,onRecovery=()=>{}}){
+function recoveryScope(page){try{return page.__ctVirtusProxySession?.snapshot()?.operationId||page.browser?.()?.__ctVirtusProxy?.snapshot()?.operationId||null}catch{return null}}
+function recoveryLimited(previous,key,now,cooldownMs){return previous!==undefined&&(key?previous.key===key:now-previous.at<cooldownMs)}
+async function ensure({page,probe=wait,clock=Date.now,cooldownMs=600000,onRecovery=()=>{},recoveryKey=recoveryScope(page)}){
  try{return await probe({page});}catch(error){
   const reason=error.details?.reason;
   // A reload is justified only by explicit broken-document evidence, never silence or absence of new messages.
@@ -35,13 +37,13 @@ async function ensure({page,probe=wait,clock=Date.now,cooldownMs=600000,onRecove
   // This function runs inside a proven proxy turn. Never navigate after the browser goes offline.
   if(typeof page.evaluate==='function'&&!(await page.evaluate(()=>navigator.onLine===true)))throw error;
   const previous=recoveryTimes.get(page);
-  if(previous!==undefined&&clock()-previous<cooldownMs)throw error;
-  recoveryTimes.set(page,clock());onRecovery({reason,at:clock()});
+  if(recoveryLimited(previous,recoveryKey,clock(),cooldownMs))throw error;
+  recoveryTimes.set(page,{at:clock(),key:recoveryKey});onRecovery({reason,at:clock()});
   await page.reload({waitUntil:'domcontentloaded',timeout:120000});
   return probe({page,timeoutMs:60000});
  }
 }
-async function recoverBrowserError({page,clock=Date.now,cooldownMs=600000,onRecovery=()=>{}}){
+async function recoverBrowserError({page,clock=Date.now,cooldownMs=600000,onRecovery=()=>{},recoveryKey=recoveryScope(page)}){
  if(typeof page.evaluate!=='function')return {reloaded:false};
  const broken=await page.evaluate(()=>{
   const text=String(document.body?.innerText||'');
@@ -50,8 +52,8 @@ async function recoverBrowserError({page,clock=Date.now,cooldownMs=600000,onReco
  if(!broken?.error)return {reloaded:false};
  if(!broken.online)throw Error('virtus_browser_still_offline');
  const previous=recoveryTimes.get(page);
- if(previous!==undefined&&clock()-previous<cooldownMs)throw Error('virtus_browser_error_recovery_cooldown');
- recoveryTimes.set(page,clock());onRecovery({reason:'browser_network_error',at:clock()});
+ if(recoveryLimited(previous,recoveryKey,clock(),cooldownMs))throw Error('virtus_browser_error_recovery_cooldown');
+ recoveryTimes.set(page,{at:clock(),key:recoveryKey});onRecovery({reason:'browser_network_error',at:clock()});
  await page.reload({waitUntil:'domcontentloaded',timeout:120000});
  return {reloaded:true};
 }

@@ -20564,7 +20564,7 @@ async function nurseTick() {
         if(want.active===true&&!ctrl.virtus&&!ctrl._virtusStarting&&!ctrl.configurando&&!ctrl.humanControl&&!want.humanHold&&!isRobeBusy(nome)){
           ctrl._virtusStarting=true;
           const initialize=()=>startVirtusByEngine(ctrl.browser,nome,autoMode,{epoch:ctrl.virtusEpoch||0});
-          const start=proxySession.snapshot().offlinePlanned?proxySession.run('observe',initialize):Promise.resolve().then(initialize);
+          const start=proxySession.snapshot().offlinePlanned?proxySession.run(proxySession.snapshot().lastCheckedAt?'observe':'warm',initialize):Promise.resolve().then(initialize);
           ctrl.virtus=start;ctrl.trabalhando=true;
           start.catch(error=>{ctrl.virtus=null;ctrl.trabalhando=false;try{logger.error('[VIRTUS_PROXY][START_FAILED]',{nome,error:error.message})}catch{}}).finally(()=>{ctrl._virtusStarting=false});
         }

@@ -24,7 +24,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
   let bootResolve,bootReady,bootReject;
   const bootGate=new Promise(resolve=>bootResolve=resolve);
   const ready=new Promise((resolve,reject)=>{bootReady=resolve;bootReject=reject});
-  const boot=()=>{const task=turn.run('warm',async()=>{bootReady();await bootGate});task.catch(bootReject);return ready};
+  const boot=()=>{const task=turn.run('warm',async()=>{bootReady();await bootGate;return lastInbox||{ok:false,state:'incomplete',reason:'startup_inbox_unconfirmed'}});task.catch(bootReject);return ready};
   let browser=null,timer=null,stopped=false,lastNetworkAt=0,lastSyncNetworkAt=0,connectedAt=Date.now(),observerBusy=false,observerOptions=null,observerLastTickAt=0,lastObserveAttemptAt=0,observerSkipReason=null,observerVersion=0,startupFinished=false,healthCheck=null,lastInbox=null,activeLease=null,expectedSend=null,outgoingEvidence=null,humanHeld=false,humanTimer=null,humanResolve=null,humanTask=null;
   const deliveryLedger=dependencies.deliveryLedger||require("./virtusDeliveryLedger");
   let closedBrowserTimer=null,recoveringClosedBrowser=false;
@@ -80,7 +80,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
    },
    async leaveHuman(){if(!humanTask){humanHeld=false;return}const task=humanTask.task;clearTimeout(humanTimer);humanResolve?.();await task;humanHeld=false},
    async run(intent,action){
-    if(intent==='reply'&&activeLease&&!activeLease.snapshot().reconciliationOnly&&['observe','engaged'].includes(visitIntent)&&!humanHeld&&!visitReplied&&burst.length<1){return new Promise((resolve,reject)=>burst.push({action,resolve,reject}))}
+    if(intent==='reply'&&activeLease&&!activeLease.snapshot().reconciliationOnly&&['warm','observe','engaged'].includes(visitIntent)&&!humanHeld&&!visitReplied&&burst.length<1){return new Promise((resolve,reject)=>burst.push({action,resolve,reject}))}
     return turn.run(intent,async lease=>{
       activeLease=lease;rotationPolicy=lease.snapshot().rotation||rotationPolicy;visitIntent=intent;visitReplied=false;
       try{
@@ -169,11 +169,12 @@ async function create({nome,onState=()=>{},dependencies={}}){
       observerSkipReason=stopped||turn.closed?'closed':humanHeld?'human':observerBusy?'busy':!browser?.isConnected()?'browser_disconnected':!options?'unregistered':!options.canObserve()?'runtime_guard':null;
       if(observerSkipReason==='closed'){api.stopObserver();if(!stopped&&!humanHeld&&browser?.isConnected()){setTimeout(()=>browser.close().catch(()=>{}),0)}return}
       if(observerSkipReason)return;
+      const needsStartupRepair=!lastInbox||['incomplete','recovering_browser_document'].includes(lastInbox.state);
       const target=activity.snapshot().engaged?rotationPolicy?.hotIntervalMs:rotationPolicy?.coldIntervalMs;
-      const revisitMs=dependencies.revisitMs??Math.max(15000,Math.min(1800000,Number(target)||(activity.snapshot().engaged?15000:60000)));
+      const revisitMs=dependencies.revisitMs??(needsStartupRepair?60000:Math.max(15000,Math.min(1800000,Number(target)||(activity.snapshot().engaged?15000:60000))));
       if(lastObserveAttemptAt&&Date.now()-lastObserveAttemptAt<revisitMs){observerSkipReason='revisit_interval';return}
       lastObserveAttemptAt=Date.now();observerBusy=true;
-      try{await api.run(activity.snapshot().engaged?'engaged':'observe',async()=>{
+      try{await api.run(needsStartupRepair?'warm':activity.snapshot().engaged?'engaged':'observe',async()=>{
         const prepared=await options.prepareInbox();api.noteInbox(prepared);
         if(prepared?.ok===false)return prepared;
         const start=Date.now();let sawNetwork=lastNetworkAt>0;
