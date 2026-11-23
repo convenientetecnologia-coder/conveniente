@@ -14,10 +14,11 @@ function inspectDocument(){
  const sheets=document.styleSheets;
  const hasStyles=sheets===undefined||[...sheets].some(s=>!s.disabled&&s.ownerNode?.id!=='virtus_antiselect_style_v1'&&(!s.ownerNode||s.ownerNode.sheet));
  if(!hasStyles||/times new roman/.test(styled))return {ready:false,reason:'styles_unavailable'};
- if(!heading||!grid)return {ready:false,reason:'messages_shell_incomplete'};
+ const diagnostic={heading,grid,links,loading,documentState:document.readyState,path:typeof location!=='undefined'?location.pathname:null,dialogs:[...document.querySelectorAll('[role="dialog"],[aria-modal="true"]')].filter(visible).length};
+ if(!heading||!grid)return {ready:false,reason:'messages_shell_incomplete',...diagnostic};
  if(loading)return {ready:false,reason:'messages_loading',loading};
  const empty=/nenhuma (conversa|mensagem)|no (chats|messages|conversations)|suas mensagens|your messages/.test(text);
- if(!links&&!empty)return {ready:false,reason:'conversation_list_unconfirmed'};
+ if(!links&&!empty)return {ready:false,reason:'conversation_list_unconfirmed',...diagnostic};
  return {ready:true,reason:'ready',links,empty};
 }
 async function wait({page,timeoutMs=120000,stableMs=2000,clock=Date.now,sleep=ms=>new Promise(r=>setTimeout(r,ms))}){
