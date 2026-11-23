@@ -2721,6 +2721,7 @@ async function execStockProvision(cmd) {
             if (!existingProfile || !/^[\w.-]+$/.test(existingProfile)) throw new Error('resume_profile_missing');
             const existing = await httpJson(`/api/perfis/${encodeURIComponent(existingProfile)}/manifest`);
             if (!existing?.manifest || Number(existing.manifest.stockAccountId) !== Number(stockAccountId)) throw new Error('resume_profile_account_mismatch');
+            await require('./stockProvisionResume').restoreMissingCookies({profileName:existingProfile,manifest:existing.manifest,cookies,httpJson});
             return { ok: true, perfil: { nome: existingProfile, cidade: city }, reusedExisting: true };
           }
           const r = await httpJson('/api/perfis', {
