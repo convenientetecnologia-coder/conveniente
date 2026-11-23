@@ -20038,6 +20038,7 @@ function kickCadastroRetry() {
   try { if (provisionLock.isActive()) return; } catch { return; }
   const state = require('./accountProvisioningState');
   const stillOpening = Object.keys((desired && desired.perfis) || {}).some((nome) => {
+    if (!inShard(nome)) return false;
     const w = desired.perfis[nome] || {};
     if (w.active !== true || w.humanHold === true || state.unready(w) || controllers.has(nome)) return false;
     const held = Number((robeMeta[nome] && robeMeta[nome].activationHeldUntil) || 0) || 0;
@@ -20204,7 +20205,7 @@ async function nurseTick() {
         if (autoOpenEnabled) return true;
         for (const n of Object.keys((desired0 && desired0.perfis) || {})) {
           const w = desired0.perfis[n] || {};
-          if (w && w.active === true) return true;
+          if (w && (w.active === true || (w.provisioningPending === true && inShard(n)))) return true;
         }
       } catch {}
       return false;
