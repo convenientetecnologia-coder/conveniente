@@ -6,7 +6,7 @@ test('rejected cookies reach one actual credential attempt in the configure hand
  assert.ok(start>0&&end>start);const calls=[];
  const result=await vm.runInNewContext('(async()=>{'+source.slice(start,end)+';return driven})()',{
   require:name=>name==='./configureLoginFallback'?{run:args=>fallback.run({...args,attempt:async()=>{calls.push('password');return {ok:true}}})}:require(name),
-  workPage:{goto:async()=>calls.push('messages')},nome:'fixture',login2:'fixture',password2:'fixture',ctrl:{browser:{__ctCadastroProxy:{assertHealthy(){calls.push('healthy')},noteStage(){}}}},
+  rr:'login_form',workPage:{goto:async()=>calls.push('messages')},nome:'fixture',login2:'fixture',password2:'fixture',ctrl:{browser:{__ctCadastroProxy:{assertHealthy(){calls.push('healthy')},noteStage(){}}}},
   readLoginAttemptCount:async()=>0,LOGIN_ATTEMPT_MAX:2,bumpLoginAttemptCount:async()=>{calls.push('budget');return 1},stopLoginAfterBudget:async()=>{throw Error('unexpected')},provisionAudit:{append(){}},Date,Error
  });
  assert.equal(result.ok,true);assert.deepEqual(calls.filter(c=>c!=='healthy'),['budget','password','messages']);
@@ -36,4 +36,9 @@ test('technical errors never persist login or rejected-credential flags in the r
   for(const reason of ['cadastro_ui_ready_timeout','cadastro_proxy_transport_unhealthy','pc_login_navigation_failed:detached Frame'])await fn('fixture',{reason});
  }
  assert.equal(writes,0);
+});
+
+test('trust-device continuation does not spend a password attempt and still enters final verification target',async()=>{
+ let attempts=0,opened=0;const result=await fallback.run({page:{goto:async()=>opened++},resume:async()=>({ok:true,via:'trust_device_resume'}),begin:async()=>{attempts++;return true}});assert.equal(result.ok,true);assert.equal(attempts,0);assert.equal(opened,1);
+ const blocked=await fallback.run({page:{},resume:async()=>({ok:false,terminal:'trust_device',error:'trust_device_unconfirmed'}),begin:async()=>{attempts++;return true}});assert.equal(blocked.ok,false);assert.equal(attempts,0);
 });

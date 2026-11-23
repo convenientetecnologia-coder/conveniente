@@ -1978,7 +1978,7 @@ async function fetchCredentialsFromCT({ profileName } = {}) {
     const login = String(j.login || '').trim();
     const password = String(j.password || '').trim();
     if (!login || !password) return { ok: false, error: 'missing_credentials' };
-    return { ok: true, login, password, stockAccountId: j.stockAccountId || null };
+    return { ok: true, login, password, stockAccountId: j.stockAccountId || null,expectedFacebookUserId:j.expectedFacebookUserId||null };
   } catch (e) {
     return { ok: false, error: (e && e.message) || String(e) };
   }
@@ -13627,7 +13627,7 @@ const handlers = {
       if (!fs.existsSync(manifestPath)) return { ok: false, error: 'Manifest não existe para este perfil!' };
       const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
       if(!Array.isArray(manifest.cookies))manifest.cookies=[];
-      const cadastroExpectedIdentity=require('./cadastroIdentity').expected(manifest);
+      const cadastroExpectedIdentity=await require('./cadastroIdentity').resolve({nome,manifest,fetchAssigned:fetchCredentialsFromCT,save:fn=>manifestStore.update(nome,fn)});
       if(cadastroExpectedIdentity)await manifestStore.update(nome,m=>({...m,expectedFacebookUserId:cadastroExpectedIdentity}));
 
       const op = String(operator || '').trim();
@@ -13940,6 +13940,7 @@ const handlers = {
 
           const driven = await require('./configureLoginFallback').run({page:workPage,nome,login:login2,password:password2,
             assertHealthy:()=>ctrl.browser.__ctCadastroProxy?.assertHealthy(),
+            resume:async()=>{if(rr!=='trust_device')return null;const pc=require('./pcSessionLogin');const trust=await pc.clickTrustThisDevice(workPage,nome);if(trust?.left===true){const saved=await pc.persistFreshSessionCookies(workPage,nome);if(saved?.ok)return {ok:true,via:'trust_device_resume'};}return {ok:false,terminal:'trust_device',error:'trust_device_unconfirmed'};},
             begin:async()=>{
               if(await readLoginAttemptCount(nome)>=LOGIN_ATTEMPT_MAX){await stopLoginAfterBudget(nome,'configure');return false;}
               const n=await bumpLoginAttemptCount(nome);

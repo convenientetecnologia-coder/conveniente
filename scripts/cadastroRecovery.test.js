@@ -9,7 +9,7 @@ test('old unattempted cookie-only block is queued once, preserving evidence and 
  assert.deepEqual(await recover({...opts,snapshot:structuredClone(desired)}),[]);
 });
 test('real attempted login, restrictions, missing credentials, human hold and foreign shards are preserved',async()=>{
- assert.equal(eligible(want,{...manifest,accountFlags:{loginAttemptCount:1}}),false);
+ assert.equal(eligible(want,{...manifest,accountFlags:{loginAttemptCount:2}}),false);
  for(const flag of ['captchaCheckpoint','idVirtus','banned','twoFactor','whatsappConfirm'])assert.equal(eligible(want,{...manifest,accountFlags:{[flag]:true}}),false);
  assert.equal(eligible({...want,humanHold:true},manifest),false);assert.equal(eligible(want,{...manifest,cookies:[]}),false);
  assert.equal(eligible({...want,provisioningResult:{state:'blocked',error:'configure_blocked_checkpoint_captcha'}},manifest),false);
@@ -24,13 +24,14 @@ test('one unreadable manifest cannot prevent the remaining accounts from recover
  const result=await recover({snapshot:structuredClone(desired),read:async n=>{if(n==='bad')throw Error('invalid json');return manifest},update:async f=>{desired=f(desired)}});
  assert.deepEqual(result,['good']);assert.equal(desired.perfis.bad.provisioningResult.state,'blocked');
 });
-test('rejected cookie jar can recover through credentials bound to a numeric account identity',()=>{
- assert.equal(eligible(want,{login:'123456789012345',password:'fixture',cookies:[],sessionRejected:true}),true);
+test('rejected cookie jar requires a known identity or assigned-stock reference',()=>{
+ assert.equal(eligible(want,{login:'123456789012345',password:'fixture',cookies:[],sessionRejected:true}),false);
+ assert.equal(eligible(want,{stockAccountId:42,login:'phone',password:'fixture',cookies:[],sessionRejected:true}),true);
  assert.equal(eligible(want,{login:'fixture@example.test',password:'fixture',cookies:[]}),false);
 });
-test('version two recovers a technical exhaustion from version one without resetting real password attempts',()=>{
+test('version three permits the remaining budget once, without resetting real password attempts',()=>{
  const old={...want,credentialRecoveryVersion:1,provisioningResult:{state:'failed',error:'fetch failed'}};
- assert.equal(eligible(old,manifest),true);assert.equal(eligible({...old,credentialRecoveryVersion:2},manifest),false);
- assert.equal(eligible(old,{...manifest,accountFlags:{loginAttemptCount:1}}),false);
- assert.equal(eligible({...want,credentialRecoveryVersion:1},manifest),false);
+ assert.equal(eligible(old,manifest),true);assert.equal(eligible({...old,credentialRecoveryVersion:3},manifest),false);
+ assert.equal(eligible(old,{...manifest,accountFlags:{loginAttemptCount:2}}),false);
+ assert.equal(eligible({...want,credentialRecoveryVersion:2},manifest),true);
 });
