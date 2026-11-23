@@ -67,3 +67,9 @@ test('failed document recovery retries on a new lease, once per lease, without t
  await assert.rejects(ensure({page,probe,recoveryKey:'lease-1',clock:()=>1100}));assert.equal(reloads,1);
  assert.equal((await ensure({page,probe,recoveryKey:'lease-2',clock:()=>1200})).ready,true);assert.equal(reloads,2);
 });
+test('conversation folder can be entered before its thread links mount, only with scoped entry proof',async()=>{
+ let now=0;const page={evaluate:async()=>({ready:false,reason:'conversation_list_unconfirmed',heading:true,grid:true,links:0,loading:0})};
+ const result=await wait({page,allowMarketplaceEntry:async()=>true,clock:()=>now,sleep:async ms=>now+=ms,stableMs:500,timeoutMs:1000});assert.equal(result.reason,'marketplace_entry_ready');assert.equal(result.links,0);
+ now=0;await assert.rejects(wait({page,allowMarketplaceEntry:async()=>false,clock:()=>now,sleep:async ms=>now+=ms,timeoutMs:500}),/document_not_ready/);
+ now=0;page.evaluate=async()=>({ready:false,reason:'messages_loading'});await assert.rejects(wait({page,allowMarketplaceEntry:async()=>true,clock:()=>now,sleep:async ms=>now+=ms,timeoutMs:500}),/document_not_ready/);
+});

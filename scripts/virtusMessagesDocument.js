@@ -21,9 +21,15 @@ function inspectDocument(){
  if(!links&&!empty)return {ready:false,reason:'conversation_list_unconfirmed',...diagnostic};
  return {ready:true,reason:'ready',links,empty};
 }
-async function wait({page,timeoutMs=120000,stableMs=2000,clock=Date.now,sleep=ms=>new Promise(r=>setTimeout(r,ms))}){
+async function wait({page,timeoutMs=120000,stableMs=2000,clock=Date.now,sleep=ms=>new Promise(r=>setTimeout(r,ms)),allowMarketplaceEntry=null}){
  const start=clock();let since=null,last,reasonSince=start,reason;
- while(clock()-start<=timeoutMs){last=await page.evaluate(inspectDocument);if(last.reason!==reason){reason=last.reason;reasonSince=clock();}if(last.ready){if(since===null)since=clock();if(clock()-since>=stableMs)return last;}else since=null;await sleep(250);}
+ while(clock()-start<=timeoutMs){last=await page.evaluate(inspectDocument);
+  // The conversations list may contain only the Marketplace folder. Opening
+  // that folder is what mounts thread links; requiring those links beforehand
+  // creates a circular wait. The caller supplies the already-scoped target
+  // probe; this does not approve a Marketplace visit (its grid must still settle).
+  if(last.reason==='conversation_list_unconfirmed'&&typeof allowMarketplaceEntry==='function'&&await allowMarketplaceEntry())last={...last,ready:true,reason:'marketplace_entry_ready'};
+  if(last.reason!==reason){reason=last.reason;reasonSince=clock();}if(last.ready){if(since===null)since=clock();if(clock()-since>=stableMs)return last;}else since=null;await sleep(250);}
  const error=Error('virtus_messages_document_not_ready');error.details={...last,waitedMs:clock()-start,unchangedReasonMs:clock()-reasonSince};throw error;
 }
 const recoveryTimes=new WeakMap();

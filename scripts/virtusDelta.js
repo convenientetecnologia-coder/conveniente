@@ -8755,8 +8755,11 @@ async function proxyMarketplaceTarget(page){
 }
 async function prepareProxyInbox(page,healthCheck){
  if(healthCheck){const health=await healthCheck(page);if(!health.ok)return {ok:false,state:'blocked',health:health.state,reason:health.reason};}
- try{return await require('./virtusInboxVisit').visit({
-  ready:()=>require('./virtusMessagesDocument').ensure({page,onRecovery:e=>logInfo('[virtusDelta][proxy_document_recovery] '+JSON.stringify(e))}),
+ try{
+ const restored=await require('./virtusInboxRoute').restore({page,healthCheck,onRecovery:e=>logInfo('[virtusDelta][proxy_route_recovery] '+JSON.stringify(e))});
+ if(restored.blocked)return {ok:false,state:'blocked',health:restored.blocked.state,reason:restored.blocked.reason};
+ return await require('./virtusInboxVisit').visit({
+  ready:()=>{const documents=require('./virtusMessagesDocument');return documents.ensure({page,probe:options=>documents.wait({...options,allowMarketplaceEntry:async()=>!!(await proxyMarketplaceTarget(page))}),onRecovery:e=>logInfo('[virtusDelta][proxy_document_recovery] '+JSON.stringify(e))})},
   active:()=>proxyMarketplaceListActive(page),visible:async()=>!!(await proxyMarketplaceTarget(page)),
   click:async()=>{const target=await proxyMarketplaceTarget(page);if(!target)throw Error('virtus_marketplace_target_disappeared');await page.mouse.click(target.x,target.y,{delay:clickDelayMs()})},
   settled:async()=>{

@@ -91,6 +91,12 @@ async function create({nome,onState=()=>{},dependencies={}}){
         const page=pages.find(p=>/facebook\.com\/messages|messenger\.com/.test(p.url()))||pages[0];
         if(!page)throw Error('virtus_proxy_page_missing');
         await require('./virtusMessagesDocument').recoverBrowserError({page,onRecovery:e=>{api.noteInbox({ok:false,state:'recovering_browser_document',reason:e.reason});}});
+        if(healthCheck&&intent!=='human'){
+          const health=await healthCheck();
+          if(!health.ok){const result={ok:false,state:'blocked',health:health.state,reason:health.reason};api.noteInbox(result);return result}
+          const route=await require('./virtusInboxRoute').restore({page,healthCheck:()=>healthCheck(),onRecovery:e=>api.noteInbox({ok:false,state:'recovering_browser_document',reason:e.reason})});
+          if(route.blocked){const result={ok:false,state:'blocked',health:route.blocked.state,reason:route.blocked.reason};api.noteInbox(result);return result}
+        }
         try{await page.waitForFunction(()=>document.readyState!=='loading'&&!!document.body,{timeout:120000});}
         catch(error){
           if(error.name!=='TimeoutError')throw error;
