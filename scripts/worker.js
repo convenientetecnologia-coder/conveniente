@@ -13940,7 +13940,7 @@ const handlers = {
 
           const driven = await require('./configureLoginFallback').run({page:workPage,nome,login:login2,password:password2,
             assertHealthy:()=>ctrl.browser.__ctCadastroProxy?.assertHealthy(),
-            resume:async()=>{if(rr!=='trust_device')return null;const pc=require('./pcSessionLogin');const trust=await pc.clickTrustThisDevice(workPage,nome);if(trust?.left===true){const saved=await pc.persistFreshSessionCookies(workPage,nome);if(saved?.ok)return {ok:true,via:'trust_device_resume'};}return {ok:false,terminal:'trust_device',error:'trust_device_unconfirmed'};},
+            resume:async()=>{if(rr!=='trust_device'&&(await browserHelper.detectLoginRequired(workPage))?.reason!=='trust_device')return null;const pc=require('./pcSessionLogin');const trust=await pc.clickTrustThisDevice(workPage,nome);if(trust?.left===true){const saved=await pc.persistFreshSessionCookies(workPage,nome);if(saved?.ok)return {ok:true,via:'trust_device_resume'};}return {ok:false,terminal:'trust_device',error:'trust_device_unconfirmed'};},
             begin:async()=>{
               if(await readLoginAttemptCount(nome)>=LOGIN_ATTEMPT_MAX){await stopLoginAfterBudget(nome,'configure');return false;}
               const n=await bumpLoginAttemptCount(nome);
