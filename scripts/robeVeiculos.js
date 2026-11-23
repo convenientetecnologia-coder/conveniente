@@ -2603,6 +2603,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
 
     // Fast-lane readiness (3.5s). Se não ficar pronto, fallback com seletor (8s).
     await require('./accountSecurityGate').assertAllowed(page,nome);
+    await require('./workAuthentication').assertAuthenticated(page,nome);
     const readyFast = await waitForCreateItemReady(page, { timeout: 3500 });
     if (!readyFast) {
       await page.waitForSelector('input[type="file"][accept*="image"], input[type="file"]', {
@@ -2693,6 +2694,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         return; // aborta por limit_posting como deve
       }
       await require('./accountSecurityGate').assertAllowed(page,nome);
+    await require('./workAuthentication').assertAuthenticated(page,nome);
       throw new Error('Campo para upload de foto não localizado (frames varridos).');
     }
     await waitBeforeComposeAction(composePlan, 'before_upload', { nome, attId });

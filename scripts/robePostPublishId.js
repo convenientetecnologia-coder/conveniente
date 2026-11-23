@@ -4025,6 +4025,7 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
     await ensureSellingFeed(page, { deadlineAt: workDeadline });
     assertBudget(workDeadline, 'auto_after_selling');
     await require('./accountSecurityGate').assertAllowed(page,nome);
+    await require('./workAuthentication').assertAuthenticated(page,nome);
 
     // ID - nao: banner no topo. Sem scroll-hunt.
     const { openedOk, scan } = await tryOpenActionNeededAtTop(page, {

@@ -1,4 +1,11 @@
 'use strict';
+require('node:test')('missing form is a technical retry, never a credentials verdict',async()=>{
+ const assert=require('node:assert/strict'),state=require('./accountProvisioningState');
+ const d={perfis:{a:{provisioningPending:true,provisioningAttempts:1}}};
+ await state.settle([{profileName:'a',ok:false,error:'login_form_not_found'}],{update:async f=>f(d),now:()=>100});
+ assert.equal(d.perfis.a.provisioningPending,true);assert.equal(d.perfis.a.provisioningAttempts,1);assert.equal(d.perfis.a.provisioningResult,undefined);
+ assert.equal(state.restriction('still_login_required:login_form'),'login_required');
+});
 const test=require('node:test'),assert=require('node:assert/strict'),{unready,settle}=require('./accountProvisioningState');
 test('resultado real encerra pendência com motivo sem liberar conta restrita para trabalhar',async()=>{
  const desired={perfis:{account:{provisioningPending:true,active:true,virtus:'on'}}};

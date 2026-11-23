@@ -8,7 +8,7 @@ function eligible(want,manifest){
  if(attempts>=2)return false;
  const ordinary=result.state==='blocked'&&/^still_login_required:(login_form|login_wall|not_in|trust_device)$/.test(result.error);
  const legacyIdentity=result.error==='cadastro_account_identity_mismatch'&&String(manifest.expectedFacebookUserId||'')===String(manifest.login||'')&&manifest.expectedFacebookUserIdSource!=='ct_stock';
- const technical=result.state==='failed'&&require('./stockProvisionRetry').isTransient(result.error);
+ const technical=['blocked','failed'].includes(result.state)&&require('./stockProvisionRetry').isTransient(result.error);
  if(!ordinary&&!technical&&!legacyIdentity)return false;
  let identity;try{identity=require('./cadastroIdentity').expected(manifest)}catch{return false}
  return (!!identity||Number(manifest.stockAccountId)>0)&&!!String(manifest.login||manifest.email||manifest.user||manifest.username||'').trim()&&!!String(manifest.password||manifest.pass||'').trim();

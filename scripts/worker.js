@@ -1029,7 +1029,7 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
       // Persist observations here. Terminal/human workflows must not recursively
       // stop the runner that is still initializing inside this very turn.
       if(field){
-        await manifestStore.update(nome,man=>{man=man||{};man.accountFlags=man.accountFlags||{};man.accountFlags[field]=true;man.accountFlags[field+'Reason']=health.reason||health.state;man.accountFlags[field+'Source']='virtus_proxy_turn';man.proxyHealth={state:health.state,reason:health.reason,at:Date.now()};return man});
+        await manifestStore.update(nome,man=>require('./proxyHealthFlags').record(man,health));
         invalidateAccountFlagsCache(nome);
       }else if(health.ok){
         await manifestStore.update(nome,man=>{man=man||{};man.proxyHealth={state:'ready',at:Date.now()};if(man.accountFlags?.messengerPinSource==='virtus_proxy_turn')man.accountFlags.messengerPin=false;return man});
@@ -11409,6 +11409,11 @@ async function getRobeModuleFor(nome) {
 // Wrapper: startRobeDynamic (substitui hook global robeHelper.startRobe)
 async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDeletePolicy = "after_all_working_posted") {
   if(browser?.__ctVirtusProxy&&require('./proxyOpenBatch').holds())return {ok:false,blocked:true,error:'host_opening_batch'};
+  const authFlags=await readAccountFlags(nome);
+  if(authFlags?.loginRequired===true){
+    queueAutoLoginRemediate(nome,{reason:require('./proxyHealthFlags').loginReason(authFlags)||'login_required',source:'robe_auth_preflight',immediate:true});
+    return {ok:false,blocked:true,error:'login_required'};
+  }
   const securityBlocked=require('./accountSecurityGate').fromFlags(await readAccountFlags(nome));
   if(securityBlocked){await ensureTerminalHumanHoldOnce(nome,{reason:securityBlocked});return {ok:false,blocked:true,error:'account_security:'+securityBlocked};}
   // #region agent log
@@ -19267,7 +19272,7 @@ async function autoLoginRemediateTick() {
       if (!nome || !ctrl) continue;
       if(ctrl.browser?.__ctVirtusProxy){
         const flags=await readAccountFlags(nome).catch(()=>({}));
-        if(!require('./accountSecurityGate').fromFlags(flags)&&require('./configureLoginFallback').canRemediate(flags.loginReason)&&robeMeta[nome]?.autoLoginRemediate?.queued)hasRuntimeAutoEligible=true;
+        if(!require('./accountSecurityGate').fromFlags(flags)&&require('./configureLoginFallback').canRemediate(require('./proxyHealthFlags').loginReason(flags))&&robeMeta[nome]?.autoLoginRemediate?.queued)hasRuntimeAutoEligible=true;
         continue;
       }
       const flags = await readAccountFlags(nome).catch(() => ({}));
@@ -19336,7 +19341,7 @@ async function autoLoginRemediateTick() {
       const turn=ctrl.browser.__ctVirtusProxy.snapshot();
       if(turn.state!=='offline'||turn.operationId)continue;
       const flags=await readAccountFlags(nome).catch(()=>({}));
-      if(require('./accountSecurityGate').fromFlags(flags)||!require('./configureLoginFallback').canRemediate(flags.loginReason))continue;
+      if(require('./accountSecurityGate').fromFlags(flags)||!require('./configureLoginFallback').canRemediate(require('./proxyHealthFlags').loginReason(flags)))continue;
     }
     // humanControl: SEMPRE respeitar (humano invocado = pausa total).
     if (ctrl.humanControl === true) {

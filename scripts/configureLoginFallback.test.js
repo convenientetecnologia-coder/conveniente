@@ -24,7 +24,7 @@ test('only ordinary authentication surfaces enter automatic proxy remediation',(
 test('proxy health queues ordinary login recovery; it does not execute it inside the leased visit',async()=>{
  const source=fs.readFileSync(path.join(__dirname,'worker.js'),'utf8'),start=source.indexOf('async page=>{',source.indexOf('proxyHealthCheck:')),end=source.indexOf('}:null,',start);assert.ok(start>0&&end>start);
  for(const reason of ['login_form','hacked_review']){let queued=0;
-  const fn=vm.runInNewContext('('+source.slice(start,end+1)+')',{require:n=>n==='./virtusOnlineHealth'?{check:async()=>({ok:false,state:'login',reason})}:fallback,manifestStore:{update:async(_n,f)=>f({})},nome:'fixture',invalidateAccountFlagsCache(){},queueAutoLoginRemediate(){queued++},Date});
+  const fn=vm.runInNewContext('('+source.slice(start,end+1)+')',{require:n=>n==='./virtusOnlineHealth'?{check:async()=>({ok:false,state:'login',reason})}:n==='./proxyHealthFlags'?require(n):fallback,manifestStore:{update:async(_n,f)=>f({})},nome:'fixture',invalidateAccountFlagsCache(){},queueAutoLoginRemediate(){queued++},Date});
   assert.equal((await fn({})).ok,false);assert.equal(queued,reason==='login_form'?1:0);
  }
 });

@@ -1,4 +1,10 @@
 'use strict';
+require('node:test')('old form-not-found verdict is recoverable without clearing password budget',()=>{
+ const assert=require('node:assert/strict'),{eligible}=require('./cadastroRecovery');
+ const want={provisioningResult:{state:'blocked',error:'login_form_not_found'}};
+ const manifest={stockAccountId:42,login:'fixture',password:'fixture',accountFlags:{loginAttemptCount:1}};
+ assert.equal(eligible(want,manifest),true);assert.equal(eligible(want,{...manifest,accountFlags:{loginAttemptCount:2}}),false);
+});
 const test=require('node:test'),assert=require('node:assert/strict'),{eligible,recover}=require('./cadastroRecovery');
 const manifest={login:'fixture',password:'fixture',cookies:[{name:'c_user',value:'123'},{name:'xs',value:'fixture'}],accountFlags:{loginAttemptCount:0}};
 const want={active:false,provisioningResult:{state:'blocked',error:'still_login_required:login_form',at:1}};

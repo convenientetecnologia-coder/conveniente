@@ -5023,6 +5023,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     // Marketplace create/posting: NÃO bloquear NENHUM asset. Mantém patchPage limpo.
 
     await require('./accountSecurityGate').assertAllowed(page,nome);
+    await require('./workAuthentication').assertAuthenticated(page,nome);
     // Fast-lane readiness (3.5s). Se não ficar pronto, fallback com seletor (8s).
     const readyFast = await waitForCreateItemReady(page, { timeout: 3500 });
     if (!readyFast) {
@@ -5171,6 +5172,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     }
     if (!inputFoto) {
       await require('./accountSecurityGate').assertAllowed(page,nome);
+    await require('./workAuthentication').assertAuthenticated(page,nome);
       await captureCreatePageVitals(page, nome, attId, 'upload_input_not_found_final');
       // #region agent log
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_upload_input_not_found_after_trigger', nome: String(nome || ''), attId: String(attId || ''), url: (typeof page.url === 'function') ? String(page.url() || '') : '' }); } catch {}

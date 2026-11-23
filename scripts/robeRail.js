@@ -609,6 +609,7 @@ async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', p
         if (!api.isProxyArmed || !mobileProof) throw Error('mobile_route_not_armed');
         if (carrierOperation?.snapshot().healthy === false) throw Error('mobile_transport_not_healthy');
         await require('./accountSecurityGate').assertAllowed(page,nome);
+    await require('./workAuthentication').assertAuthenticated(page,nome);
         if (!evidence && (activePurpose === 'publish' || activePurpose === 'renew')) evidence = require('./robePublishEvidence').watch(page, {operation:activePurpose});
         return { ok: true, provider: carrierOperation ? 'carrier_v2' : 'phone', alreadyArmed: true, ...mobileProof };
       },
