@@ -1041,18 +1041,8 @@ async function patchPage(nome, page, coords) {
     if (!sent) throw new Error('patchPage_ua_ch_no_cdp');
   }
 
-  // Viewport/DPR do preset (antes era lido e descartado — tela virava a da MAE).
-  const vw = Number(viewport && viewport.width) || 0;
-  const vh = Number(viewport && viewport.height) || 0;
-  const scaleRaw = Number(dpr);
-  const scale = (Number.isFinite(scaleRaw) && scaleRaw >= 1 && scaleRaw <= 3) ? scaleRaw : 1;
-  if (vw >= 800 && vh >= 600) {
-    await page.setViewport({
-      width: Math.floor(vw),
-      height: Math.floor(vh),
-      deviceScaleFactor: scale
-    });
-  }
+  // Native desktop viewport follows the actual maximized server window.
+  await page.setViewport(null);
 
   // --- IDIOMA E REGION ---
   // Idioma é sempre pt-BR (Robe/DOM). País manda só no fuso. Env não sobrescreve.
@@ -2718,7 +2708,6 @@ async function openBrowser(manifest, { robeMeta=undefined, nome=manifest.nome, c
       throw new Error('Browser não iniciou após 3 tentativas. Veja logs acima e o arquivo chrome_launch.log do perfil.');
     }
     browser = browserTry;
-    try{await require('./browserAccountIdentity').attach({browser,name:nome,label:manifest.label||manifest.nome||nome,city:manifest.cidade||manifest.city||'',onError:()=>{}})}catch{}
     browser.__ctNetworkPurpose=networkMode.cadastro?'cadastro':'virtus';
     browser.__ctCadastroNetworkMode=networkMode.cadastro?(networkMode.proxy?'proxy':'direct'):null;
     if(cadastroProxySession)cadastroProxySession.attach(browser);
@@ -5423,6 +5412,7 @@ async function configureProfile(browser, nome, cookiesOverride = null) {
   // Cookie já autenticado (com 2FA) entra primeiro, em mbasic.
   // Senha e 2FA só se esse cookie não deixar a conta logada.
   const restored = await pcLogin.tryExistingPcSession(p0, nome, { url: 'https://mbasic.facebook.com/login/' });
+  await require('./accountSecurityGate').assertAllowed(p0,nome);
   const sessionIn = !!(restored && restored.in === true);
   const via = sessionIn ? 'cookie' : '';
   const credentialResult = null;
@@ -8542,6 +8532,8 @@ function readSuspendedDocument() {
         'conta desabilitada',
         'conta desativada',
         'suspendemos seu perfil',
+        'suspendemos sua conta',
+        'sua conta foi suspensa por 180 dias',
         'seu perfil ser desabilitado permanentemente',
         'your account was suspended',
         'your account is suspended',

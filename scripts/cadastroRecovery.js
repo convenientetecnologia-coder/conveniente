@@ -3,14 +3,13 @@ function eligible(want,manifest){
  if(!want||want.provisioningPending||want.humanHold||want.credentialRecoveryVersion===1)return false;
  const result=want.provisioningResult,flags=manifest?.accountFlags||{};
  if(!result||!['blocked','failed'].includes(result.state))return false;
- if(['banned','captchaCheckpoint','idVirtus','identityRequired','identitySubmitted','twoFactor','whatsappConfirm','marketplaceDisabled','appealSubmitted'].some(k=>flags[k]===true))return false;
+ if(['banned','captchaCheckpoint','idVirtus','identityRequired','identitySubmitted','twoFactor','whatsappConfirm','accountCodePhone','accountCodeWhatsapp','marketplaceDisabled','appealSubmitted'].some(k=>flags[k]===true))return false;
  if(Number(flags.loginAttemptCount||0)>0)return false;
  const missingFallback=result.state==='blocked'&&result.error==='still_login_required:login_form';
  const technical=result.state==='failed'&&require('./stockProvisionRetry').isTransient(result.error);
  if(!missingFallback&&!technical)return false;
- const cookies=Array.isArray(manifest?.cookies)?manifest.cookies:[];
- return cookies.some(c=>c?.name==='c_user'&&/^\d+$/.test(String(c.value)))&&cookies.some(c=>c?.name==='xs'&&c.value)&&
-   !!String(manifest.login||manifest.email||manifest.user||manifest.username||'').trim()&&!!String(manifest.password||manifest.pass||'').trim();
+ let identity;try{identity=require('./cadastroIdentity').expected(manifest)}catch{return false}
+ return !!identity&&!!String(manifest.login||manifest.email||manifest.user||manifest.username||'').trim()&&!!String(manifest.password||manifest.pass||'').trim();
 }
 async function recover({snapshot,read,update,allow=()=>true,audit=()=>{},now=Date.now}){
  const recovered=[];

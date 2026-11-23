@@ -4557,14 +4557,15 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
     });
     // A resposta de criação é a confirmação; volume mínimo de bytes não é sucesso.
     if (transport.ok === true && transport.listingIds?.length) {
-      try { await rail.destroy({ killFirst: true }); } catch {}
+      const retained=typeof rail.withStage==='function';
+      if(!retained)try { await rail.destroy({ killFirst: true }); } catch {}
       gql.cleanup && gql.cleanup();
       return {
         ok: true,
         reason: 'sent_to_proxy',
         publishClicked: true,
         proxySent: true,
-        robeClosed: true,
+        robeClosed: !retained,
         bytes: left.bytes || 0,
         listingId: transport.listingIds && transport.listingIds[0] || null,
         asn: proved.asn || null,
@@ -5021,6 +5022,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     // Interceptação de recursos — NUNCA bloquear assets nem usar setRequestInterception
     // Marketplace create/posting: NÃO bloquear NENHUM asset. Mantém patchPage limpo.
 
+    await require('./accountSecurityGate').assertAllowed(page,nome);
     // Fast-lane readiness (3.5s). Se não ficar pronto, fallback com seletor (8s).
     const readyFast = await waitForCreateItemReady(page, { timeout: 3500 });
     if (!readyFast) {
@@ -5168,6 +5170,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       await captureCreatePageVitals(page, nome, attId, `upload_recover_create_attempt_${uploadAttempt}`);
     }
     if (!inputFoto) {
+      await require('./accountSecurityGate').assertAllowed(page,nome);
       await captureCreatePageVitals(page, nome, attId, 'upload_input_not_found_final');
       // #region agent log
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_upload_input_not_found_after_trigger', nome: String(nome || ''), attId: String(attId || ''), url: (typeof page.url === 'function') ? String(page.url() || '') : '' }); } catch {}
@@ -5345,6 +5348,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     for (let i = 0; i < 2 && !published; i++) {
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_try_race', try: i+1 });
       pubRes = await publishAndWatch(page, titulo, nome, { watchOverlayMs: 12000 });
+      if(pubRes?.proxySent&&!pubRes.robeClosed&&pubRes.listingId){await manifestStore.update(nome,m=>({...m,lastRobeSubmission:{listingId:pubRes.listingId,confirmedAt:Date.now(),via:'phone_proxy',approvalState:'not_checked'}}));}
       if (pubRes && pubRes.robeClosed === true) {
         // Transporte confirmado não depende de aprovação comercial do anúncio.
         try { await flowAlertFlags.clearProxyPublishError(nome); } catch {}
@@ -5510,6 +5514,10 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'post_publish_anuncio', skipped: true, reason: 'page_gone' });
     }
 
+    if(published&&robeRailHandle?.withStage&&accountBrowser?.__ctVirtusProxy){
+      try{const visit=await robeRailHandle.checkVirtus(accountBrowser.__ctVirtusProxy);stepLog.appendJSONL(nome,'robe',{step:'post_publish_virtus',...visit});}
+      catch(error){stepLog.appendJSONL(nome,'robe',{step:'post_publish_virtus',ok:false,error:String(error.message||error)});}
+    }
     if (!preserveCreatePageForHuman) {
       try { if (page !== postPublishSource) await closeAccountWorkPage(accountBrowser, page); } catch {}
       page = null;

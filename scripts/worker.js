@@ -1016,7 +1016,15 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
   } catch {}
   const baseCfg = {
     proxyHealthCheck: browser.__ctVirtusProxy?async page=>{
-      const health=await require('./virtusOnlineHealth').check(page);
+      const health=await require('./virtusOnlineHealth').check(page,{securityCheck:p=>require('./accountSecurityGate').check({page:p,nome})});
+      if(['code','selfie'].includes(health.state)){
+        invalidateAccountFlagsCache(nome);
+        const ctrl=controllers.get(nome);
+        if(ctrl&&!ctrl._securityHoldPending){ctrl._securityHoldPending=true;setImmediate(async()=>{try{
+          const until=Date.now()+60000;while(ctrl.browser?.__ctVirtusProxy?.snapshot().operationId&&Date.now()<until)await new Promise(r=>setTimeout(r,250));
+          if(!ctrl.browser?.__ctVirtusProxy?.snapshot().operationId)await enterHumanMode(nome,ctrl,{reason:health.reason});
+        }catch(error){try{provisionAudit.append({ts:Date.now(),event:'security_hold_failed',nome,error:String(error.message||error)});}catch{}}finally{ctrl._securityHoldPending=false}});}
+      }
       const field={pin:'messengerPin',captcha:'captchaCheckpoint',identity:'idVirtus',login:'loginRequired',banned:'banned'}[health.state];
       // Persist observations here. Terminal/human workflows must not recursively
       // stop the runner that is still initializing inside this very turn.
@@ -2330,6 +2338,7 @@ const HUMAN_OVERLAY_CFG = {
 function _overlayReasonFromFlags(flags) {
   try {
     flags = (flags && typeof flags === 'object') ? flags : {};
+    if (flags.accountCodePhone || flags.accountCodeWhatsapp) return flags.accountCodePhone && flags.accountCodeWhatsapp ? 'account_code_phone_whatsapp' : flags.accountCodePhone ? 'account_code_phone' : 'account_code_whatsapp';
     if (flags.banned === true) return `banned:${flags.bannedReason || ''}`.trim();
     if (flags.marketplacePhoneConfirm === true) return `marketplace_phone_confirm:${flags.marketplacePhoneConfirmReason || ''}`.trim();
     if (flags.marketplaceDisabled === true) return `marketplace_disabled:${flags.marketplaceDisabledReason || ''}`.trim();
@@ -2350,6 +2359,7 @@ function _terminalFlagFromFlags(flags) {
   try {
     flags = (flags && typeof flags === 'object') ? flags : {};
     if (flags.banned === true) return 'banned';
+    if (flags.accountCodePhone === true || flags.accountCodeWhatsapp === true) return 'account_code';
     if (flags.marketplacePhoneConfirm === true) return 'marketplace_phone_confirm';
     if (flags.twoFactor === true) return 'two_factor';
     if (flags.marketplaceDisabled === true) return 'marketplace_disabled';
@@ -3162,7 +3172,7 @@ async function runCaptchaFlow(nome, ctrl, pg, { source = 'unknown', flowId = '',
   }
 }
 
-async function _buildHumanOverlayData(nome) {
+async function _buildHumanOverlayData(nome, { localOnly = false } = {}) {
   try {
     const perfisArr = loadPerfisJson();
     const p = Array.isArray(perfisArr) ? perfisArr.find(x => x && x.nome === nome) : null;
@@ -3178,7 +3188,7 @@ async function _buildHumanOverlayData(nome) {
     // Enterprise: se manifest não tem credenciais, tenta buscar do CT (assigned->stock).
     // Cache curto em memória para não spammar CT.
     try {
-      if (!String(login || '').trim() || !String(password || '').trim()) {
+      if (!localOnly && (!String(login || '').trim() || !String(password || '').trim())) {
         robeMeta[nome] = robeMeta[nome] || {};
         const cache = robeMeta[nome].overlayCredCache || null;
         const now = Date.now();
@@ -4440,14 +4450,14 @@ async function _installOverlayOnPage(nome, page) {
   } catch {}
 }
 
-async function syncHumanOverlay(nome) {
+async function syncHumanOverlay(nome, { localOnly = false, hide = false } = {}) {
   try {
     // Enterprise: permitir "force overlay" mesmo se HUMAN_OVERLAY=0 (útil para captcha/checkpoint).
     // Isso evita ficar sem painel (login/senha/botões) quando o humano é realmente necessário.
     const now0 = Date.now();
     const forceUntil = Number(robeMeta?.[nome]?.forceOverlayUntil || 0) || 0;
     const forced = (forceUntil && forceUntil > now0);
-    if (!HUMAN_OVERLAY_CFG.enabled && !forced) {
+    if (!HUMAN_OVERLAY_CFG.enabled && !forced && !hide) {
       try { provisionAudit.append({ ts: now0, event: 'human_overlay_disabled', nome: String(nome || ''), env: String(process.env.HUMAN_OVERLAY || '').trim() }); } catch {}
       return;
     }
@@ -4456,10 +4466,10 @@ async function syncHumanOverlay(nome) {
 
     const desired = readJsonFile(desiredPath, { perfis: {} });
     const wantHold = !!(desired && desired.perfis && desired.perfis[nome] && desired.perfis[nome].humanHold === true);
-    const want = forced || wantHold || (ctrl.humanControl === true);
+    const want = !hide && (forced || wantHold || (ctrl.humanControl === true));
 
     const pages = await ctrl.browser.pages().catch(()=>[]);
-    const data = want ? await _buildHumanOverlayData(nome) : { enabled: false, nome: String(nome || ''), ts: Date.now() };
+    const data = want ? await _buildHumanOverlayData(nome, { localOnly }) : { enabled: false, nome: String(nome || ''), ts: Date.now() };
 
     const diag = [];
     const scanned = (pages || []).slice(0, HUMAN_OVERLAY_CFG.maxPagesScan);
@@ -4511,10 +4521,11 @@ async function syncHumanOverlay(nome) {
         diag: diag.slice(0, 4) // evita log gigante
       });
     } catch {}
-  } catch {}
+    return {ok:want?diag.some(d=>d.hasHost&&d.hostVisible):diag.every(d=>!d.hostVisible),panelReady:want&&diag.some(d=>d.hasHost&&d.hostVisible)};
+  } catch(error) {return {ok:false,panelReady:false,error:String(error.message||error)};}
 }
 
-async function ensureHumanOverlay(nome, ctrl, { reason = '' } = {}) {
+async function ensureHumanOverlay(nome, ctrl, { reason = '', localOnly = false } = {}) {
   try {
     const force = /captcha|checkpoint|invoke_human|captcha_checkpoint/i.test(String(reason || '').toLowerCase());
     if (!HUMAN_OVERLAY_CFG.enabled && !force) {
@@ -4533,11 +4544,11 @@ async function ensureHumanOverlay(nome, ctrl, { reason = '' } = {}) {
         robeMeta[nome].forceOverlayUntil = Date.now() + 60_000;
       } catch {}
     }
-    await syncHumanOverlay(nome);
+    const synced=await syncHumanOverlay(nome, { localOnly });
 
     // Hook para novas abas (1x por perfil).
     robeMeta[nome] = robeMeta[nome] || {};
-    if (robeMeta[nome].humanOverlayHooked === true) return;
+    if (robeMeta[nome].humanOverlayHooked === true) return synced;
     robeMeta[nome].humanOverlayHooked = true;
     try {
       ctrl.browser.on('targetcreated', async (t) => {
@@ -4564,7 +4575,8 @@ async function ensureHumanOverlay(nome, ctrl, { reason = '' } = {}) {
         } catch {}
       });
     } catch {}
-  } catch {}
+    return synced;
+  } catch(error) {return {ok:false,panelReady:false,error:String(error.message||error)};}
 }
 
 // ===== Recurso/Apelação (monitoramento) =====
@@ -11379,6 +11391,8 @@ async function getRobeModuleFor(nome) {
 
 // Wrapper: startRobeDynamic (substitui hook global robeHelper.startRobe)
 async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDeletePolicy = "after_all_working_posted") {
+  const securityBlocked=require('./accountSecurityGate').fromFlags(await readAccountFlags(nome));
+  if(securityBlocked){await ensureTerminalHumanHoldOnce(nome,{reason:securityBlocked});return {ok:false,blocked:true,error:'account_security:'+securityBlocked};}
   // #region agent log
   try { provisionAudit.append({ ts: Date.now(), event: 'dbg_startRobeDynamic_entry', nome: String(nome || ''), robePauseMs: Number(robePauseMs || 0), workingNowCount: Array.isArray(workingNow) ? workingNow.length : -1 }); } catch {}
   try {
@@ -13593,10 +13607,9 @@ const handlers = {
       const manifestPath = path.join(perfil.userDataDir, 'manifest.json');
       if (!fs.existsSync(manifestPath)) return { ok: false, error: 'Manifest não existe para este perfil!' };
       const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-      if (!Array.isArray(manifest.cookies) || !manifest.cookies.length) {
-        try { await issues.append(nome, 'cookie_inject_failed', 'Cookies não encontrados no manifest!'); } catch {}
-        return { ok: false, error: 'Cookies não encontrados no manifest!' };
-      }
+      if(!Array.isArray(manifest.cookies))manifest.cookies=[];
+      const cadastroExpectedIdentity=require('./cadastroIdentity').expected(manifest);
+      if(cadastroExpectedIdentity)await manifestStore.update(nome,m=>({...m,expectedFacebookUserId:cadastroExpectedIdentity}));
 
       const op = String(operator || '').trim();
       const isStockProvision = (op && op.toLowerCase().startsWith('stock_provision'));
@@ -14248,7 +14261,7 @@ const handlers = {
         // Sucesso: limpa flags e segue.
         ctrl.browser.__ctCadastroProxy?.noteStage('final_verification');
         if(ctrl.browser.__ctNetworkPurpose==='cadastro'){
-          await require('./cadastroVerification').verify({browser:ctrl.browser,cookies:manifest.cookies});
+          await require('./cadastroVerification').verify({browser:ctrl.browser,cookies:manifest.cookies,expectedUserId:cadastroExpectedIdentity});
           ctrl.browser.__ctCadastroProxy?.noteStage('save_session');
           const fresh=await browserHelper.collectFreshCookies(ctrl.browser);
           if(!fresh?.ok||!fresh.cookies?.length)throw Error('cadastro_session_save_unconfirmed');
@@ -15222,7 +15235,7 @@ const handlers = {
         if(ctrl.browser.__ctNetworkPurpose==='cadastro'){
           if(!cadastroCookiesSaved)throw Error('cadastro_session_save_unconfirmed');
           const expected=(cadastroExpectedCookies||[]).some(c=>c.name==='c_user')?cadastroExpectedCookies:(await manifestStore.read(nome)).cookies;
-          await require('./cadastroVerification').verify({browser:ctrl.browser,cookies:expected});
+          await require('./cadastroVerification').verify({browser:ctrl.browser,cookies:expected,expectedUserId:require('./cadastroIdentity').expected(await manifestStore.read(nome))});
         }
         ctrl.browser.__ctCadastroProxy?.confirm();
         await completeAccountProvisioning(nome, 'login_remediate_success', {verifiedAuth:ctrl.browser.__ctNetworkPurpose==='cadastro'});
@@ -15873,6 +15886,18 @@ const handlers = {
         return { ok: false, error: 'Navegador não está aberto/vivo para esta conta!' };
       }
 
+      if(ctrl.browser.__ctVirtusProxy){
+        try{robeQueue.skip?.(nome)}catch{}
+        return require('./proxyHumanControl').invoke({ctrl,
+          read:()=>readJsonFile(desiredPath,{perfis:{}}).perfis?.[nome],
+          update:fn=>fileStore.withDesiredFileLockUpdate(d=>{d.perfis=d.perfis||{};d.perfis[nome]=fn(d.perfis[nome]||{});return d}),
+          guard:on=>syncDeltaHumanHoldBrowserGuard(nome,on,{reason:'proxy_manual_human'}),
+          overlay:()=>ensureHumanOverlay(nome,ctrl,{reason:'invoke_human',localOnly:true}),
+          snapshot:()=>snapshotStatusAndWrite({force:true}),
+          onError:error=>{try{provisionAudit.append({ts:Date.now(),event:'human_proxy_connection_failed',nome,error:String(error.message||error)});}catch{}}
+        });
+      }
+
       try { robeQueue.skip && robeQueue.skip(nome); } catch {}
       const robes = robeMeta[nome] || {};
       if (robes.emExecucao) {
@@ -16119,9 +16144,13 @@ const handlers = {
 
   async ['human-resume']({ nome, noReconcile, proxyTurnOwned=false }) {
     const proxy=controllers.get(nome)?.browser?.__ctVirtusProxy;
-    if(proxy&&!proxyTurnOwned){
-      await proxy.leaveHuman();
-      return proxy.run('human',()=>handlers['human-resume']({nome,noReconcile,proxyTurnOwned:true}));
+    if(proxy){
+      return lockProfileAction(nome,()=>require('./proxyHumanControl').resume({ctrl:controllers.get(nome),
+        read:()=>readJsonFile(desiredPath,{perfis:{}}).perfis?.[nome],
+        update:fn=>fileStore.withDesiredFileLockUpdate(d=>{d.perfis=d.perfis||{};d.perfis[nome]=fn(d.perfis[nome]||{});return d}),
+        guard:on=>syncDeltaHumanHoldBrowserGuard(nome,on,{reason:'proxy_manual_resume'}),
+        overlay:()=>{if(robeMeta[nome])robeMeta[nome].forceOverlayUntil=0;return syncHumanOverlay(nome,{hide:true});},snapshot:()=>snapshotStatusAndWrite({force:true})
+      }));
     }
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] human-resume chamada', { nome });
@@ -17770,7 +17799,7 @@ perfis.push({
     }
   })(),
   // Observabilidade enterprise (p/ pausas determinísticas durante provisionamento)
-  virtusOnline: !isAccountProvisioningPending(nome) && controllers.get(nome)?.configurando !== true && !!(controllers.get(nome)?.virtus),
+  virtusOnline: !isAccountProvisioningPending(nome) && controllers.get(nome)?.configurando !== true && !controllers.get(nome)?.humanControl && !!(controllers.get(nome)?.virtus) && (!controllers.get(nome)?.browser?.__ctVirtusProxy || controllers.get(nome).browser.__ctVirtusProxy.snapshot().lastInbox?.ok===true),
   sendLockActive: (() => {
     try {
       const sl = controllers.get(nome) && controllers.get(nome).browser && controllers.get(nome).browser._sendLock;
@@ -17884,6 +17913,8 @@ perfis.push({
   captchaCheckpointReason,
   idVirtus,
   idVirtusReason,
+  accountCodePhone:man?.accountFlags?.accountCodePhone===true,
+  accountCodeWhatsapp:man?.accountFlags?.accountCodeWhatsapp===true,
   twoFactor,
   twoFactorAt,
   twoFactorReason,
@@ -19215,7 +19246,7 @@ async function autoLoginRemediateTick() {
       if (!nome || !ctrl) continue;
       if(ctrl.browser?.__ctVirtusProxy){
         const flags=await readAccountFlags(nome).catch(()=>({}));
-        if(require('./configureLoginFallback').canRemediate(flags.loginReason)&&robeMeta[nome]?.autoLoginRemediate?.queued)hasRuntimeAutoEligible=true;
+        if(!require('./accountSecurityGate').fromFlags(flags)&&require('./configureLoginFallback').canRemediate(flags.loginReason)&&robeMeta[nome]?.autoLoginRemediate?.queued)hasRuntimeAutoEligible=true;
         continue;
       }
       const flags = await readAccountFlags(nome).catch(() => ({}));
@@ -19284,7 +19315,7 @@ async function autoLoginRemediateTick() {
       const turn=ctrl.browser.__ctVirtusProxy.snapshot();
       if(turn.state!=='offline'||turn.operationId)continue;
       const flags=await readAccountFlags(nome).catch(()=>({}));
-      if(!require('./configureLoginFallback').canRemediate(flags.loginReason))continue;
+      if(require('./accountSecurityGate').fromFlags(flags)||!require('./configureLoginFallback').canRemediate(flags.loginReason))continue;
     }
     // humanControl: SEMPRE respeitar (humano invocado = pausa total).
     if (ctrl.humanControl === true) {
@@ -20596,6 +20627,8 @@ async function nurseTick() {
       if(ctrl?.browser?.__ctNetworkPurpose==='cadastro')continue;
       const proxySession=ctrl?.browser?.__ctVirtusProxy;
       if(proxySession){
+        const securityBlocked=require('./accountSecurityGate').fromFlags(await readAccountFlags(nome));
+        if(securityBlocked){if(!proxySession.snapshot().operationId&&!ctrl.humanControl)await enterHumanMode(nome,ctrl,{reason:securityBlocked});continue;}
         if(isProfileOpening(nome)||proxyOpeningCoordinator.running.has(nome))continue;
         if(want.active===true&&!ctrl.virtus&&!ctrl._virtusStarting&&!ctrl.configurando&&!ctrl.humanControl&&!want.humanHold&&!isRobeBusy(nome)){
           ctrl._virtusStarting=true;

@@ -1926,9 +1926,10 @@ async function publishAndWatch(page, titulo, nome, { watchOverlayMs = PUBLISH_OV
         throw err;
       }
       if (!transport.listingIds?.length) throw new Error('publish_response_missing_listing_id');
-      await rail.destroy({ killFirst: true });
+      const retained=typeof rail.withStage==='function';
+      if(!retained)await rail.destroy({ killFirst: true });
       gql.cleanup && gql.cleanup();
-      return { ok: true, publishClicked: true, proxySent: true, robeClosed: true, listingId: transport.listingIds[0], reason: 'submission_confirmed' };
+      return { ok: true, publishClicked: true, proxySent: true, robeClosed: !retained, listingId: transport.listingIds[0], reason: 'submission_confirmed' };
     }
   } finally {
     if (rail && rail.backToDirect) {
@@ -2601,6 +2602,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     // Marketplace create/posting: NÃO bloquear NENHUM asset. Mantém patchPage limpo.
 
     // Fast-lane readiness (3.5s). Se não ficar pronto, fallback com seletor (8s).
+    await require('./accountSecurityGate').assertAllowed(page,nome);
     const readyFast = await waitForCreateItemReady(page, { timeout: 3500 });
     if (!readyFast) {
       await page.waitForSelector('input[type="file"][accept*="image"], input[type="file"]', {
@@ -2690,6 +2692,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         await applyLimitPostingAndAbort({ page, nome, attId, where: 'no_file_input_overlay', overlaySnapshot: late });
         return; // aborta por limit_posting como deve
       }
+      await require('./accountSecurityGate').assertAllowed(page,nome);
       throw new Error('Campo para upload de foto não localizado (frames varridos).');
     }
     await waitBeforeComposeAction(composePlan, 'before_upload', { nome, attId });
@@ -2774,6 +2777,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     for (let i = 0; i < 2 && !published; i++) {
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_try_race', try: i+1 });
       pubRes = await publishAndWatch(page, titulo, nome, { watchOverlayMs: 12000 });
+      if(pubRes?.proxySent&&!pubRes.robeClosed&&pubRes.listingId){await manifestStore.update(nome,m=>({...m,lastRobeSubmission:{listingId:pubRes.listingId,confirmedAt:Date.now(),via:'phone_proxy',approvalState:'not_checked'}}));}
       if (pubRes?.robeClosed === true && pubRes.proxySent === true && pubRes.listingId) {
         robeRailHandle = null;
         browser = accountBrowser;
@@ -2843,7 +2847,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     try { await confirmUsedByLocationScope(cidadePerfil, localUsada, postingLocationScope); } catch {}
 
     // Fecha o navegador de postagem antes de abrir os navegadores de ID/renovação.
-    if (robeRailHandle) {
+    if (robeRailHandle && !robeRailHandle.withStage) {
       await robeRailHandle.destroy();
       robeRailHandle = null;
       browser = accountBrowser;
@@ -2941,6 +2945,10 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
       stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'post_publish_anuncio', skipped: true, reason: 'page_gone' });
     }
 
+    if(published&&robeRailHandle?.checkVirtus&&accountBrowser?.__ctVirtusProxy){
+      try{const visit=await robeRailHandle.checkVirtus(accountBrowser.__ctVirtusProxy);stepLog.appendJSONL(nome,'robe',{step:'post_publish_virtus',...visit});}
+      catch(error){stepLog.appendJSONL(nome,'robe',{step:'post_publish_virtus',ok:false,error:String(error.message||error)});}
+    }
     if (!preserveCreatePageForHuman) {
       try { if (page !== postPublishSource) await safeClosePage(page); } catch {}
       page = null;

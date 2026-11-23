@@ -59,10 +59,10 @@ async function beginOnce({nome,purpose,intent='observe',hotUntil=0,observationRe
   const route=await client.openRoute(op,{heartbeatMs:config.heartbeatMs});
   return {
    operationId:row.operationId,hop:{host:'127.0.0.1',port:route.port,user:'',pass:''},
-   async possibleSideEffect(){if(observationRecovery)throw Error("cp2_readonly_effect_refused");if(row.sent)return;if(op.heartbeatError||op.transportError)throw Error('cp2_transport_not_healthy');row.sent=true;row.result='unknown';persist();await client.possibleSideEffect(op)},
-   confirm(){row.result='confirmed';op.result='confirmed';persist()},
+   async possibleSideEffect(stage){if(observationRecovery)throw Error("cp2_readonly_effect_refused");if(row.sent&&!stage)return;if(op.heartbeatError||op.transportError)throw Error('cp2_transport_not_healthy');if(stage&&!require('./operationStages').begin(row,stage))return;row.sent=true;row.result='unknown';persist();await client.possibleSideEffect(op)},
+   confirm(stage){if(stage&&row.type!=='publish')stage=undefined;require('./operationStages').confirm(row,Date.now(),stage);op.result='confirmed';persist()},
    async close(){if(closed)return;closed=true;try{await client.release(op,row.result);row.phase='closed';persist()}finally{unlock()}},
-   snapshot(){return {operationId:row.operationId,type:row.type,phase:row.phase,sent:row.sent,result:row.result,healthy:!op.heartbeatError&&!op.transportError,reconciliationOnly:observationRecovery===true,absoluteDeadline:op.status.ack?.absoluteDeadline||null,rotation:op.status.rotation||null}}
+   snapshot(){return {operationId:row.operationId,type:row.type,phase:row.phase,sent:row.sent,result:row.result,stages:row.stageResults||null,healthy:!op.heartbeatError&&!op.transportError&&(!op.status.ack?.absoluteDeadline||Date.now()<op.status.ack.absoluteDeadline*1000),reconciliationOnly:observationRecovery===true,absoluteDeadline:op.status.ack?.absoluteDeadline||null,rotation:op.status.rotation||null}}
   };
  }catch(error){if(op)try{await client.release(op,row?.result||'not_started')}catch{}unlock();throw error}
 }

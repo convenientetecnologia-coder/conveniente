@@ -141,6 +141,8 @@ async function markSessionRejected(nome) {
   await manifestStore.update(String(nome || ''), (m) => {
     m = m || {};
     const prev = Array.isArray(m.cookies) ? m.cookies : [];
+    const expected=require('./cadastroIdentity').expected(m);
+    if(expected)m.expectedFacebookUserId=expected;
     m.cookies = prev.filter((c) => c && c.name !== 'c_user' && c.name !== 'xs');
     m.sessionRejected = true;
     return m;

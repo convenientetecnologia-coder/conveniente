@@ -73,13 +73,13 @@ async function create({nome,onState=()=>{},dependencies={}}){
    async enterHuman(){
     if(humanTask)return humanTask.ready;
     humanHeld=true;api.finishBoot();let readyResolve,readyReject;const ready=new Promise((r,j)=>{readyResolve=r;readyReject=j});
-    const gate=new Promise(r=>humanResolve=r);
-    const task=api.run('human',async()=>{humanTimer=setTimeout(()=>{humanResolve?.();},dependencies.humanLeaseMs||5*60*1000);humanTimer.unref?.();readyResolve();await gate});
-    humanTask={ready,task};
+    const gate=new Promise(r=>humanResolve=r),cancel=new AbortController();turn.cancelWaitingObservation();
+    const task=api.run('human',async()=>{humanTimer=setTimeout(()=>{humanResolve?.();},dependencies.humanLeaseMs||5*60*1000);humanTimer.unref?.();readyResolve();await gate},{signal:cancel.signal});
+    humanTask={ready,task,cancel};
     task.then(()=>{},readyReject).finally(()=>{clearTimeout(humanTimer);humanTask=null;humanHeld=false}).catch(()=>{});return ready;
    },
-   async leaveHuman(){if(!humanTask){humanHeld=false;return}const task=humanTask.task;clearTimeout(humanTimer);humanResolve?.();await task;humanHeld=false},
-   async run(intent,action){
+   async leaveHuman(){if(!humanTask){humanHeld=false;return}const {task,cancel}=humanTask;clearTimeout(humanTimer);cancel.abort(Error('virtus_human_canceled'));humanResolve?.();try{await task}catch(error){if(error.message!=='virtus_human_canceled')throw error}finally{humanHeld=false}},
+   async run(intent,action,turnOptions){
     if(intent==='reply'&&activeLease&&!activeLease.snapshot().reconciliationOnly&&['warm','observe','engaged'].includes(visitIntent)&&!humanHeld&&!visitReplied&&burst.length<1){return new Promise((resolve,reject)=>burst.push({action,resolve,reject}))}
     return turn.run(intent,async lease=>{
       activeLease=lease;rotationPolicy=lease.snapshot().rotation||rotationPolicy;visitIntent=intent;visitReplied=false;
@@ -87,6 +87,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
         const reconnectAt=Date.now();connectedAt=reconnectAt;
         const pages=await browser.pages();
         for(const page of pages)try{await page.setOfflineMode(false)}catch{}
+        if(intent==='human')return await action(lease);
         // Reconnection must have a ready document before any account action.
         const page=pages.find(p=>/facebook\.com\/messages|messenger\.com/.test(p.url()))||pages[0];
         if(!page)throw Error('virtus_proxy_page_missing');
@@ -115,7 +116,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
         if(intent==='reply'&&healthCheck){const health=await healthCheck();if(!health.ok)throw Error('virtus_account_blocked:'+health.state)}
         return await action(lease);
       }finally{if(expectedSend?.delivery){deliveryLedger.markUncertain?.(expectedSend.delivery);expectedSend=null}visitIntent=null;activeLease=null;while(burst.length)burst.shift().reject(Error('virtus_visit_ended_before_reply'))}
-    });
+      },turnOptions);
    },
    async beforeSend({threadKey,text,clientMessageId}={}){
     if(!activeLease)throw Error('virtus_send_without_turn');
@@ -166,6 +167,25 @@ async function create({nome,onState=()=>{},dependencies={}}){
     activeLease.confirm();visitReplied=true;activity.replied();
     const now=Date.now();lastReplyTiming={confirmedAt:now,sendToConfirmationMs:now-expectedSend.since,customerToConfirmationMs:expectedSend.inboundAt&&now>=expectedSend.inboundAt?now-expectedSend.inboundAt:null};onState(api.snapshot());expectedSend=null;return outgoingEvidence;
    },
+   async performVisit(options){
+    const prepared=await options.prepareInbox();api.noteInbox(prepared);
+    if(prepared?.ok===false)return prepared;
+    const start=Date.now();let sawNetwork=lastNetworkAt>0;
+    while(Date.now()-start<30000&&!stopped){
+      if(lastNetworkAt>=start)sawNetwork=true;
+      while(burst.length){const job=burst.shift();visitReplied=true;try{if(healthCheck){const health=await healthCheck();if(!health.ok)throw Error('virtus_account_blocked:'+health.state)}job.resolve(await job.action(activeLease))}catch(error){job.reject(error)}}
+      if(sawNetwork&&Date.now()-lastNetworkAt>=2500&&!activity.snapshot().waitingBriefly)break;
+      await new Promise(r=>setTimeout(r,500));
+    }
+    if(!sawNetwork)throw Error('virtus_reconnect_not_confirmed');return prepared;
+   },
+   async visitOnLease(lease){
+    if(lease.accountId!==nome||lease.snapshot().healthy!==true)throw Error('virtus_shared_lease_identity_invalid');
+    if(stopped||humanHeld||!observerOptions)return {ok:true,skipped:true,reason:'virtus_not_available'};
+    if(['online','releasing'].includes(turn.state)||turn.currentIntent==='reply'&&turn.state==='waiting')return {ok:true,skipped:true,reason:'virtus_already_has_turn'};
+    const options=observerOptions;if(!await options.canObserve())return {ok:true,skipped:true,reason:'virtus_observer_guard'};turn.cancelWaitingObservation();lastObserveAttemptAt=Date.now();
+    return api.run('warm',()=>api.performVisit(options),{lease});
+   },
    stopObserver(version){if(version!==undefined&&version!==observerVersion)return;observerOptions=null;(dependencies.clearObserverInterval||clearInterval)(timer);timer=null},
    startObserver({canObserve=()=>true,prepareInbox=async()=>{},describeGuard=()=>null}={}){
     observerOptions={canObserve,prepareInbox,describeGuard};const version=++observerVersion;
@@ -180,19 +200,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
       const revisitMs=dependencies.revisitMs??(needsStartupRepair?60000:Math.max(15000,Math.min(1800000,Number(target)||(activity.snapshot().engaged?15000:60000))));
       if(lastObserveAttemptAt&&Date.now()-lastObserveAttemptAt<revisitMs){observerSkipReason='revisit_interval';return}
       lastObserveAttemptAt=Date.now();observerBusy=true;
-      try{await api.run(needsStartupRepair?'warm':activity.snapshot().engaged?'engaged':'observe',async()=>{
-        const prepared=await options.prepareInbox();api.noteInbox(prepared);
-        if(prepared?.ok===false)return prepared;
-        const start=Date.now();let sawNetwork=lastNetworkAt>0;
-        while(Date.now()-start<30000&&!stopped){
-          if(lastNetworkAt>=start)sawNetwork=true;
-          while(burst.length){const job=burst.shift();visitReplied=true;try{if(healthCheck){const health=await healthCheck();if(!health.ok)throw Error('virtus_account_blocked:'+health.state)}job.resolve(await job.action(activeLease))}catch(error){job.reject(error)}}
-          if(sawNetwork&&Date.now()-lastNetworkAt>=2500&&!activity.snapshot().waitingBriefly)break;
-          await new Promise(r=>setTimeout(r,500));
-        }
-        if(!sawNetwork)throw Error('virtus_reconnect_not_confirmed');
-        return prepared;
-      })}catch(error){api.noteInbox({ok:false,state:'incomplete',reason:String(error.message||error),details:error.details||null});onState({...api.snapshot(),error:String(error.message||error)})}
+      try{await api.run(needsStartupRepair?'warm':activity.snapshot().engaged?'engaged':'observe',()=>api.performVisit(options))}catch(error){api.noteInbox({ok:false,state:'incomplete',reason:String(error.message||error),details:error.details||null});onState({...api.snapshot(),error:String(error.message||error)})}
       finally{observerBusy=false}
     };
     timer=(dependencies.setObserverInterval||setInterval)(()=>tick().catch(error=>onState({...api.snapshot(),error:String(error.message||error)})),5000);timer.unref?.();return version;

@@ -1,49 +1,8 @@
 'use strict';
 
-/**
- * CONTRATO VIDRO/VISOR 2026-09-04_glass_human_only_v5
- *
- * Trabalho (Abrir Tudo / Robe / Virtus / configure):
- *   - Identidade: page.setViewport(preset) — uns maiores, outros menores.
- *   - Janela fisica MAXIMIZADA no monitor (nao cascata / nao aparece a de baixo).
- *     SEM scale, SEM HUD, SEM hook de navegacao, SEM DeviceMetricsOverride de visor.
- *   - applyGlassViewer sem arma humana e no-op (zero CDP).
- *
- * Humano (invocar humano / enterHumanMode):
- *   - enableGlassForHuman arma a page e so ai monta o vidro:
- *     janela maximizada + scale/letterbox + zoom Ctrl+/- + HUD.
- *
- * Retomar trabalho:
- *   - disableGlassForWork desarma PRIMEIRO, tira o hook, apaga paint/HUD,
- *     janela continua maximizada, relock do setViewport.
- *   - Robe na fila/ciclo NAO desarma vidro se humano ja esta no controle.
- *   - Reconnect CDP: se humano, remonta vidro; se trabalho, apaga leftover.
- *
- * 1) Identidade: page.setViewport(preset) permanece. innerWidth/innerHeight/DPR
- *    nao mudam aqui.
- * 2) Vidro (scale/HUD/hook): SOMENTE com arma humana. Janela maximizada
- *    tambem no trabalho, so pra cobrir o monitor.
- * 3) Visor: encaixa o preset no vidro (scale up ou down, contain). Se a
- *    proporcao nao fecha, letterbox centralizado — nao recorta o canto
- *    superior esquerdo. Zoom do operador (Ctrl +/- / roda com Ctrl) pode
- *    passar do vidro; ai pan com barras e com a roda (sem Ctrl). Snap de
- *    pixel nao pode capar o zoom do operador no fit/vidro.
- * 4) Cliques: com transform no html, getBoundingClientRect e o mouse do
- *    Puppeteer falam o mesmo espaco visual. Nao converter coordenadas.
- * 5) Overlay humano: ancora no vidro visivel, nao no innerWidth virtual.
- *    Sem vidro, o overlay cai no inner/outer (ja e o fallback).
- *
- * Prova empirica (Chrome headful): setPageScaleFactor nao encolhe;
- * DeviceMetricsOverride recorta o canto superior esquerdo quando tambem
- * trava o visible size no preset. Depois do setViewport, o visor reenvia
- * as mesmas metricas com dontSetVisibleSize=true para o desenho acompanhar
- * a janela. Sem isso a pagina vira uma telinha no canto. Transform/scale
- * no html encaixa compositor + TR.
- *
- * Geometria colapsada (fit < 0.40 ou vidro minusculo) nao aplica scale.
- *
- * GLASS_VIEWER=0: kill-switch ate no humano (nao pinta). Default 1 = vidro
- * disponivel para humano, nao "ligado o tempo todo".
+/** Native maximized window in both automation and human mode.
+ * No viewport preset, page scaling or glass HUD. Legacy exports remain for
+ * callers and remove old injected paint without navigating the page.
  */
 
 const logger = require('./logger.js');
@@ -67,7 +26,8 @@ function num(v, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-const GLASS_VIEWER_ACTIVE = String(process.env.GLASS_VIEWER || '1').trim() !== '0';
+// Operator policy: native server window in both work and human modes.
+const GLASS_VIEWER_ACTIVE = false;
 
 function isGlassViewerEnabled() {
   return GLASS_VIEWER_ACTIVE === true;
@@ -497,6 +457,7 @@ async function clearGlassPaint(page) {
       }
       const hud = document.getElementById('ct-glass-viewer-hud');
       if (hud) hud.remove();
+      document.getElementById('ct-browser-account-identity')?.remove();
       window.__ctGlassViewerState = null;
     } catch (e) {}
   }).catch(() => {});
@@ -1042,19 +1003,9 @@ async function restoreWindowToWork(page, size) {
 
 async function relockViewportIdentity(page, identity) {
   if (pageClosed(page)) return false;
-  const snap = (identity && identity.width >= 800 && identity.height >= 600)
-    ? identity
-    : (page._ctGlassIdentityVp || snapshotIdentityViewport(page));
-  if (!snap || snap.width < 800 || snap.height < 600) return false;
   try {
-    await page.setViewport({
-      width: snap.width,
-      height: snap.height,
-      deviceScaleFactor: snap.deviceScaleFactor,
-      isMobile: snap.isMobile === true,
-      hasTouch: snap.hasTouch === true,
-      isLandscape: snap.isLandscape === true
-    });
+    await page.setViewport(null);
+    delete page._ctGlassIdentityVp;
     return true;
   } catch {
     return false;
@@ -1063,14 +1014,8 @@ async function relockViewportIdentity(page, identity) {
 
 async function enableGlassForHuman(page, opts = {}) {
   if (!page || pageClosed(page)) return null;
-  snapshotIdentityViewport(page);
-  armGlass(page);
-  writeState(page, { disabled: false, collapsed: false });
+  const st=await disableGlassForWork(page,opts);
   try { await page.bringToFront(); } catch {}
-  const st = await applyGlassViewer(page, { source: String((opts && opts.source) || 'human').slice(0, 80) });
-  if (st && st.disabled !== true && st.collapsed !== true && isGlassArmed(page)) {
-    page._ctGlassPainted = true;
-  }
   return st;
 }
 

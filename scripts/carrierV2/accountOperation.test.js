@@ -7,6 +7,17 @@ function fixture(){const root=fs.mkdtempSync(path.join(os.tmpdir(),'cp2-account-
  async release(op,result){events.push('release:'+result);return {state:'released'}}
  async request(){events.push('reconcile');return {state:'released'}}
  }return {root,events,config,Client}}
+
+test('one publish lease retains independent uncertainty for a later identity stage',async()=>{
+ const f=fixture();try{
+  const operation=await begin({nome:'stage-fixture',purpose:'publish',...f});
+  await operation.possibleSideEffect();operation.confirm();
+  await operation.possibleSideEffect('identity');
+  const state=operation.snapshot();assert.equal(state.result,'unknown');assert.equal(state.stages.publish.state,'confirmed');assert.equal(state.stages.identity.state,'unknown');
+  await assert.rejects(operation.possibleSideEffect('renew'),/previous_stage_unconfirmed/);
+  await operation.close();assert.equal(f.events.filter(x=>x==='acquire').length,1);assert.equal(f.events.at(-1),'release:unknown');
+ }finally{fs.rmSync(f.root,{recursive:true,force:true})}
+});
 test('operação persistida antes do envio; confirmação real fecha e permite execução seguinte',async()=>{
  const f=fixture();try{const h=await begin({nome:'fixture',purpose:'publish',...f});assert.equal(h.hop.port,40000);await h.possibleSideEffect();h.confirm();await h.close();assert.deepEqual(f.events,['acquire','route','possible','release:confirmed']);const next=await begin({nome:'fixture',purpose:'publish',...f});assert.notEqual(h.operationId,next.operationId);await next.close();assert.ok(fs.readdirSync(f.root).some(n=>n.endsWith('.history')))}finally{fs.rmSync(f.root,{recursive:true,force:true})}
 });

@@ -4,6 +4,8 @@ const cadastroMarks=new AsyncLocalStorage();
 function unready(want){return want?.provisioningPending===true||['blocked','failed'].includes(want?.provisioningResult?.state)}
 function restriction(error){
  const e=String(error||'').toLowerCase();
+ if(/account_code_/.test(e))return 'account_code';
+ if(/account_security:identity/.test(e))return 'identity_required';
  if(/two_factor|two.factor|2fa/.test(e))return 'two_factor';
  if(/^(?:identity_required|identity_submitted|id_virtus)(?:$|:)|^configure_blocked_identity|^still_login_required:identity/.test(e))return 'identity_required';
  if(/captcha|checkpoint/.test(e))return 'captcha_checkpoint';

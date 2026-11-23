@@ -1317,6 +1317,7 @@ async function runMarketplaceRenewListings({
     return { ok: false, error: 'no_page', renewedCount: 0 };
   }
   const isolated = require('./isolatedAccountFlow').context(page, 'renew');
+  if(isolated?.deadlineAt)deadlineAt=Math.min(Number(deadlineAt)||Infinity,isolated.deadlineAt);
   if (!isolated) {
     try {
       const isolatedDeadline = Number(deadlineAt) || Date.now() + 35 * 60 * 1000;
@@ -1332,6 +1333,7 @@ async function runMarketplaceRenewListings({
   try {
     if (aborted()) return abortResult();
     await ensureSelling(page, { onProgress });
+    await require('./accountSecurityGate').assertAllowed(page,nome);
     if (aborted()) return abortResult();
 
     const alreadyManage = await labelPresent(page, ['Selecionar tudo', 'Select all'], { requireEnabled: false });

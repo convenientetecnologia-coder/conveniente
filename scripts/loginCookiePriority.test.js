@@ -54,6 +54,7 @@ for (const mode of ['cookies_first', 'password_first']) {
     const calls = [];
     const result = await vm.runInNewContext('(async () => { ' + source.slice(start, end) + '; return sessionRestored; })()', {
       require: () => ({
+        assertAllowed: async () => ({ok:true}),
         tryExistingPcSession: async () => { calls.push('cookies'); return { in: true }; },
         openFreshLoginPage: async () => {},
         attemptCredentialRelogin: async () => { calls.push('password'); return { ok: true }; }
@@ -76,6 +77,7 @@ for (const restored of [true, false]) {
     const calls = [];
     const result = await vm.runInNewContext('(async () => { ' + source.slice(start, end) + '; return sessionIn; })()', {
       require: () => ({
+        assertAllowed: async () => ({ok:true}),
         tryExistingPcSession: async () => { calls.push('cookies'); return { in: restored }; },
         openFreshLoginPage: async () => {},
         attemptCredentialRelogin: async () => { calls.push('password'); return { ok: true }; }

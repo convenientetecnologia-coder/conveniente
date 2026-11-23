@@ -473,6 +473,9 @@ async function launchIsolatedBrowser(config) {
 async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', proxyRequired = true, deadlineAt = 0 }) {
   const profileKey = String(nome || '').trim();
   if (!profileKey) throw new Error('isolated_profile_required');
+  const known=await require('./manifestStore').read(nome);
+  const blocked=require('./accountSecurityGate').fromFlags(known?.accountFlags);
+  if(blocked)throw Error('account_security:'+blocked);
   if (isolatedProfiles.has(profileKey)) throw new Error('isolated_flow_busy');
   isolatedProfiles.add(profileKey);
   const rail = createSwitch({ requireProxy: proxyRequired });
@@ -485,6 +488,7 @@ async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', p
   const carrierAbort = new AbortController();
   let clickTraffic = null;
   let destroyed = false;
+  let activePurpose=purpose,cycleBusy=false;
   try {
     const port = await rail.listen();
     // Acquire the chair and bind the mobile route BEFORE starting Chrome.
@@ -571,23 +575,50 @@ async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', p
     const api = {
       browser,
       purpose,
+      operationSnapshot:()=>carrierOperation?.snapshot()||null,
+      async withStage(kind,action){
+        if(purpose!=='publish'||!['id','renew','virtus'].includes(kind)||cycleBusy)throw Error('account_cycle_stage_busy');
+        const state=carrierOperation?.snapshot();
+        if(state&&(state.healthy===false||state.sent&&state.result!=='confirmed'))throw Error('account_cycle_previous_stage_unconfirmed');
+        const limit=state?.absoluteDeadline?state.absoluteDeadline*1000:Date.now()+1200000;
+        if(limit-Date.now()<30000)throw Error('account_cycle_budget_exhausted');
+        cycleBusy=true;const previous=browser.__ctIsolatedFlow;
+        activePurpose=kind;if(evidence){evidence.cleanup();evidence=null;}clickTraffic=null;
+        browser.__ctIsolatedFlow={kind,proxyRequired,rail:api,deadlineAt:limit-5000,shared:true};
+        try{stepLog.appendJSONL(nome,'robe',{step:'account_cycle_stage_begin',kind,operationId:state?.operationId||null});return await action();}
+        finally{if(evidence){evidence.cleanup();evidence=null;}activePurpose=purpose;browser.__ctIsolatedFlow=previous;cycleBusy=false;}
+      },
       proxyRequired,
+      borrowLease(){
+        if(!carrierOperation||activePurpose!=='virtus'||destroyed)throw Error('account_cycle_borrow_not_allowed');
+        return {accountId:nome,operationId:carrierOperation.operationId,hop:carrierOperation.hop,
+          snapshot:()=>({...carrierOperation.snapshot(),healthy:!destroyed&&carrierOperation.snapshot().healthy}),
+          possibleSideEffect:()=>carrierOperation.possibleSideEffect('virtus'),confirm:()=>carrierOperation.confirm(),close:async()=>{}};
+      },
+      async checkVirtus(session){
+        if(!carrierOperation)return {ok:true,skipped:true,reason:'shared_lease_unavailable'};
+        return api.withStage('virtus',async()=>{
+          for(const work of await browser.pages())try{await work.setOfflineMode(true)}catch{}
+          return session.visitOnLease(api.borrowLease());
+        });
+      },
       isProxyArmed: proxyRequired && !!mobileProof,
       async armAndProve(page) {
         if (!proxyRequired) return { ok: true, skipped: true, provider: 'direct' };
         if (destroyed || carrierAbort.signal.aborted || !browser.isConnected() || page.isClosed()) throw Error('mobile_session_closed');
         if (!api.isProxyArmed || !mobileProof) throw Error('mobile_route_not_armed');
         if (carrierOperation?.snapshot().healthy === false) throw Error('mobile_transport_not_healthy');
-        if (!evidence && (purpose === 'publish' || purpose === 'renew')) evidence = require('./robePublishEvidence').watch(page, {operation:purpose});
+        await require('./accountSecurityGate').assertAllowed(page,nome);
+        if (!evidence && (activePurpose === 'publish' || activePurpose === 'renew')) evidence = require('./robePublishEvidence').watch(page, {operation:activePurpose});
         return { ok: true, provider: carrierOperation ? 'carrier_v2' : 'phone', alreadyArmed: true, ...mobileProof };
       },
       trafficSnapshot() { return rail.trafficSnapshot(); },
       bytesToProxy() { return rail.bytesToProxy(); },
       async markPublishClick() {
-        if(carrierOperation)await carrierOperation.possibleSideEffect();
+        if(carrierOperation)await carrierOperation.possibleSideEffect(activePurpose===purpose?undefined:activePurpose==='id'?'identity':activePurpose);
         clickTraffic = rail.trafficSnapshot();
         if (evidence) evidence.arm();
-        stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_publish_click', purpose, trafficBeforeClick: clickTraffic });
+        stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_publish_click', purpose:activePurpose, trafficBeforeClick: clickTraffic });
       },
       async waitPublishTransport() {
         const until = Date.now() + 30000;
@@ -601,8 +632,8 @@ async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', p
           up: total.proxyUp - clickTraffic.proxyUp,
           down: total.proxyDown - clickTraffic.proxyDown
         } : null;
-        const confirmed = purpose === 'renew' ? snap.operationConfirmed === true : snap.creationConfirmed === true;
-        const result = { ok: snap.transportOk === true && confirmed, ...snap, purpose, traffic: total, afterClick, provider: 'phone' };
+        const confirmed = activePurpose === 'renew' ? snap.operationConfirmed === true : snap.creationConfirmed === true;
+        const result = { ok: snap.transportOk === true && confirmed, ...snap, purpose:activePurpose, traffic: total, afterClick, provider: 'phone' };
         if(result.ok&&carrierOperation)carrierOperation.confirm();
         stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_publish_transport', ...result });
         return result;
@@ -642,8 +673,8 @@ async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', p
         try { stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_dead', purpose, pid: pid || null, kept: true, traffic: rail.trafficSnapshot() }); } catch {}
       }
     };
-    api.markIdentityStart=async()=>{if(carrierOperation)await carrierOperation.possibleSideEffect()};
-    api.confirmIdentity=()=>{if(carrierOperation)carrierOperation.confirm()};
+    api.markIdentityStart=async()=>{if(carrierOperation)await carrierOperation.possibleSideEffect(purpose==='publish'?'identity':undefined)};
+    api.confirmIdentity=()=>{if(carrierOperation)carrierOperation.confirm(purpose==='publish'?'identity':undefined)};
     browser.__ctRobeRail = api;
     browser.__ctIsolatedFlow = { kind: purpose, proxyRequired, rail: api };
     return api;

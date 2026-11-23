@@ -436,7 +436,9 @@
         }
 
         // 1.4) ID Virtus (Messenger: confirme identidade para enviar mensagens)
+        if(p.accountCodePhone||p.accountCodeWhatsapp)return {kind:'account_code',label:p.accountCodePhone&&p.accountCodeWhatsapp?'Codigo Zap + Tel':p.accountCodeWhatsapp?'Codigo WhatsApp':'Codigo telefone',cls:'bad',title:'Confirmacao da conta pendente - atendimento humano'};
         if (p.idVirtus === true) {
+          // ID Virtus is separate from account recovery by phone/WhatsApp.
           return {
             kind: 'id_virtus',
             label: 'ID Virtus',
@@ -1935,6 +1937,9 @@
           setKind('#srvTcKindMkt', { key: 'marketplace_disabled', fallback: true });
           setKind('#srvTcKindIdVirtus', { key: 'id_virtus', fallback: true });
           setKind('#srvTcKindSelfie', { key: 'selfie_video', fallback: false });
+          const selfieInput=box.querySelector('#srvTcKindSelfie');
+          if(selfieInput&&!box.querySelector('#srvTcKindAccountCode')){const label=document.createElement('label');label.className='muted';label.style.cssText='display:flex;align-items:center;gap:8px';label.innerHTML='<input type="checkbox" id="srvTcKindAccountCode" /> Excluir codigo Zap/Tel';selfieInput.closest('label').after(label);}
+          setKind('#srvTcKindAccountCode', { key: 'account_code', fallback: false });
         }
         const wm = String(robe.workMode || 'v3_pmg');
         workModeEl.value = (wm === 'v4_bairros' || wm === 'v3_pmg' || wm === 'v2_auto') ? wm : 'v1';
@@ -2335,7 +2340,8 @@
                 two_factor: !!(box.querySelector('#srvTcKindTwoFactor') && box.querySelector('#srvTcKindTwoFactor').checked),
                 marketplace_disabled: !!(box.querySelector('#srvTcKindMkt') && box.querySelector('#srvTcKindMkt').checked),
                 id_virtus: !!(box.querySelector('#srvTcKindIdVirtus') && box.querySelector('#srvTcKindIdVirtus').checked),
-                selfie_video: !!(box.querySelector('#srvTcKindSelfie') && box.querySelector('#srvTcKindSelfie').checked)
+                selfie_video: !!(box.querySelector('#srvTcKindSelfie') && box.querySelector('#srvTcKindSelfie').checked),
+                account_code: !!box.querySelector('#srvTcKindAccountCode')?.checked
               }
             },
             country: {

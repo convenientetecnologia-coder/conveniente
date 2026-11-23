@@ -4,16 +4,20 @@ class VirtusTurn {
  constructor({acquire,rail,prove,clock=Date.now,onState=()=>{},onTrace=async()=>{},beforeDisconnect=async()=>{}}){this.acquire=acquire;this.rail=rail;this.prove=prove;this.clock=clock;this.onState=onState;this.onTrace=onTrace;this.beforeDisconnect=beforeDisconnect;this.state='offline';this.closed=false;this.tail=Promise.resolve();this.lease=null;this.lastCheckedAt=0;this.lastTurn=null;this.failure=null;this.abort=new AbortController();}
  snapshot(){return {state:this.state,lastCheckedAt:this.lastCheckedAt,lastTurn:this.lastTurn?{...this.lastTurn}:null,failure:this.failure,operationId:this.lease?.operationId||null,offlinePlanned:!this.closed&&this.state!=='online',traffic:this.rail.trafficSnapshot()}}
  set(state){this.state=state;this.onState(this.snapshot())}
- run(intent,action){
+ cancelWaitingObservation(){if(this.state==='waiting'&&!this.lease&&['warm','observe','engaged'].includes(this.currentIntent))this.currentAbort?.abort(Error('virtus_observation_superseded_by_human'));}
+ run(intent,action,{signal,lease:borrowedLease}={}){
   if(this.closed)return Promise.reject(Error('virtus_turn_closed'));
   const task=this.tail.catch(()=>{}).then(async()=>{
    if(this.closed)throw Error('virtus_turn_closed');this.lastTurn={intent,requestedAt:this.clock(),outcome:'waiting'};const trafficBefore=this.rail.trafficSnapshot();this.set('waiting');
+   const localAbort=new AbortController();this.currentAbort=localAbort;this.currentIntent=intent;
+   const combined=AbortSignal.any([this.abort.signal,localAbort.signal,...(signal?[signal]:[])]);
    try{
-    this.lease=await this.acquire({intent,signal:this.abort.signal});
+    combined.throwIfAborted();this.lease=borrowedLease||await this.acquire({intent,signal:combined});
     this.lastTurn.acquiredAt=this.clock();this.lastTurn.operationId=this.lease.operationId||null;this.lastTurn.outcome='acquired';
-    if(this.closed)throw Error('virtus_turn_closed');
+    if(this.closed)throw Error('virtus_turn_closed');combined.throwIfAborted();
     this.rail.flip(this.lease.hop);await this.prove();this.lastTurn.provedAt=this.clock();this.lastTurn.outcome='working';
     if(this.lease.snapshot().healthy===false)throw Error('virtus_transport_unhealthy');
+    combined.throwIfAborted();
     this.set('online');let healthTimer;
     try{
       const unhealthy=new Promise((_,reject)=>{healthTimer=setInterval(()=>{

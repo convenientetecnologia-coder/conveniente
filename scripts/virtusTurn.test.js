@@ -10,3 +10,13 @@ test('perda de transporte em um turno bloqueia novas ações e devolve recurso',
 
 test('visita incompleta devolve cadeira sem avançar última verificação aprovada',async()=>{let now=100;const f=fixture({clock:()=>now});await f.turn.run('observe',async()=>({ok:true}));assert.equal(f.turn.snapshot().lastCheckedAt,100);now=200;await f.turn.run('observe',async()=>({ok:false,state:'incomplete'}));assert.equal(f.turn.snapshot().lastCheckedAt,100);assert.equal(f.calls.filter(x=>x==='release').length,2)});
 test('conexão e função sem resultado não confirmam verificação; registro só ocorre depois de liberar',async()=>{const traces=[];const f=fixture({onTrace:async r=>{assert.equal(f.calls.at(-1),'release');traces.push(r)}});await f.turn.run('observe',async()=>{});assert.equal(f.turn.snapshot().lastCheckedAt,0);assert.equal(traces.length,1);assert.equal(traces[0].operationId,'fixture');assert.equal(traces[0].checkConfirmed,undefined);await f.turn.run('observe',async()=>({ok:false,state:'incomplete',reason:'messages_loading'}));assert.equal(traces[1].outcome,'incomplete');assert.equal(traces[1].reason,'messages_loading')});
+test('queued human cancellation preserves the session for its next normal visit',async()=>{
+ let first=true;const f=fixture({acquire:({signal})=>first?(first=false,new Promise((_,reject)=>signal.addEventListener('abort',()=>reject(signal.reason),{once:true}))):Promise.resolve({hop:{},snapshot:()=>({healthy:true}),close:async()=>{}})}),cancel=new AbortController();
+ const human=f.turn.run('human',async()=>{throw Error('must_not_run')},{signal:cancel.signal});const observed=assert.rejects(human,/human_canceled/);await new Promise(setImmediate);cancel.abort(Error('virtus_human_canceled'));await observed;
+ assert.equal(f.turn.closed,false);await f.turn.run('observe',async()=>({ok:true}));assert.ok(f.turn.lastCheckedAt);
+});
+test('shared account chair does not request or release another authority lease',async()=>{
+ const f=fixture({acquire:async()=>{throw Error('second_chair')}});let returned=0;
+ await f.turn.run('warm',async()=>({ok:true}),{lease:{operationId:'parent',hop:{},snapshot:()=>({healthy:true}),close:async()=>returned++}});
+ assert.equal(returned,1);assert.equal(f.turn.lastTurn.operationId,'parent');
+});

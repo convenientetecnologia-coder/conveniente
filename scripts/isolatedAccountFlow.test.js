@@ -17,6 +17,18 @@ function load(file, mocks) {
   return module.exports;
 }
 
+test('shared publish chair runs ID then renewal on the existing page without opening or closing a rail', async () => {
+  const api=load('isolatedAccountFlow.js',{}),calls=[];
+  const browser={},page={browser:()=>browser};
+  const rail={withStage:async(kind,action)=>{const previous=browser.__ctIsolatedFlow;browser.__ctIsolatedFlow={kind,rail,shared:true};calls.push(kind);try{return await action()}finally{browser.__ctIsolatedFlow=previous}},confirmIdentity:()=>calls.push('identity-confirmed')};
+  browser.__ctIsolatedFlow={kind:'publish',rail};
+  await api.run({page,nome:'test',kind:'id'},async received=>{assert.equal(received,page);assert.equal(api.context(page,'id').shared,true);return {ok:true,marked:true}});
+  await api.run({page,nome:'test',kind:'renew'},async received=>{assert.equal(received,page);return {ok:true}});
+  assert.deepEqual(calls,['id','identity-confirmed','renew']);assert.equal(browser.__ctIsolatedFlow.kind,'publish');
+  await assert.rejects(api.run({page,nome:'test',kind:'id'},async()=>{throw Error('network-lost')}),/network-lost/);
+  assert.equal(calls.filter(x=>x==='identity-confirmed').length,1);
+});
+
 for (const proxyRequired of [true, false]) {
   for (const fails of [true, false]) {
     test(`isolamento e fechamento: proxy=${proxyRequired}, erro=${fails}`, async () => {
@@ -97,6 +109,7 @@ test('renovação conecta só após localizar botão real e relê posição ante
   const end = source.indexOf('async function clickRenewConfirm(', start);
   const calls = [];
   const fn = vm.runInNewContext(source.slice(start, end) + '\nclickRenewConfirmInDialog', {
+    require:()=>({waitControl:async()=>({ok:true})}),
     safeEvaluate: async () => { calls.push('find'); return { ok: true, x: 12, y: 20 }; },
     humanPause: async () => {}, randInt: () => 1
   });

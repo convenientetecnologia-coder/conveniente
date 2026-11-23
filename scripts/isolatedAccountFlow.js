@@ -3,6 +3,14 @@
 // A página recebida serve somente como fonte da sessão. Nunca navega o Virtus.
 async function run({ page, nome, kind, deadlineAt = 0 }, action) {
   if (!page || typeof page.browser !== 'function') throw new Error('isolated_source_page_missing');
+  const parent=page.browser().__ctIsolatedFlow;
+  if(parent?.kind==='publish'&&parent.rail?.withStage&&['id','renew'].includes(kind)){
+    return parent.rail.withStage(kind,async()=>{
+      const result=await require('./carrierV2/clock').run(()=>action(page,parent.rail));
+      if(kind==='id'&&result?.ok&&(result.marked||result.alreadySubmitted||result.marketplacePhoneVerified||result.identityFlowConfirmed))parent.rail.confirmIdentity?.();
+      return result;
+    });
+  }
   const manifest = await require('./manifestStore').read(nome);
   const proxyRequired = require('./serverConfig').readServerConfigEffective().robe.publishWithProxy === true;
   let rail;

@@ -345,7 +345,8 @@ const DEFAULTS = Object.freeze({
       two_factor: true,
       marketplace_disabled: true,
       id_virtus: true,
-      selfie_video: false
+      selfie_video: false,
+      account_code: false
     }
   },
   // Isolamento térmico do console (stdout/stderr). Forense em arquivo fica.
@@ -824,7 +825,8 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
           two_factor: rawKinds.two_factor === true,
           marketplace_disabled: rawKinds.marketplace_disabled === true,
           id_virtus: rawKinds.id_virtus === true,
-          selfie_video: rawKinds.selfie_video === true
+          selfie_video: rawKinds.selfie_video === true,
+          account_code: rawKinds.account_code === true
         }
         : {
           banned: defKinds.banned !== false,
@@ -832,7 +834,8 @@ function buildNormalizedConfig(raw, { totalMemMB = getTotalMemMB(), source = "de
           two_factor: defKinds.two_factor !== false,
           marketplace_disabled: defKinds.marketplace_disabled !== false,
           id_virtus: defKinds.id_virtus !== false,
-          selfie_video: false
+          selfie_video: false,
+          account_code: false
         };
       return {
         enabled: termClean.enabled === true,
@@ -1136,7 +1139,7 @@ function validateServerConfigPayload(payload) {
       if (!termClean.deleteKinds || typeof termClean.deleteKinds !== "object") {
         errors.push("terminalAccountCleanup.deleteKinds_invalido");
       } else {
-        for (const k of ["banned", "captcha", "two_factor", "marketplace_disabled", "id_virtus", "selfie_video"]) {
+        for (const k of ["banned", "captcha", "two_factor", "marketplace_disabled", "id_virtus", "selfie_video", "account_code"]) {
           if (termClean.deleteKinds[k] !== undefined && typeof termClean.deleteKinds[k] !== "boolean") {
             errors.push(`terminalAccountCleanup.deleteKinds.${k}_invalido`);
           }
@@ -1348,7 +1351,9 @@ function writeServerConfigAtomic({ payload, updatedBy = "unknown" } = {}) {
           captcha: dk.captcha === true,
           two_factor: dk.two_factor === true,
           marketplace_disabled: dk.marketplace_disabled === true,
-          id_virtus: dk.id_virtus === true
+          id_virtus: dk.id_virtus === true,
+          selfie_video: dk.selfie_video === true,
+          account_code: dk.account_code === true
         };
       })()
     },

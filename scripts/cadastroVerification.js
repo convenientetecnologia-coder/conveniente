@@ -1,7 +1,7 @@
 'use strict';
-async function verify({browser,cookies,detectLoginRequired=require('./browser').detectLoginRequired}){
+async function verify({browser,cookies,expectedUserId,detectLoginRequired=require('./browser').detectLoginRequired}){
  browser.__ctCadastroProxy?.assertHealthy();
- const expected=String((cookies||[]).find(c=>c?.name==='c_user')?.value||'').trim();
+ const expected=String(expectedUserId||(cookies||[]).find(c=>c?.name==='c_user')?.value||'').trim();
  if(!/^\d+$/.test(expected))throw Error('cadastro_expected_identity_missing');
  const pages=await browser.pages();
  const page=pages.find(p=>{try{const u=new URL(p.url());return /(^|\.)facebook\.com$/.test(u.hostname)&&/^\/messages(?:\/|$)/.test(u.pathname)}catch{return false}});

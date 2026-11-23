@@ -14,6 +14,24 @@ async function operationalFixture(observerDependencies={}){
  const session=await create({nome:'test',dependencies:{onTrace:async()=>{},deliveryLedger:{accountBlocked:()=>false},...observerDependencies,allowPilot:true,confirmationTimeoutMs:20,config:{virtus:{proxyEnabled:true}},Client,cp2:{ensureConfig:async()=>{},readConfig:()=>({}),begin:async()=>({hop:{port:1},snapshot:()=>({healthy:true}),possibleSideEffect:async()=>calls.push('mark'),confirm:()=>calls.push('confirmed'),close:async()=>calls.push('release')})},rails:{createDirectSwitch:()=>rail,proveThroughRail:async()=>'{"ip":"fixture"}',readExit:x=>x}}});
  const page={url:()=> 'https://www.facebook.com/messages',on:()=>{},setOfflineMode:async offline=>{if(!offline)session.noteNetwork()},waitForFunction:async()=>{}};session.attach({pages:async()=>[page],on:()=>{},once:()=>{},isConnected:()=>true});return {session,calls,page};
 }
+test('human queued cancellation releases the request and a new visit still works',async()=>{
+ const {session,calls}=await operationalFixture();
+ const original=session.turn.acquire;let requested;
+ const queued=new Promise(r=>requested=r);
+ session.turn.acquire=({signal})=>new Promise((resolve,reject)=>{requested();signal.addEventListener('abort',()=>reject(signal.reason),{once:true})});
+ const pending=session.enterHuman();pending.catch(()=>{});await queued;
+ await session.leaveHuman();await assert.rejects(pending,/virtus_human_canceled/);
+ assert.equal(session.snapshot().humanHeld,false);assert.equal(calls.includes('connect'),false);
+ session.turn.acquire=original;assert.equal(await session.run('observe',async()=>true),true);await session.close();
+});
+test('borrowed account chair checks the inbox without acquiring or releasing the parent lease',async()=>{
+ const {session,calls}=await operationalFixture({setObserverInterval:()=>({unref(){}}),clearObserverInterval(){}});
+ let acquired=0;session.turn.acquire=async()=>{acquired++;throw Error('unexpected-new-chair')};
+ session.startObserver({prepareInbox:async()=>{session.noteNetwork();return {ok:true,state:'marketplace_ready'}}});
+ const lease={accountId:'test',operationId:'shared-parent',hop:{port:1},snapshot:()=>({healthy:true}),close:async()=>{}};
+ assert.equal((await session.visitOnLease(lease)).ok,true);assert.equal(acquired,0);assert.equal(calls.includes('release'),false);
+ await assert.rejects(session.visitOnLease({...lease,accountId:'different'}),/identity_invalid/);await session.close();
+});
 test('startup never confirms an incomplete inbox; a ready DOM completes the warm visit',async()=>{
  for(const ok of [false,true]){const {session}=await operationalFixture({onTrace:async()=>{}});await session.boot();session.noteInbox({ok,state:ok?'marketplace_ready':'incomplete'});session.finishBoot();await session.turn.tail;assert.equal(session.snapshot().lastCheckedAt>0,ok);assert.equal(session.snapshot().lastTurn.outcome,ok?'action_completed':'incomplete');await session.close()}
 });

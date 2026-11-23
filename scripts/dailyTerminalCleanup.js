@@ -31,7 +31,8 @@ const DEFAULT_DELETE_KINDS = Object.freeze({
   two_factor: true,
   marketplace_disabled: true,
   id_virtus: true,
-  selfie_video: false
+  selfie_video: false,
+  account_code: false
 });
 
 function now() { return Date.now(); }
@@ -86,7 +87,7 @@ function resolveDeleteKinds(termCleanOrKinds) {
     : {};
   const dk = (raw.deleteKinds && typeof raw.deleteKinds === 'object')
     ? raw.deleteKinds
-    : ((raw.banned !== undefined || raw.captcha !== undefined || raw.id_virtus !== undefined)
+    : ((raw.banned !== undefined || raw.captcha !== undefined || raw.id_virtus !== undefined || raw.selfie_video !== undefined || raw.account_code !== undefined)
       ? raw
       : null);
   if (!dk) {
@@ -98,7 +99,8 @@ function resolveDeleteKinds(termCleanOrKinds) {
     two_factor: dk.two_factor === true,
     marketplace_disabled: dk.marketplace_disabled === true,
     id_virtus: dk.id_virtus === true,
-    selfie_video: dk.selfie_video === true
+    selfie_video: dk.selfie_video === true,
+    account_code: dk.account_code === true
   };
 }
 
@@ -110,7 +112,8 @@ function deleteKindsSignature(kinds) {
     k.two_factor ? '1' : '0',
     k.marketplace_disabled ? '1' : '0',
     k.id_virtus ? '1' : '0',
-    k.selfie_video ? '1' : '0'
+    k.selfie_video ? '1' : '0',
+    k.account_code ? '1' : '0'
   ].join('');
 }
 
@@ -171,6 +174,9 @@ function classifyTerminalDelete(flags, opts = {}) {
     return { delete: true, category: 'banned', detail: String(f.bannedReason || 'banned').slice(0, 120) };
   }
 
+  if(f.accountCodePhone===true||f.accountCodeWhatsapp===true){
+    return {delete:kinds.account_code,category:kinds.account_code?'account_code':'account_code_skipped',detail:kinds.account_code?'phone_or_whatsapp':'kind_disabled'};
+  }
   // 2) 2FA
   if (f.twoFactor === true) {
     if (!kinds.two_factor) {
@@ -349,14 +355,14 @@ async function runDailyTerminalCleanup({
     lastFailed: 0,
     lastScanned: perfis.length,
     lastCandidates: candidates.length,
-    lastByCategory: { banned: 0, two_factor: 0, captcha: 0, marketplace_disabled: 0, id_virtus: 0, selfie_video: 0 },
+    lastByCategory: { banned: 0, two_factor: 0, captcha: 0, marketplace_disabled: 0, id_virtus: 0, selfie_video: 0, account_code: 0 },
     lastDeleteKinds: kinds,
     lastClaimedAt: now()
   });
 
   let deleted = 0;
   let failed = 0;
-  const byCategory = { banned: 0, two_factor: 0, captcha: 0, marketplace_disabled: 0, id_virtus: 0, selfie_video: 0 };
+  const byCategory = { banned: 0, two_factor: 0, captcha: 0, marketplace_disabled: 0, id_virtus: 0, selfie_video: 0, account_code: 0 };
   const failures = [];
 
   try {

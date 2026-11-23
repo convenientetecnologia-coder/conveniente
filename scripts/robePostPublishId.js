@@ -270,6 +270,7 @@ function shouldMarkDocError(result) {
   if (result.marketplacePhoneNoBalance === true) return false;
   if (result.marketplacePhoneVerified === true) return false;
   const reason = String(result.error || result.reason || '');
+  if(/^account_cycle_|^account_security:/.test(reason))return false;
   if (
     reason === 'no_action_needed' ||
     reason === 'no_action_needed_today' ||
@@ -3979,13 +3980,14 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
         isolatedPage => runRobeAutoId({ page: isolatedPage, nome, titulo, deadlineAt: isolatedDeadline }));
     } catch (e) {
       const error = String(e.message || e);
-      await setMarketplaceDocFlag(nome, { reason: error, text: error });
+      if(shouldMarkDocError({ok:false,error}))await setMarketplaceDocFlag(nome, { reason: error, text: error });
       return { ok: false, marked: false, error };
     }
   }
   const startedAt = Date.now();
   const source = 'auto';
-  const hardDeadline = Number(deadlineAt) || Date.now() + BUDGET_TOTAL_MS;
+  const parentDeadline=require('./isolatedAccountFlow').context(page,'id')?.deadlineAt||Infinity;
+  const hardDeadline = Math.min(Number(deadlineAt) || Date.now() + BUDGET_TOTAL_MS,parentDeadline);
 
   let taken = null;
   try {
@@ -4022,6 +4024,7 @@ async function runRobeAutoId({ page, nome, titulo, deadlineAt } = {}) {
 
     await ensureSellingFeed(page, { deadlineAt: workDeadline });
     assertBudget(workDeadline, 'auto_after_selling');
+    await require('./accountSecurityGate').assertAllowed(page,nome);
 
     // ID - nao: banner no topo. Sem scroll-hunt.
     const { openedOk, scan } = await tryOpenActionNeededAtTop(page, {

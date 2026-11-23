@@ -24,3 +24,7 @@ test('one unreadable manifest cannot prevent the remaining accounts from recover
  const result=await recover({snapshot:structuredClone(desired),read:async n=>{if(n==='bad')throw Error('invalid json');return manifest},update:async f=>{desired=f(desired)}});
  assert.deepEqual(result,['good']);assert.equal(desired.perfis.bad.provisioningResult.state,'blocked');
 });
+test('rejected cookie jar can recover through credentials bound to a numeric account identity',()=>{
+ assert.equal(eligible(want,{login:'123456789012345',password:'fixture',cookies:[],sessionRejected:true}),true);
+ assert.equal(eligible(want,{login:'fixture@example.test',password:'fixture',cookies:[]}),false);
+});
