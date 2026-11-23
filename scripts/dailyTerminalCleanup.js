@@ -174,7 +174,7 @@ function classifyTerminalDelete(flags, opts = {}) {
     return { delete: true, category: 'banned', detail: String(f.bannedReason || 'banned').slice(0, 120) };
   }
 
-  if(f.accountCodePhone===true||f.accountCodeWhatsapp===true){
+  if(f.whatsappConfirm===true||f.accountCodePhone===true||f.accountCodeWhatsapp===true){
     return {delete:kinds.account_code,category:kinds.account_code?'account_code':'account_code_skipped',detail:kinds.account_code?'phone_or_whatsapp':'kind_disabled'};
   }
   // 2) 2FA
@@ -240,6 +240,18 @@ function classifyTerminalDelete(flags, opts = {}) {
     };
   }
 
+  // 7) Selfie de vídeo. Nasce desmarcada: só exclui se o servidor ligar essa opção.
+  if (f.identityRequired === true || f.identitySubmitted === true) {
+    if (!kinds.selfie_video) {
+      return { delete: false, category: 'selfie_video_skipped', detail: 'kind_disabled' };
+    }
+    return {
+      delete: true,
+      category: 'selfie_video',
+      detail: f.identitySubmitted === true ? 'identity_submitted' : 'identity_required'
+    };
+  }
+
   // 6) Login requerido genérico → NÃO excluir
   if (f.loginRequired === true) {
     if (isLoginOnlyKeepReason(loginReason) || !loginReason) {
@@ -253,18 +265,6 @@ function classifyTerminalDelete(flags, opts = {}) {
       delete: false,
       category: 'login_required_keep',
       detail: String(loginReason || 'login_required_unknown').slice(0, 120)
-    };
-  }
-
-  // 7) Selfie de vídeo. Nasce desmarcada: só exclui se o servidor ligar essa opção.
-  if (f.identityRequired === true || f.identitySubmitted === true) {
-    if (!kinds.selfie_video) {
-      return { delete: false, category: 'selfie_video_skipped', detail: 'kind_disabled' };
-    }
-    return {
-      delete: true,
-      category: 'selfie_video',
-      detail: f.identitySubmitted === true ? 'identity_submitted' : 'identity_required'
     };
   }
 

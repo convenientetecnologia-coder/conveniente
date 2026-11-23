@@ -2357,6 +2357,7 @@ function _overlayReasonFromFlags(flags) {
 
 function _terminalFlagFromFlags(flags) {
   try {
+    const category=require('./terminalAccountPolicy').reason(flags);if(category)return category;
     flags = (flags && typeof flags === 'object') ? flags : {};
     if (flags.banned === true) return 'banned';
     if (flags.accountCodePhone === true || flags.accountCodeWhatsapp === true) return 'account_code';
@@ -2442,7 +2443,23 @@ function isAutoLoginScreenReason(reason) {
   );
 }
 
+const terminalClosePending=new Set();
+function scheduleTerminalBrowserClose(nome,flags){
+ const reason=require('./terminalAccountPolicy').reason(flags);if(!reason||terminalClosePending.has(nome))return;
+ terminalClosePending.add(nome);
+ setImmediate(async()=>{try{
+  const ctrl=controllers.get(nome);if(ctrl?.configurando||isRobeBusy(nome)||isProfileOpening(nome))return;
+  const current=await readAccountFlags(nome);if(!require('./terminalAccountPolicy').reason(current))return;
+  await syncClosedTerminalDesiredState(nome);
+  if(ctrl?.browser?.__ctVirtusProxy)await ctrl.browser.__ctVirtusProxy.close();
+  const result=await handlers.deactivate({nome,reason:'terminal_account:'+reason,policy:'preserveDesired'});
+  provisionAudit.append({ts:Date.now(),event:'terminal_account_browser_closed',nome,reason,ok:result?.ok===true,error:result?.error||null});
+ }catch(error){try{provisionAudit.append({ts:Date.now(),event:'terminal_account_close_failed',nome,reason,error:String(error.message||error)});}catch{}}finally{terminalClosePending.delete(nome)}});
+}
+
 async function ensureTerminalHumanHoldOnce(nome, { reason = 'human_mode' } = {}) {
+  const terminalFlags=await readAccountFlags(nome);
+  if(require('./terminalAccountPolicy').reason(terminalFlags)){scheduleTerminalBrowserClose(nome,terminalFlags);return {ok:true,closeScheduled:true,invoked:false};}
   const ctrl = controllers.get(nome);
   if (ctrl && isLiveBrowserCtrl(ctrl)) {
     if (!isHumanAlreadyInvoked(nome, ctrl)) {
@@ -20155,6 +20172,7 @@ async function nurseTick() {
     // Se não há browsers abertos, NÃO rode o nurse completo a cada 5s (custa I/O em centenas de perfis).
     // Mas ainda precisamos de um sweep leve para exclusões retroativas (ban/2FA) já marcadas em flags.
     const now0 = Date.now();
+    for(const [n]of controllers){const f=await readAccountFlags(n);if(require('./terminalAccountPolicy').reason(f))scheduleTerminalBrowserClose(n,f);}
     if(proxyOpeningEnabled()){
       const before=readJsonFile(desiredPath,{perfis:{}});
       if(before._openAll?.mode==='proxy_independent'&&!before._openAll.doneAt&&before._autoOpen?.enabled&&!before._cellsStopped){
@@ -20654,7 +20672,7 @@ async function nurseTick() {
       const proxySession=ctrl?.browser?.__ctVirtusProxy;
       if(proxySession){
         const securityBlocked=require('./accountSecurityGate').fromFlags(await readAccountFlags(nome));
-        if(securityBlocked){if(!proxySession.snapshot().operationId&&!ctrl.humanControl)await enterHumanMode(nome,ctrl,{reason:securityBlocked});continue;}
+        if(securityBlocked){scheduleTerminalBrowserClose(nome,await readAccountFlags(nome));continue;}
         if(isProfileOpening(nome)||proxyOpeningCoordinator.running.has(nome))continue;
         if(want.active===true&&!ctrl.virtus&&!ctrl._virtusStarting&&!ctrl.configurando&&!ctrl.humanControl&&!want.humanHold&&!isRobeBusy(nome)){
           ctrl._virtusStarting=true;

@@ -2500,6 +2500,7 @@ module.exports = (app, workerClient, fileStore) => {
           else if (f.twoFactor === true) terminal = 'two_factor';
           else if (f.marketplaceDisabled === true) terminal = 'marketplace_disabled';
           else if (f.captchaCheckpoint === true) terminal = 'captcha_checkpoint';
+          else if(require('./terminalAccountPolicy').reason(f))terminal=require('./terminalAccountPolicy').reason(f);
         } catch {}
         if (terminal) skippedTerminal.push({ nome, reason: terminal });
         else eligibleNames.push(nome);
