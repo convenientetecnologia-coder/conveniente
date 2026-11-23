@@ -28,3 +28,9 @@ test('rejected cookie jar can recover through credentials bound to a numeric acc
  assert.equal(eligible(want,{login:'123456789012345',password:'fixture',cookies:[],sessionRejected:true}),true);
  assert.equal(eligible(want,{login:'fixture@example.test',password:'fixture',cookies:[]}),false);
 });
+test('version two recovers a technical exhaustion from version one without resetting real password attempts',()=>{
+ const old={...want,credentialRecoveryVersion:1,provisioningResult:{state:'failed',error:'fetch failed'}};
+ assert.equal(eligible(old,manifest),true);assert.equal(eligible({...old,credentialRecoveryVersion:2},manifest),false);
+ assert.equal(eligible(old,{...manifest,accountFlags:{loginAttemptCount:1}}),false);
+ assert.equal(eligible({...want,credentialRecoveryVersion:1},manifest),false);
+});

@@ -9,7 +9,7 @@ async function invoke({proxy=true,kind='stock_provision'}={}){
  await handler({headers:{}},{json:r=>(response=r)});return {response,desired,releases,acquires};
 }
 test('proxy open-all starts eligible accounts alongside cadastro without acquiring or releasing its lock',async()=>{
- const r=await invoke();assert.equal(r.response.ok,true);assert.equal(r.response.total,1);assert.equal(r.acquires,0);assert.equal(r.releases,0);assert.equal(r.desired.perfis.ready.active,true);assert.equal(r.desired.perfis.ready.virtus,'on');assert.equal(r.desired._autoOpen.enabled,true);assert.equal(r.desired._openAll.active,false);assert.equal(r.desired._openAll.mode,'proxy_independent');
+ const r=await invoke();assert.equal(r.response.ok,true);assert.equal(r.response.total,1);assert.equal(r.acquires,0);assert.equal(r.releases,0);assert.equal(r.desired.perfis.ready.active,true);assert.equal(r.desired.perfis.ready.virtus,'on');assert.equal(r.desired._autoOpen.enabled,true);assert.equal(r.desired._openAll.active,true);assert.equal(r.desired._openAll.mode,'proxy_bootstrap');
  assert.equal(r.desired.perfis.pending.active,true);assert.equal(r.desired.perfis.pending.provisioningPending,true);assert.equal(r.desired.perfis.pending.humanHold,true);
 });
 test('close-all still blocks proxy opening; direct mode keeps its existing global lock protection',async()=>{

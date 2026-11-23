@@ -57,6 +57,7 @@ function fromFlags(flags={}){
  if(flags.identityRequired||flags.identitySubmitted)return 'identity_required';
  if(flags.captchaCheckpoint)return 'captcha_checkpoint';
  if(flags.twoFactor)return 'two_factor';
+ if(flags.whatsappConfirm)return 'whatsapp_confirm';
  if(flags.idVirtus)return 'id_virtus';
  if(flags.marketplaceDisabled)return 'marketplace_disabled';
  return null;

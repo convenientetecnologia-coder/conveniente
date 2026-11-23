@@ -2520,14 +2520,15 @@ module.exports = (app, workerClient, fileStore) => {
         // Sequencer global de abertura (ordem do dashboard/perfis.json):
         // - um único perfil "inFlight" por vez, para o usuário acompanhar.
         // - workers coordenam via desired.json (cross-process).
-        const queueDone = eligibleNames.length === 0;
+        const batchNames=independentProxy?[...new Set([...eligibleNames,...Object.keys(cadastroDesired.perfis||{}).filter(n=>cadastroDesired.perfis[n]?.provisioningPending&&!cadastroDesired.perfis[n]?.humanHold)])]:eligibleNames;
+        const queueDone = batchNames.length === 0;
         desired._openAll = {
-          active: !queueDone && !independentProxy,
-          mode: independentProxy ? 'proxy_independent' : 'mapped',
+          active: !queueDone,
+          mode: independentProxy ? 'proxy_bootstrap' : 'mapped',
           startedAt: Date.now(),
           doneAt: queueDone ? Date.now() : undefined,
           idx: 0,
-          queue: eligibleNames.slice(),
+          queue: batchNames.slice(),
           skippedTerminal: skippedTerminal.slice(0, 120),
           skippedTerminalCount: skippedTerminal.length,
           inFlight: null,

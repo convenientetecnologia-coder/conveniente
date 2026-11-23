@@ -5211,6 +5211,7 @@ function createSerialQueue(opts) {
   // - sem preferências entre dashboard e chat novo
   // - execução 1 por vez para evitar atropelo de DOM
   const onJobIdle = (opts && typeof opts.onJobIdle === "function") ? opts.onJobIdle : null;
+  const isBlocked=opts&&typeof opts.isBlocked==='function'?opts.isBlocked:()=>false;
   const fifoQueue = [];
   let running = false;
   let paused = false;
@@ -5222,7 +5223,7 @@ function createSerialQueue(opts) {
 
   const drain = () => {
     if (running) return;
-    if (paused) return;
+    if (paused || isBlocked()) return;
     const item = fifoQueue.shift();
     if (!item) return;
     running = true;
@@ -5258,6 +5259,7 @@ function createSerialQueue(opts) {
       drain();
     });
   };
+  enqueue.wake=drain;
   enqueue.getDepth = () => depth;
   enqueue.getMaxDepth = () => maxDepth;
   enqueue.getMeta = () => ({ depth, maxDepth, lastEnqueueAt, lastDequeueAt, lastDoneAt, running, paused });
@@ -5452,10 +5454,11 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   let sweepIdleHook = null;
   const proxySession=browser.__ctVirtusProxy||null;
   const serialQueue = createSerialQueue({
+    isBlocked:()=>!!proxySession&&require('./proxyOpenBatch').holds(),
     onJobIdle: () => { try { if (typeof sweepIdleHook === "function") sweepIdleHook(); } catch {} }
   });
   const enqueue=(fn,intent='observe')=>serialQueue(()=>proxySession?proxySession.run(intent,fn):fn());
-  for(const key of ['getDepth','getMaxDepth','getMeta','isRunning','isPaused','setPaused'])enqueue[key]=serialQueue[key];
+  for(const key of ['getDepth','getMaxDepth','getMeta','isRunning','isPaused','setPaused','wake'])enqueue[key]=serialQueue[key];
   const replyDispatchStateByClientId = new Map(); // client_message_id -> { state, at, thread_key }
   const REPLY_DISPATCH_ID_TTL_MS = Math.max(
     60_000,
@@ -7029,7 +7032,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
   // A escuta de rede + fila/ingest stateless são responsabilidade exclusiva do `worker.js`.
 
   let proxyObserverVersion;
-  if(proxySession){proxySession.finishBoot();proxyObserverVersion=proxySession.startObserver({prepareInbox:()=>prepareProxyInbox(page,cfg.proxyHealthCheck),canObserve:()=>running&&epochOk()&&!enqueue.isRunning(),describeGuard:()=>({running,epochOk:epochOk(),queueRunning:enqueue.isRunning(),queueDepth:enqueue.getDepth(),queuePaused:enqueue.isPaused()})})}
+  if(proxySession){proxySession.finishBoot();proxyObserverVersion=proxySession.startObserver({prepareInbox:()=>prepareProxyInbox(page,cfg.proxyHealthCheck),canObserve:()=>{enqueue.wake();return running&&epochOk()&&!enqueue.isRunning()&&!require('./proxyOpenBatch').holds()},describeGuard:()=>({running,epochOk:epochOk(),queueRunning:enqueue.isRunning(),queueDepth:enqueue.getDepth(),queuePaused:enqueue.isPaused()})})}
 
   let cityCache = { at: 0, value: null };
   let cityTimer = null;

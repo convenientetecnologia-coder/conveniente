@@ -1,7 +1,7 @@
 'use strict';
 function isTransient(error) {
  const value=String(error||'');
- if(value==='account_security:security_step_unconfirmed')return true;
+ if(value==='account_security:security_step_unconfirmed'||value==='fetch failed')return true;
  if(/^(maintenance|carrier_maintenance|operation_control_in_flight|carrier_ack_timeout)$/.test(value))return true;
  if(value.startsWith('pc_login_navigation_failed:'))return true;
  if(/^(?:login_form_not_found|login_result_missing|login_submit_failed|session_not_saved)$/.test(value))return true;

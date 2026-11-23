@@ -19,7 +19,7 @@ function restriction(error){
 }
 function deferred(error){
  const e=String(error||'');
- return /^(?:host_boot_not_ready|configure_requires_provision_lock)$/.test(e)||/provision_lock_busy|already_opening/.test(e);
+ return /^(?:host_boot_not_ready|configure_requires_provision_lock|supervisor_denied:(?:slots|cooldown|ram_low)|supervisor_unreachable|governor_busy|ram_low)$/.test(e)||/provision_lock_busy|already_opening/.test(e)||require('./stockProvisionRetry').isTransient(e);
 }
 function retryDelayMs(attempts){return Math.min(300000,30000*2**Math.min(4,Math.max(0,attempts-1)))}
 function mayWriteCadastroMark(isWriting,pending){return isWriting===true||pending!==true}
@@ -52,7 +52,8 @@ async function settle(results,{update,audit=()=>{},now=Date.now}={}){
    continue;
   }
   if(deferred(error)){
-   d.perfis[r.profileName]={...p,provisioningPending:true,provisioningNextAt:ts+30000,active:false,virtus:'off'};
+   const deferrals=Math.min(1000000,(Number(p.provisioningDeferrals)||0)+1);
+   d.perfis[r.profileName]={...p,provisioningPending:true,provisioningDeferrals:deferrals,provisioningWaitReason:error,provisioningNextAt:ts+retryDelayMs(deferrals),active:false,virtus:'off'};
    events.push({event:'account_provisioning_deferred',nome:r.profileName,error,ts});
    continue;
   }

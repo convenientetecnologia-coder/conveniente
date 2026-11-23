@@ -11391,6 +11391,7 @@ async function getRobeModuleFor(nome) {
 
 // Wrapper: startRobeDynamic (substitui hook global robeHelper.startRobe)
 async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDeletePolicy = "after_all_working_posted") {
+  if(browser?.__ctVirtusProxy&&require('./proxyOpenBatch').holds())return {ok:false,blocked:true,error:'host_opening_batch'};
   const securityBlocked=require('./accountSecurityGate').fromFlags(await readAccountFlags(nome));
   if(securityBlocked){await ensureTerminalHumanHoldOnce(nome,{reason:securityBlocked});return {ok:false,blocked:true,error:'account_security:'+securityBlocked};}
   // #region agent log
@@ -12101,6 +12102,7 @@ async function robeTickGlobal() {
     } catch {}
   }
 
+  if(proxyOpeningEnabled()&&require('./proxyOpenBatch').holds())return;
   // Hardening: durante provisionamento, pausar Robe/automação para evitar concorrência.
   try {
     if (provisionLock.isActive()) {
@@ -12487,7 +12489,7 @@ async function completeAccountProvisioning(nome, source, {verifiedAuth=false}={}
   await fileStore.withDesiredFileLockUpdate(d => {
     if (d.perfis?.[nome]) delete d.perfis[nome].provisioningPending;
     if (d.perfis?.[nome]) delete d.perfis[nome].provisioningResult;
-    if (d.perfis?.[nome]) delete d.perfis[nome].provisioningAttempts;
+    if (d.perfis?.[nome]) {delete d.perfis[nome].provisioningAttempts;delete d.perfis[nome].provisioningDeferrals;delete d.perfis[nome].provisioningWaitReason;}
     if (d.perfis?.[nome]) delete d.perfis[nome].provisioningNextAt;
     if (d.perfis?.[nome]) delete d.perfis[nome].provisioningLastError;
     return d;
@@ -17781,9 +17783,10 @@ perfis.push({
   cidade: p.cidade,
   uaPresetId: p.uaPresetId,
   active: controllers.has(nome),
-  trabalhando: !isAccountProvisioningPending(nome) && controllers.get(nome)?.configurando !== true && !!(controllers.get(nome)?.trabalhando),
+  trabalhando: !isAccountProvisioningPending(nome) && controllers.get(nome)?.configurando !== true && !!(controllers.get(nome)?.trabalhando) && (!controllers.get(nome)?.browser?.__ctVirtusProxy||!require('./proxyOpenBatch').holds()),
   provisioningPending: readJsonFile(desiredPath,{perfis:{}})?.perfis?.[nome]?.provisioningPending===true,
   provisioningResult: readJsonFile(desiredPath,{perfis:{}})?.perfis?.[nome]?.provisioningResult||null,
+  provisioningWaitReason:readJsonFile(desiredPath,{perfis:{}})?.perfis?.[nome]?.provisioningWaitReason||null,
   virtusEngineDesired: desiredEngineRuntime,
   virtusEngineRuntime: (() => {
     try {
@@ -17799,7 +17802,7 @@ perfis.push({
     }
   })(),
   // Observabilidade enterprise (p/ pausas determinísticas durante provisionamento)
-  virtusOnline: !isAccountProvisioningPending(nome) && controllers.get(nome)?.configurando !== true && !controllers.get(nome)?.humanControl && !!(controllers.get(nome)?.virtus) && (!controllers.get(nome)?.browser?.__ctVirtusProxy || controllers.get(nome).browser.__ctVirtusProxy.snapshot().lastInbox?.ok===true),
+  virtusOnline: !isAccountProvisioningPending(nome) && controllers.get(nome)?.configurando !== true && !controllers.get(nome)?.humanControl && !!(controllers.get(nome)?.virtus) && (!controllers.get(nome)?.browser?.__ctVirtusProxy || (!require('./proxyOpenBatch').holds()&&controllers.get(nome).browser.__ctVirtusProxy.snapshot().lastInbox?.ok===true)),
   sendLockActive: (() => {
     try {
       const sl = controllers.get(nome) && controllers.get(nome).browser && controllers.get(nome).browser._sendLock;
@@ -17854,7 +17857,7 @@ perfis.push({
   reopenAt: robeMeta[nome]?.reopenAt || null,
   manifestStatus,
   closingReason: robeMeta[nome]?.closingReason || null,
-  proxyOpening: proxyOpeningEnabled()?{inFlight:proxyOpeningCoordinator.running.has(nome),readiness:proxyOpenReadiness.snapshot(),localLimit:proxyOpeningCoordinator.limit}:null,
+  proxyOpening: proxyOpeningEnabled()?{inFlight:proxyOpeningCoordinator.running.has(nome),readiness:proxyOpenReadiness.snapshot(),localLimit:proxyOpeningCoordinator.limit,batchHeld:require('./proxyOpenBatch').holds()}:null,
   proxyWaiting: require('./carrierV2/accountOperation').getWaiting(nome),
   virtusProxy: controllers.get(nome)?.browser?.__ctVirtusProxy?.snapshot() || null,
   cadastroProxy: controllers.get(nome)?.browser?.__ctCadastroProxy?.snapshot() || null,
@@ -18595,7 +18598,7 @@ function rememberCheapTabScan(tabs, url, now, patch) {
 const MAX_OPEN_CONCURRENCY = 1;
 const OPEN_ALL_SETTLE_MS = Math.max(15_000, Math.min(90_000, Number(process.env.OPEN_ALL_SETTLE_MS || 55000) || 55000));
 let slotsInUse = 0;
-const proxyOpeningCoordinator=new (require('./virtusProxyOpenQueue').ProxyOpeningCoordinator)({limit:2,onResult:(nome,result)=>{try{provisionAudit.append({ts:Date.now(),event:'proxy_open_independent_result',nome,ok:result?.ok===true,error:result?.error||null})}catch{}}});
+const proxyOpeningCoordinator=new (require('./virtusProxyOpenQueue').ProxyOpeningCoordinator)({limit:2,onResult:(nome,result)=>{robeMeta[nome]=robeMeta[nome]||{};robeMeta[nome].lastProxyOpenResult={at:Date.now(),ok:result?.ok===true,error:result?.error||null};try{provisionAudit.append({ts:Date.now(),event:'proxy_open_independent_result',nome,ok:result?.ok===true,error:result?.error||null})}catch{}}});
 const proxyOpenReadiness=new (require('./virtusProxyOpenReadiness').ProxyOpenReadiness)({probe:async()=>{
  const account=require('./carrierV2/accountOperation');await account.ensureConfig();
  const cap=await new (require('./carrierV2/client').OperationClient)(account.readConfig()).capabilities();
@@ -20097,7 +20100,7 @@ function kickCadastroRetry() {
   if (cadastroRetryBusy) return;
   let desired;
   try { desired = readJsonFile(desiredPath, { perfis: {} }); } catch { return; }
-  if (desired && desired._openAll && desired._openAll.active === true) return;
+  if (desired && desired._openAll && desired._openAll.active === true && !proxyOpeningEnabled()) return;
   try { if (provisionLock.isActive()) return; } catch { return; }
   const state = require('./accountProvisioningState');
   const stillOpening = Object.keys((desired && desired.perfis) || {}).some((nome) => {
@@ -20107,7 +20110,7 @@ function kickCadastroRetry() {
     const held = Number((robeMeta[nome] && robeMeta[nome].activationHeldUntil) || 0) || 0;
     return held <= Date.now();
   });
-  if (stillOpening) return;
+  if (stillOpening && !proxyOpeningEnabled()) return;
   const pick = state.nextCadastro(desired.perfis, Date.now(), inShard);
   if (!pick || !pick.nome) return;
   const nome = pick.nome;
@@ -20152,6 +20155,29 @@ async function nurseTick() {
     // Se não há browsers abertos, NÃO rode o nurse completo a cada 5s (custa I/O em centenas de perfis).
     // Mas ainda precisamos de um sweep leve para exclusões retroativas (ban/2FA) já marcadas em flags.
     const now0 = Date.now();
+    if(proxyOpeningEnabled()){
+      const before=readJsonFile(desiredPath,{perfis:{}});
+      if(before._openAll?.mode==='proxy_independent'&&!before._openAll.doneAt&&before._autoOpen?.enabled&&!before._cellsStopped){
+        await fileStore.withDesiredFileLockUpdate(d=>{if(d._openAll?.mode==='proxy_independent'&&!d._openAll.doneAt){d._openAll.mode='proxy_bootstrap';d._openAll.active=true;d._openAll.progress={};}return d});
+      }
+      await require('./proxyOpenBatch').reconcile({snapshot:readJsonFile(desiredPath,{perfis:{}}),allow:inShard,
+        update:fn=>fileStore.withDesiredFileLockUpdate(fn),audit:row=>provisionAudit.append(row),
+        observe:async(n,w,startedAt)=>{
+          if(w.provisioningPending)return {state:'waiting',reason:'cadastro_pending'};
+          const flags=await readAccountFlags(n);const terminal=require('./accountSecurityGate').fromFlags(flags);
+          if(terminal||w.humanHold||['blocked','failed'].includes(w.provisioningResult?.state))return {state:'blocked',reason:terminal||w.provisioningResult?.reason||'human_hold'};
+          if(!w.active&&!controllers.has(n))return {state:'blocked',reason:'account_inactive'};
+          const c=controllers.get(n),session=c?.browser?.__ctVirtusProxy;
+          if(session?.snapshot().startupFinished&&!session.snapshot().operationId&&!c.configurando&&!isProfileOpening(n)){
+            const inbox=session.snapshot().lastInbox;
+            if(inbox?.ok===true)return {state:'ready',reason:'inbox_verified_offline'};
+            if(inbox)return {state:'deferred',reason:inbox.reason||inbox.state||'inbox_unconfirmed'};
+          }
+          const result=robeMeta[n]?.lastProxyOpenResult;
+          if(result?.at>=startedAt&&!result.ok&&!/supervisor_denied:(slots|cooldown)|already_opening/.test(result.error||''))return {state:'deferred',reason:result.error||'opening_failed'};
+          return {state:'waiting',reason:'opening'};
+        }});
+    }
     if(!_cadastroCredentialRecoveryDone){
       await require('./cadastroRecovery').recover({snapshot:readJsonFile(desiredPath,{perfis:{}}),read:n=>manifestStore.read(n),update:fn=>fileStore.withDesiredFileLockUpdate(fn),allow:inShard,audit:row=>provisionAudit.append(row)});
       _cadastroCredentialRecoveryDone=true;
@@ -20401,7 +20427,7 @@ async function nurseTick() {
     // - Ao detectar expiração, finalizamos desired._openAll e religamos virtus para perfis que não estão em humanHold.
     try {
       const oa = (desired && desired._openAll && typeof desired._openAll === 'object') ? desired._openAll : null;
-      const oaActive = !!(oa && oa.active === true);
+      const oaActive = !!(oa && oa.active === true && oa.mode!=='proxy_bootstrap');
       const oaOwner = oa ? String(oa.lockOwner || oa.op || '') : '';
       const lkActive = !!(provisionLockSnap && provisionLockSnap.active);
       const lkOwner = provisionLockSnap && provisionLockSnap.lock && provisionLockSnap.lock.owner ? String(provisionLockSnap.lock.owner) : '';

@@ -35,3 +35,10 @@ test('fila pega uma conta vencida e a que explodiu espera a vez',()=>{
  assert.equal(mayWriteCadastroMark(false,true),false);assert.equal(mayWriteCadastroMark(true,true),true);assert.equal(mayWriteCadastroMark(false,false),true);
  assert.equal(cadastroIsWriting(),false);runAsCadastro(()=>assert.equal(cadastroIsWriting(),true));
 });
+test('capacity and transport deferrals do not exhaust cadastro or claim that credentials failed',async()=>{
+ for(const error of ['supervisor_denied:slots','supervisor_denied:ram_low','governor_busy','fetch failed','cadastro_proxy_transport_unhealthy']){
+  const d={perfis:{a:{provisioningPending:true,provisioningAttempts:4}}};
+  for(let i=0;i<8;i++)await settle([{profileName:'a',ok:false,error}],{update:async f=>f(d),now:()=>1000});
+  assert.equal(d.perfis.a.provisioningAttempts,4);assert.equal(d.perfis.a.provisioningPending,true);assert.equal(d.perfis.a.provisioningResult,undefined);assert.equal(d.perfis.a.provisioningDeferrals,8);assert.equal(d.perfis.a.provisioningWaitReason,error);
+ }
+});
