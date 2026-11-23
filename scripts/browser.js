@@ -8522,13 +8522,14 @@ async function detectMarketplaceDisabled(page) {
 
 function readSuspendedDocument() {
       function norm(s){ try{ return (s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase(); }catch{return String(s||'').toLowerCase();} }
+      const visible=el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>2&&r.height>2&&s.display!=='none'&&s.visibility!=='hidden'};
       const href = String(location && location.href || '');
       const path = String(location && location.pathname || '');
       const nodes = Array.from(document.querySelectorAll('h1,h2,span,div')).slice(0,2500);
-      const texts = nodes.map(el => (el.innerText || el.textContent || '')).filter(Boolean);
+      const texts = nodes.filter(visible).map(el => (el.innerText || '')).filter(Boolean);
       const tnorm = texts.map(norm);
       let rawBody = '';
-      try { rawBody = String((document.body && (document.body.innerText || document.body.textContent)) || ''); } catch {}
+      try { rawBody = String(document.body?.innerText || ''); } catch {}
       if (rawBody.length > 40000) rawBody = rawBody.slice(0, 40000);
       const blob = norm(rawBody + ' ' + String(document.title || ''));
 
@@ -8577,7 +8578,14 @@ function readSuspendedDocument() {
         path.includes('/checkpoint/disabled') ||
         path.includes('/checkpoint') && tnorm.some(t => t.includes('desabilitamos sua conta') || t.includes('we disabled your account'));
 
-      const any = !!hit || !!disabledCheckpoint;
+      // A customer's message or feed post may quote an account suspension.
+      // Require an account restriction surface, never a matching chat bubble alone.
+      const socialUi=[...document.querySelectorAll('[role="grid"],[role="feed"]')].some(visible)||/\/messages(?:\/|$)|\/t\//.test(path);
+      const scoped=[...document.querySelectorAll('h1,h2,[role="heading"],[role="dialog"],[aria-modal="true"]')]
+        .filter(visible).filter(el=>!el.closest('[role="grid"],[role="feed"],[role="row"]'))
+        .some(el=>hasPhrase(norm(el.innerText||'')));
+      const accountSurface=scoped||/\/checkpoint(?:\/|$)/.test(path)||(!socialUi&&more);
+      const any = !!disabledCheckpoint || !!(hit&&accountSurface);
       if (any) {
         const fromBody = /suspendemos seu perfil|seu perfil ser desabilitado permanentemente|desabilitamos sua conta|desativamos sua conta|suspens/i.test(rawBody)
           ? rawBody.replace(/\s+/g, ' ').trim().slice(0, 420)
@@ -8593,7 +8601,8 @@ function readSuspendedDocument() {
 async function detectAccountSuspended(page) {
   try {
     const href = (page && typeof page.url === 'function') ? (page.url() || '') : '';
-    const isFbOrMsg = /(^https?:\/\/)?(www\.)?(facebook|messenger)\.com/i.test(href);
+    let isFbOrMsg=false;
+    try{const host=new URL(href).hostname;const hosts=require('./facebookNavHosts');isFbOrMsg=hosts.isOfficialFacebookNavHost(host)||hosts.isOfficialMessengerNavHost(host);}catch{}
     if (!isFbOrMsg) return { banned: false };
     if (isMarketplaceDocCheckpointUrl(href)) return { banned: false };
 

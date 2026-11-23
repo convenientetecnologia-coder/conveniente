@@ -13,14 +13,15 @@ async function snapshot(page){return page.evaluate(()=>{
  return {ready:loading===0&&unmounted===0&&(links.length>0||empty),reason:loading?'loading':unmounted?'rows_unmounted':links.length===0&&!empty?'empty_unconfirmed':'ready',rows:rows.length,links:links.length,loading,unmounted,empty,avatarPending,signature:(hash>>>0).toString(16)+':'+rows.length+':'+links.length};
 })}
 async function wait({probe,network=()=>({}),clock=Date.now,sleep=ms=>new Promise(r=>setTimeout(r,ms)),timeoutMs=90000,minimumMs=10000,stableMs=3000,pollMs=500}){
- const start=clock();let stableSince=null,lastSignature=null,last;
+ const start=clock();let stableSince=null,lastSignature=null,last,lastNetwork;
  while(clock()-start<=timeoutMs){
   last=await probe();const net=network(),now=clock();const fresh=!net.connectedAt||net.lastNetworkAt>=net.connectedAt;
+  lastNetwork={freshNetwork:fresh,pendingRelevant:net.pending||0,connectionAgeMs:net.connectedAt?Math.max(0,now-net.connectedAt):null,lastNetworkAgeMs:net.lastNetworkAt?Math.max(0,now-net.lastNetworkAt):null};
   if(last.ready&&fresh&&!(net.pending>0)){if(last.signature!==lastSignature)stableSince=now;else if(stableSince===null)stableSince=now;lastSignature=last.signature;
    if(now-start>=minimumMs&&now-stableSince>=stableMs)return {...last,waitedMs:now-start,freshNetwork:fresh,pendingRelevant:net.pending||0};
   }else{stableSince=null;lastSignature=null}
   await sleep(pollMs);
  }
- const error=Error('virtus_inbox_not_settled');error.details={...last,waitedMs:clock()-start};throw error;
+ const error=Error('virtus_inbox_not_settled');error.details={...last,...lastNetwork,waitedMs:clock()-start};throw error;
 }
 module.exports={snapshot,wait};

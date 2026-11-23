@@ -1027,6 +1027,9 @@ function startVirtusByEngine(browser, nome, autoMode, cfg = {}) {
         await manifestStore.update(nome,man=>{man=man||{};man.proxyHealth={state:'ready',at:Date.now()};if(man.accountFlags?.messengerPinSource==='virtus_proxy_turn')man.accountFlags.messengerPin=false;return man});
         invalidateAccountFlagsCache(nome);
       }
+      if(health.state==='login'&&require('./configureLoginFallback').canRemediate(health.reason)){
+        queueAutoLoginRemediate(nome,{reason:health.reason,source:'virtus_proxy_turn',immediate:true});
+      }
       return health;
     }:null,
     restrictTab: 0,
@@ -2151,6 +2154,7 @@ function refuseOutsideCadastroMark(nome) {
 }
 
 async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
+  if(require('./stockProvisionRetry').isTransient(reason))return;
   if (refuseOutsideCadastroMark(nome)) return;
   // Guardrail enterprise: identidade (selfie/vídeo) não deve virar "loginRequired" genérico.
   // Ela tem semântica própria (humano + monitor 1h quando submetido).
@@ -2238,6 +2242,7 @@ async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
 // Quando o fluxo automático tentou (cookies + login/senha) e falhou, marca persistente.
 // Regra enterprise: NÃO re-tentar automaticamente em loop; só "Retomar trabalho" libera nova tentativa.
 async function setLoginRemediateFailedFlag(nome, { reason = '', source = '', stage = '' } = {}) {
+  if(require('./stockProvisionRetry').isTransient(reason))return;
   try {
     await manifestStore.update(nome, (man) => {
       man = man || {};
@@ -13862,7 +13867,7 @@ const handlers = {
           const isAymh = (rr.includes('aymh_continue') || rr === 'aymh');
 
           // Fallback: Continuar (se AYMH) + login/senha.
-          // CADASTRO: até 3 tentativas. RUNTIME login_form: 1 tentativa (comportamento antigo).
+          // Uma tentativa real por execução, respeitando o orçamento persistente da conta.
           // Nunca entra aqui para captcha/checkpoint (já abortou no human gate).
           let login2 = null, password2 = null;
           try {
@@ -13886,7 +13891,7 @@ const handlers = {
             return { ok: false, error: 'missing_credentials' };
           }
 
-          const maxAttempts = (isStockProvision || isAymh) ? 3 : 1;
+          const maxAttempts = 1;
           let after = { loginRequired: true, reason: rr || 'login' };
           let workPage = bestPage;
           try {
@@ -13901,7 +13906,15 @@ const handlers = {
             });
           } catch {}
 
-          const driven = { ok: false, error: 'login_already_attempted_in_configure_profile' };
+          const driven = await require('./configureLoginFallback').run({page:workPage,nome,login:login2,password:password2,
+            assertHealthy:()=>ctrl.browser.__ctCadastroProxy?.assertHealthy(),
+            begin:async()=>{
+              if(await readLoginAttemptCount(nome)>=LOGIN_ATTEMPT_MAX){await stopLoginAfterBudget(nome,'configure');return false;}
+              const n=await bumpLoginAttemptCount(nome);
+              provisionAudit.append({ts:Date.now(),event:'login_attempt_begin',nome,source:'configure',n,max:LOGIN_ATTEMPT_MAX});
+              ctrl.browser.__ctCadastroProxy?.noteStage('credential_login');return true;
+            }});
+          if(driven?.ok!==true&&require('./stockProvisionRetry').isTransient(driven?.error))throw Error(driven.error);
           if (driven && driven.terminal) {
             after = { loginRequired: true, reason: String(driven.terminal) };
           } else if (driven && driven.ok) {
@@ -14329,7 +14342,12 @@ const handlers = {
           try { await applyNewAccountRobePause24h(nome, { operator: op || null, via: 'configure_catch' }); } catch {}
         }
 
-        // Se falhou tecnicamente, entra em humano (padrão enterprise) para evitar ficar preso sem ação.
+        // Transport/DOM failures belong to the cadastro retry, never to bad-credential flags.
+        if(require('./stockProvisionRetry').isTransient(errMsg)){
+          try{provisionAudit.append({ts:Date.now(),event:'configure_technical_retry',nome,error:errMsg});}catch{}
+          return {ok:false,error:errMsg,technical:true};
+        }
+        // Only a nontechnical account/authentication failure can stop authentication.
         try { await invokeHumanForConfigure(errMsg); } catch {}
         return { ok: false, error: errMsg || 'falha_injetar_cookies' };
       } finally {
@@ -19195,7 +19213,11 @@ async function autoLoginRemediateTick() {
     let hasRuntimeAutoEligible = false;
     for (const [nome, ctrl] of controllers.entries()) {
       if (!nome || !ctrl) continue;
-      if(ctrl.browser?.__ctVirtusProxy)continue;
+      if(ctrl.browser?.__ctVirtusProxy){
+        const flags=await readAccountFlags(nome).catch(()=>({}));
+        if(require('./configureLoginFallback').canRemediate(flags.loginReason)&&robeMeta[nome]?.autoLoginRemediate?.queued)hasRuntimeAutoEligible=true;
+        continue;
+      }
       const flags = await readAccountFlags(nome).catch(() => ({}));
       const lrFlag = !!(flags && flags.loginRequired === true);
       const st = robeMeta[nome] && robeMeta[nome].autoLoginRemediate ? robeMeta[nome].autoLoginRemediate : null;
@@ -19258,6 +19280,12 @@ async function autoLoginRemediateTick() {
   let best = null;
   for (const [nome, ctrl] of controllers.entries()) {
     if (!nome || !ctrl || !ctrl.browser || !ctrl.browser.isConnected?.()) continue;
+    if(ctrl.browser.__ctVirtusProxy){
+      const turn=ctrl.browser.__ctVirtusProxy.snapshot();
+      if(turn.state!=='offline'||turn.operationId)continue;
+      const flags=await readAccountFlags(nome).catch(()=>({}));
+      if(!require('./configureLoginFallback').canRemediate(flags.loginReason))continue;
+    }
     // humanControl: SEMPRE respeitar (humano invocado = pausa total).
     if (ctrl.humanControl === true) {
       continue;
@@ -19404,6 +19432,9 @@ async function autoLoginRemediateTick() {
           error: st.lastError
         });
       } catch {}
+    } else if (!st.lastOk&&require('./stockProvisionRetry').isTransient(st.lastError)) {
+      st.queued=true;st.nextAt=Date.now()+60000;
+      try{provisionAudit.append({ts:Date.now(),event:'auto_login_technical_retry',nome,error:st.lastError});}catch{}
     } else if (!st.lastOk) {
       // Persistir estado de falha (para abrir em modo humano e impedir loops automáticos)
       try { await setLoginRemediateFailedFlag(nome, { reason: st.lastError || 'login_remediate_failed', source: 'auto_login_remediate', stage: 'auto' }); } catch {}
@@ -19439,6 +19470,7 @@ async function autoLoginRemediateTick() {
 }
 
 let _nurseTickRunning = false;
+let _cadastroCredentialRecoveryDone=false;
 // Fase 2a: suppress kick enquanto o próprio nurse escreve desired (anti-storm).
 let __nurseWakeSuppressDepth = 0;
 const NURSE_WAKE_POLL_MS = Math.max(
@@ -20089,6 +20121,10 @@ async function nurseTick() {
     // Se não há browsers abertos, NÃO rode o nurse completo a cada 5s (custa I/O em centenas de perfis).
     // Mas ainda precisamos de um sweep leve para exclusões retroativas (ban/2FA) já marcadas em flags.
     const now0 = Date.now();
+    if(!_cadastroCredentialRecoveryDone){
+      await require('./cadastroRecovery').recover({snapshot:readJsonFile(desiredPath,{perfis:{}}),read:n=>manifestStore.read(n),update:fn=>fileStore.withDesiredFileLockUpdate(fn),allow:inShard,audit:row=>provisionAudit.append(row)});
+      _cadastroCredentialRecoveryDone=true;
+    }
 
     // Enterprise: retry de arquivamento no CT (quando CT estava 503/offline).
     // Isso evita “contas sumirem” (ficam assigned no CT mas perfil local já foi deletado).

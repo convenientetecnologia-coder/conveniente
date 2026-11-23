@@ -6,3 +6,8 @@ test('Marketplace disponível recebe um clique e exige seleção estável',async
 test('clique sem confirmação não vira sucesso nem dispara cliques repetidos',async()=>{const f=fixture({activates:false});await assert.rejects(visit(f.opts),/activation_unconfirmed/);assert.equal(f.clicks(),1)});
 test('DOM não pronto impede qualquer clique',async()=>{const f=fixture();f.opts.ready=async()=>{throw Error('document_not_ready')};await assert.rejects(visit(f.opts),/document_not_ready/);assert.equal(f.clicks(),0)});
 test('absence must be revalidated on a complete document; partial readiness cannot become success',async()=>{const f=fixture({visible:false});let probes=0;f.opts.ready=async()=>{if(++probes===2)throw Error('document_became_incomplete')};await assert.rejects(visit(f.opts),/document_became_incomplete/);assert.equal(f.clicks(),0);const g=fixture({active:true});g.opts.settled=async()=>({ready:false});await assert.rejects(visit(g.opts),/not_settled/)});
+test('proxy absence requires synchronization and rechecks a folder that appeared during it',async()=>{
+ const f=fixture({visible:false});f.opts.absenceSettled=async()=>{throw Error('no_fresh_inbox_network')};await assert.rejects(visit(f.opts),/no_fresh_inbox_network/);assert.equal(f.clicks(),0);
+ const g=fixture({visible:false});let found=false;g.opts.visible=async()=>found;g.opts.absenceSettled=async()=>{found=true;return {ready:true,freshNetwork:true}};
+ assert.equal((await visit(g.opts)).state,'marketplace_ready');assert.equal(g.clicks(),1);
+});

@@ -8761,6 +8761,11 @@ async function prepareProxyInbox(page,healthCheck){
  return await require('./virtusInboxVisit').visit({
   ready:()=>{const documents=require('./virtusMessagesDocument');return documents.ensure({page,probe:options=>documents.wait({...options,allowMarketplaceEntry:async()=>!!(await proxyMarketplaceTarget(page))}),onRecovery:e=>logInfo('[virtusDelta][proxy_document_recovery] '+JSON.stringify(e))})},
   active:()=>proxyMarketplaceListActive(page),visible:async()=>!!(await proxyMarketplaceTarget(page)),
+  absenceSettled:()=>require('./virtusInboxReady').wait({probe:async()=>{
+    const doc=await page.evaluate(require('./virtusMessagesDocument').inspectDocument);
+    const entry=doc.reason==='conversation_list_unconfirmed'&&!!(await proxyMarketplaceTarget(page));
+    return {...doc,ready:doc.ready||entry,signature:[doc.reason,doc.links||0,entry].join(':')};
+  },network:()=>page.__ctVirtusProxySession?.visitNetwork(page)||{}}),
   click:async()=>{const target=await proxyMarketplaceTarget(page);if(!target)throw Error('virtus_marketplace_target_disappeared');await page.mouse.click(target.x,target.y,{delay:clickDelayMs()})},
   settled:async()=>{
    const position=await require('./marketplaceListPosition').reset(page);

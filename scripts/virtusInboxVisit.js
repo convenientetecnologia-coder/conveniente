@@ -1,11 +1,16 @@
 'use strict';
 // One bounded visit; absence is a result, never an invitation to click forever.
-async function visit({ready,active,visible,click,settled,sleep=ms=>new Promise(r=>setTimeout(r,ms)),clock=Date.now,presenceMs=10000,activationMs=45000,pollMs=250}){
+async function visit({ready,active,visible,click,settled,absenceSettled=null,sleep=ms=>new Promise(r=>setTimeout(r,ms)),clock=Date.now,presenceMs=10000,activationMs=45000,pollMs=250}){
  const settle=async()=>{const readiness=await settled();if(readiness?.ready===false)throw Error('virtus_inbox_not_settled');return readiness};
  await ready();if(await active()){const readiness=await settle();return {ok:true,state:'marketplace_ready',clicked:false,readiness};}
  const presenceUntil=clock()+presenceMs;let found=await visible();
  while(!found&&clock()<presenceUntil){await sleep(pollMs);found=await visible()}
- if(!found){await ready();if(await active()){const readiness=await settle();return {ok:true,state:'marketplace_ready',clicked:false,readiness}}found=await visible();if(!found)return {ok:true,state:'marketplace_absent',clicked:false};}
+ if(!found){await ready();
+  const absence=absenceSettled?await absenceSettled():null;
+  if(absence?.ready===false)throw Error('virtus_absence_not_settled');
+  if(await active()){const readiness=await settle();return {ok:true,state:'marketplace_ready',clicked:false,readiness}}
+  found=await visible();if(!found)return {ok:true,state:'marketplace_absent',clicked:false,...(absence?{readiness:absence}:{})};
+ }
  await click();const until=clock()+activationMs;let stable=0;
  while(clock()<until){if(await active()){if(++stable>=2){const readiness=await settle();return {ok:true,state:'marketplace_ready',clicked:true,readiness}}}else stable=0;await sleep(pollMs)}
  throw Error('virtus_marketplace_activation_unconfirmed');
