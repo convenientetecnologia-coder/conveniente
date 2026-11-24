@@ -1,4 +1,17 @@
 'use strict';
+require('node:test')('CT release receipt frees local work but next operation waits for actual remote closure',async()=>{
+ const f=fixture();let reads=0,waits=0;
+ class Client extends f.Client{
+  async release(op,result){await super.release(op,result);return {state:'releasing',releaseAccepted:true,releaseOperationId:op.operationId}}
+  async request(){reads++;return {state:reads===1?'releasing':'released'}}
+  async wait(){waits++}
+ }
+ try{
+  const first=await begin({nome:'fixture',purpose:'publish',...f,Client});await first.possibleSideEffect();first.confirm();await first.close();
+  const journal=fs.readdirSync(f.root).find(n=>n.endsWith('.json'));assert.equal(JSON.parse(fs.readFileSync(path.join(f.root,journal))).phase,'release_requested');
+  const next=await begin({nome:'fixture',purpose:'publish',...f,Client});assert.equal(reads,2);assert.equal(waits,1);assert.notEqual(next.operationId,first.operationId);assert.equal(f.events.filter(e=>e==='possible').length,1);await next.close();
+ }finally{fs.rmSync(f.root,{recursive:true,force:true})}
+});
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),{begin}=require('./accountOperation'),clock=require('./clock');
 function fixture(){const root=fs.mkdtempSync(path.join(os.tmpdir(),'cp2-account-')),events=[],config={eligiblePhoneIds:['p003'],heartbeatMs:15};class Client{
  async acquire(request){events.push('acquire');this.id=request.operationId;request.onWait({state:'queued'});if(!await request.isReady())throw Error('context_lost');return {status:{leaseId:'l',leaseGeneration:1,carrierGeneration:'g'},result:'not_started'}}

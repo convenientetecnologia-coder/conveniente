@@ -17,6 +17,16 @@ async function beginOnce({nome,purpose,intent='observe',hotUntil=0,observationRe
   if(type==='virtus'){const probe=new Client(config);const cap=await probe.capabilities();if(cap.virtusTurns!==true)throw Error('virtus_executor_upgrade_required');if(cap.rotation?.version!==1)throw Error('virtus_rotation_upgrade_required');}
   if(type==='provision'&&(await new Client(config).capabilities()).accountProvision!==true)throw Error('cadastro_proxy_executor_upgrade_required');
   const old=fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):null;
+  if(old?.phase==='release_requested'){
+   const previous=new Client({...config,edgeGeneration:old.edgeGeneration});
+   for(;;){
+    signal?.throwIfAborted();
+    const status=await previous.request('/'+old.operationId,undefined,signal);
+    if(['released','canceled','expired','unknown','failed'].includes(status.state)){old.phase='closed';write(file,old);break;}
+    onWait({state:'waiting_previous_release',operationId:old.operationId});
+    if(previous.wait)await previous.wait(3000,signal);else await new Promise(resolve=>setTimeout(resolve,3000));
+   }
+  }
   if(observationRecovery&&(type!=='virtus'||!['warm','observe','engaged'].includes(intent)))throw Error('cp2_observation_recovery_scope_invalid');
   if(old?.sent&&old.result!=='confirmed'){
    const isolatedVirtus=type==='virtus'&&messageIsolation===true;
@@ -50,10 +60,11 @@ async function beginOnce({nome,purpose,intent='observe',hotUntil=0,observationRe
       write(archive,{count:(history.count||0)+1,last:[...(history.last||[]),{operationId:old.operationId,at:old.at,sent:old.sent,result:old.result}].slice(-32)});
     }else{const archive=file+'.'+old.operationId+'.history';if(!fs.existsSync(archive))fs.copyFileSync(file,archive,fs.constants.COPYFILE_EXCL);else if(!fs.readFileSync(file).equals(fs.readFileSync(archive)))throw Error('cp2_history_conflict')}
   }
-  row=resumeUnaccepted?old:{version:1,nome,type,...(type==='virtus'?{intent,operationSequence:(old?.operationSequence||0)+1}:{}),operationId:crypto.randomUUID(),edgeGeneration:crypto.randomUUID(),phase:'queued',sent:false,result:'not_started',at:Date.now()};persist();client=new Client({...config,edgeGeneration:row.edgeGeneration});
+  row=resumeUnaccepted?old:{version:1,nome,type,...(type==='virtus'?{intent,operationSequence:(old?.operationSequence||0)+1}:{}),operationId:crypto.randomUUID(),edgeGeneration:crypto.randomUUID(),phase:'queued',sent:false,result:'not_started',at:Date.now()};persist();client=new Client({...config,edgeGeneration:row.edgeGeneration,releaseReceipt:true});
   const started=Date.now();
   const acquire=resume=>client.acquire({operationId:row.operationId,accountId:nome,type,...(type==='virtus'?{intent,operationSequence:row.operationSequence,serverAccountCount:rotationAccountCount(nome),hotUntil}:{}),eligiblePhoneIds:config.eligiblePhoneIds,signal,isReady:async()=>{await resume();return isReady()},onWait:status=>{row.phase='queued';persist();waiting.set(nome,{type,intent,operationId:row.operationId,since:started,state:status.state});onWait(status)}});
-  try{op=type==='virtus'?await acquire(async()=>{}):await require('../robeQueue').withoutActiveSlot(acquire)}finally{if(type!=='virtus')clock.addWait(Date.now()-started);waiting.delete(nome)}
+  const hostAcquire=()=>require('./hostAdmission').run(root,()=>type==='virtus'?acquire(async()=>{}):require('../robeQueue').withoutActiveSlot(acquire),{signal,onWait:status=>{waiting.set(nome,{type,intent,operationId:row.operationId,since:started,state:status.state});onWait(status)}});
+  try{op=await hostAcquire()}finally{if(type!=='virtus')clock.addWait(Date.now()-started);waiting.delete(nome)}
 
   row.phase='active';row.lease={leaseId:op.status.leaseId,leaseGeneration:op.status.leaseGeneration,carrierGeneration:op.status.carrierGeneration};persist();
   const route=await client.openRoute(op,{heartbeatMs:config.heartbeatMs});
@@ -61,7 +72,7 @@ async function beginOnce({nome,purpose,intent='observe',hotUntil=0,observationRe
    operationId:row.operationId,hop:{host:'127.0.0.1',port:route.port,user:'',pass:''},
    async possibleSideEffect(stage){if(observationRecovery)throw Error("cp2_readonly_effect_refused");if(row.sent&&!stage)return;if(op.heartbeatError||op.transportError)throw Error('cp2_transport_not_healthy');if(stage&&!require('./operationStages').begin(row,stage))return;row.sent=true;row.result='unknown';persist();await client.possibleSideEffect(op)},
    confirm(stage){if(stage&&row.type!=='publish')stage=undefined;require('./operationStages').confirm(row,Date.now(),stage);op.result='confirmed';persist()},
-   async close(){if(closed)return;closed=true;try{await client.release(op,row.result);row.phase='closed';persist()}finally{unlock()}},
+   async close(){if(closed)return;closed=true;try{const receipt=await client.release(op,row.result);row.phase=receipt?.releaseAccepted===true?'release_requested':'closed';persist()}finally{unlock()}},
    async reconcileClosed(){
     // Read the authoritative closure of this exact operation. Never repeat a
     // browser action or infer delivery from a disconnected socket.

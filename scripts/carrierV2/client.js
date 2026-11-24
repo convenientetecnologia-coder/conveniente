@@ -2,15 +2,15 @@
 const crypto=require('node:crypto'),net=require('node:net'),{once}=require('node:events'),WebSocket=require('ws');
 const {CarrierSession}=require('./session');
 class OperationClient {
-  constructor({baseUrl,serverId,token,edgeGeneration=crypto.randomUUID(),allowLoopbackTest=false,fetchImpl=fetch,requestTimeoutMs=90000,protocolTimeoutMs=60000}){
+  constructor({baseUrl,serverId,token,edgeGeneration=crypto.randomUUID(),allowLoopbackTest=false,fetchImpl=fetch,requestTimeoutMs=90000,protocolTimeoutMs=60000,releaseReceipt=false}){
     const url=new URL(baseUrl);if(url.protocol!=='https:'&&!(allowLoopbackTest&&url.protocol==='http:'&&url.hostname==='127.0.0.1'))throw Error('cp2_tls_required');
     if(!serverId&&!token)throw Error('cp2_server_id_required');
     if(serverId&&!/^[a-f0-9-]{36}$/i.test(serverId))throw Error('cp2_server_id_invalid');
-    this.url=url;this.serverId=serverId;this.token=token;this.edgeGeneration=edgeGeneration;this.fetch=fetchImpl;this.operations=new Map();
+    this.url=url;this.serverId=serverId;this.token=token;this.edgeGeneration=edgeGeneration;this.fetch=fetchImpl;this.operations=new Map();this.releaseReceipt=releaseReceipt===true;
     if(!Number.isSafeInteger(requestTimeoutMs)||requestTimeoutMs<1||!Number.isSafeInteger(protocolTimeoutMs)||protocolTimeoutMs<1)throw Error('invalid_client_timeout');
     this.requestTimeoutMs=requestTimeoutMs;this.protocolTimeoutMs=protocolTimeoutMs;
   }
-  headers(){return {'content-type':'application/json','x-edge-generation':this.edgeGeneration,...(this.serverId?{'x-server-id':this.serverId}:{authorization:'Bearer '+this.token})}}
+  headers(){return {'content-type':'application/json','x-edge-generation':this.edgeGeneration,...(this.releaseReceipt?{'x-cp2-release-receipt':'1'}:{}),...(this.serverId?{'x-server-id':this.serverId}:{authorization:'Bearer '+this.token})}}
   async request(path,body,signal){
     const url=new URL(this.url);url.pathname=this.url.pathname.replace(/\/$/,'')+'/v2/operations'+path;
     const response=await this.fetch(url,{method:body===undefined?'GET':'POST',headers:this.headers(),body:body===undefined?undefined:JSON.stringify(body),signal:signal?AbortSignal.any([signal,AbortSignal.timeout(this.requestTimeoutMs)]):AbortSignal.timeout(this.requestTimeoutMs)});
@@ -123,7 +123,8 @@ class OperationClient {
         if(attempt===2)throw error;await this.wait(1000);
       }
     }
-    if(!['released','canceled','expired'].includes(status.state))throw Error('cp2_release_unconfirmed');
+    const accepted=this.releaseReceipt&&status.state==='releasing'&&status.releaseAccepted===true&&status.releaseOperationId===op.operationId;
+    if(!accepted&&!['released','canceled','expired'].includes(status.state))throw Error('cp2_release_unconfirmed');
     this.operations.delete(op.operationId);return status;
     });
   }

@@ -2,6 +2,13 @@
 const test=require('node:test'),assert=require('node:assert/strict'),crypto=require('node:crypto');
 const {OperationClient}=require('./client');
 const uuid=()=>crypto.randomUUID();
+test('opt-in release accepts durable CT responsibility without inventing remote closure',async()=>{
+ const c=client();c.releaseReceipt=true;const op={operationId:uuid(),status:{},result:'unknown'};
+ c.request=async()=>({state:'releasing',releaseAccepted:true,releaseOperationId:op.operationId,businessResult:'unknown'});
+ const receipt=await c.release(op);assert.equal(receipt.state,'releasing');assert.equal(receipt.businessResult,'unknown');
+ c.request=async()=>({state:'releasing',releaseAccepted:true,releaseOperationId:uuid()});await assert.rejects(c.release(op),/release_unconfirmed/);
+ c.releaseReceipt=false;c.request=async()=>({state:'releasing',releaseAccepted:true,releaseOperationId:op.operationId});await assert.rejects(c.release(op),/release_unconfirmed/);
+});
 test('release reconciliation error checks authoritative terminal without repeating business',async()=>{
  const c=client(),op={operationId:uuid(),status:{},result:'confirmed'},paths=[];
  c.request=async path=>{paths.push(path);if(path.endsWith('/release'))throw Error('control_requires_reconciliation');return {state:'released',businessResult:'confirmed'}};
