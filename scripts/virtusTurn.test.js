@@ -1,4 +1,20 @@
 'use strict';const test=require('node:test'),assert=require('node:assert/strict');const {VirtusTurn}=require('./virtusTurn');
+test('lost release keeps the browser offline and resumes only after authoritative closure',async()=>{
+ let terminal=false,acquired=0;const lease={hop:{},snapshot:()=>({healthy:true}),close:async()=>{throw Error('control_requires_reconciliation')},reconcileClosed:async()=>terminal};
+ const f=fixture({acquire:async()=>{acquired++;return lease}});
+ await assert.rejects(f.turn.run('observe',async()=>({ok:true})),/reconciliation/);
+ assert.equal(await f.turn.reconcileTransport(),false);assert.equal(f.turn.closed,true);assert.equal(acquired,1);
+ terminal=true;assert.equal(await f.turn.reconcileTransport(),true);assert.equal(f.turn.state,'offline');assert.equal(f.turn.closed,false);assert.equal(acquired,1);
+});
+test('late action must settle before a recovered transport can run another visit',async()=>{
+ let settle,healthy=true;const f=fixture({acquire:async()=>({hop:{},snapshot:()=>({healthy}),close:async()=>{}})});
+ const keep=setTimeout(()=>{},2000);
+ try{
+  const run=f.turn.run('observe',async()=>{healthy=false;await new Promise(r=>settle=r)});
+  await assert.rejects(run,/transport_lost/);assert.equal(await f.turn.reconcileTransport(),false);
+  settle();await new Promise(setImmediate);assert.equal(await f.turn.reconcileTransport(),true);
+ }finally{clearTimeout(keep)}
+});
 function fixture(overrides={}){const calls=[],rail={flip:h=>calls.push(h?'connect':'disconnect'),trafficSnapshot:()=>({directUp:0,directDown:0}),close:async()=>calls.push('rail_closed')};const lease={operationId:'fixture',hop:{port:1},snapshot:()=>({healthy:true}),close:async()=>calls.push('release')};return {calls,turn:new VirtusTurn({rail,acquire:async()=>{calls.push('acquire');return lease},prove:async()=>calls.push('prove'),...overrides})}}
 test('sem cadeira não executa ação; desconecta antes de devolver capacidade',async()=>{const f=fixture();await f.turn.run('observe',async()=>{f.calls.push('collect');return {ok:true}});assert.deepEqual(f.calls,['acquire','connect','prove','collect','disconnect','release']);assert.equal(f.turn.snapshot().state,'offline');assert.ok(f.turn.snapshot().lastCheckedAt)});
 test('falha da prova não deixa ação usar rede e ainda encerra lease',async()=>{const f=fixture({prove:async()=>{throw Error('proof_failed')}});await assert.rejects(f.turn.run('reply',async()=>f.calls.push('send')),/proof_failed/);assert.equal(f.calls.includes('send'),false);assert.equal(f.calls.at(-1),'release');assert.equal(f.turn.snapshot().state,'offline')});

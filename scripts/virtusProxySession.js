@@ -27,16 +27,22 @@ async function create({nome,onState=()=>{},dependencies={}}){
   const boot=()=>{const task=turn.run('warm',async()=>{bootReady();await bootGate;return lastInbox||{ok:false,state:'incomplete',reason:'startup_inbox_unconfirmed'}});task.catch(bootReject);return ready};
   let browser=null,timer=null,stopped=false,lastNetworkAt=0,lastSyncNetworkAt=0,connectedAt=Date.now(),observerBusy=false,observerOptions=null,observerLastTickAt=0,lastObserveAttemptAt=0,observerSkipReason=null,observerVersion=0,startupFinished=false,healthCheck=null,lastInbox=null,activeLease=null,expectedSend=null,outgoingEvidence=null,humanHeld=false,humanTimer=null,humanResolve=null,humanTask=null;
   const deliveryLedger=dependencies.deliveryLedger||require("./virtusDeliveryLedger");
-  let closedBrowserTimer=null,recoveringClosedBrowser=false;
+  let closedBrowserTimer=null,recoveringClosedBrowser=false,nextTransportRecoveryAt=0,transportRecoveryDelay=2000;
   let lastDocumentNavigation=null,documentNavigations=0,plannedNavigationReason=null,lastBootGate=null;
   const activity=new Activity();const inboundByThread=new Map();let lastReplyTiming=null;const burst=[];let visitIntent=null,visitReplied=false;
  const api={turn,proxyServer:'127.0.0.1:'+port,boot,
    attach(value){
     browser=value;browser.__ctVirtusProxy=api;
     closedBrowserTimer=(dependencies.setClosedBrowserInterval||setInterval)(async()=>{
-      if(!turn.closed||stopped||humanHeld||recoveringClosedBrowser||!browser?.isConnected?.())return;
+      if(!turn.closed||stopped||humanHeld||recoveringClosedBrowser||Date.now()<nextTransportRecoveryAt||!browser?.isConnected?.())return;
       recoveringClosedBrowser=true;
-      try{await api.close();await browser.close()}catch(error){onState({...api.snapshot(),error:'virtus_closed_browser_recovery:'+String(error.message||error)})}
+      try{
+       const recovered=await turn.reconcileTransport();
+       if(recovered)lastInbox={ok:false,state:'incomplete',reason:'transport_reconciled_requires_inbox_check'};
+       transportRecoveryDelay=recovered?2000:Math.min(30000,transportRecoveryDelay*2);
+       nextTransportRecoveryAt=Date.now()+transportRecoveryDelay;
+       onState({...api.snapshot(),transportRecovery:recovered?'reconciled':'waiting_authoritative_closure'});
+      }catch(error){transportRecoveryDelay=Math.min(30000,transportRecoveryDelay*2);nextTransportRecoveryAt=Date.now()+transportRecoveryDelay;onState({...api.snapshot(),error:'virtus_transport_reconciliation:'+String(error.message||error)})}
       finally{recoveringClosedBrowser=false}
     },2000);closedBrowserTimer.unref?.();
     const watch=page=>{
@@ -193,7 +199,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
     const tick=async()=>{
       const options=observerOptions;observerLastTickAt=Date.now();
       observerSkipReason=stopped||turn.closed?'closed':humanHeld?'human':observerBusy?'busy':!browser?.isConnected()?'browser_disconnected':!options?'unregistered':!options.canObserve()?'runtime_guard':null;
-      if(observerSkipReason==='closed'){api.stopObserver();if(!stopped&&!humanHeld&&browser?.isConnected()){setTimeout(()=>browser.close().catch(()=>{}),0)}return}
+      if(observerSkipReason==='closed'){if(stopped)api.stopObserver();return}
       if(observerSkipReason)return;
       const needsStartupRepair=!lastInbox||['incomplete','recovering_browser_document'].includes(lastInbox.state);
       const target=activity.snapshot().engaged?rotationPolicy?.hotIntervalMs:rotationPolicy?.coldIntervalMs;

@@ -2,6 +2,11 @@
 const test=require('node:test'),assert=require('node:assert/strict'),crypto=require('node:crypto');
 const {OperationClient}=require('./client');
 const uuid=()=>crypto.randomUUID();
+test('release reconciliation error checks authoritative terminal without repeating business',async()=>{
+ const c=client(),op={operationId:uuid(),status:{},result:'confirmed'},paths=[];
+ c.request=async path=>{paths.push(path);if(path.endsWith('/release'))throw Error('control_requires_reconciliation');return {state:'released',businessResult:'confirmed'}};
+ const result=await c.release(op);assert.equal(result.state,'released');assert.equal(paths.length,2);assert.equal(paths.some(p=>/ready|side-effect/.test(p)),false);
+});
 test('release com resposta perdida consulta terminal sem repetir ação de negócio',async()=>{
  const c=client(),paths=[];const op={operationId:uuid(),status:{leaseId:'l',leaseGeneration:1,carrierGeneration:uuid()},result:'confirmed'};
  c.request=async path=>{paths.push(path);if(path.endsWith('/release')){const error=Error('carrier_ack_timeout');error.retryable=true;throw error}return {state:'released',businessResult:'confirmed'}};

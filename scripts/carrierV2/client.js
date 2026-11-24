@@ -116,7 +116,7 @@ class OperationClient {
     let status;
     for(let attempt=0;attempt<3;attempt++){
       try{status=await this.controlRequest('/'+op.operationId+'/release',{...this.lease(op.status),businessResult:result});break}catch(error){
-        if(!error.retryable&&error.name!=='TimeoutError'&&error.name!=='TypeError')throw error;
+        if(!error.retryable&&error.name!=='TimeoutError'&&error.name!=='TypeError'&&error.message!=='control_requires_reconciliation')throw error;
         // Retrying closure is safe; never replay the business action. A GET
         // may show the terminal ACK already consumed after HTTP response loss.
         try{const observed=await this.request('/'+op.operationId);if(['released','canceled','expired'].includes(observed.state)){status=observed;break}}catch{}
