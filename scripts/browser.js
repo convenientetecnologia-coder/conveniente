@@ -3306,6 +3306,7 @@ async function detectMessengerPinModal(page) {
 }
 
 async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries = 2 } = {}) {
+  try{require('./interactionLease').assert(page)}catch(error){return {ok:false,error:String(error.message||error),dismissed:false,pinEntered:false}};
   const fs = require('fs');
   const path = require('path');
   const MSGPIN_LOG = path.join(__dirname, '..', 'dados', 'messenger_pin.jsonl');
@@ -3320,6 +3321,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   const DEFAULT_PIN = String(process.env.MESSENGER_PIN || '882584').trim() || '882584';
 
   async function clickCloseTrusted() {
+    require('./interactionLease').assert(page);
     try {
       const h =
         (await page.$('div[role="dialog"] [aria-label="Fechar"], div[role="dialog"] [aria-label*="Fechar"], div[role="dialog"] [aria-label*="Close"]')) ||
@@ -3331,6 +3333,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   }
 
   async function clickNaoRestaurarTrusted() {
+    require('./interactionLease').assert(page);
     try {
       // DOM real: há botão decoy aria-disabled/aria-hidden + botão real tabindex=0.
       // Só clicar no habilitado.
@@ -3361,6 +3364,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   }
 
   async function clickRestoreSyncOkTrusted() {
+    require('./interactionLease').assert(page);
     const marker = 'data-conveniente-restore-sync-ok';
     try {
       const marked = await page.evaluate((markerAttr) => {
@@ -3446,6 +3450,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   }
 
   async function clickCreatePinButton() {
+    require('./interactionLease').assert(page);
     try {
       const clicked = await page.evaluate(() => {
         const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
@@ -3559,6 +3564,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   }
 
   async function clickMoreOptionsThenSkip() {
+    require('./interactionLease').assert(page);
     // Alguns modais de “Crie um PIN…” não mostram “Criar PIN” e sim “Mais opções”.
     // Estratégia: clicar "Mais opções" e depois "Agora não"/"Pular"/"No momento não".
     try {
@@ -3859,6 +3865,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   // Sem clique: foca o input oficial. Na confirmação, o Facebook mantém o
   // input antigo no DOM (às vezes com o mesmo id), então aria/active mandam.
   async function focusOfficialCreatePinInput({ preferConfirmation = false } = {}) {
+    require('./interactionLease').assert(page);
     try {
       const focused = await page.evaluate((preferConfirm) => {
         const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
@@ -3995,6 +4002,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   }
 
   async function fillSplitPinInputsWithoutClicks(pinValue = DEFAULT_PIN, { round = 1 } = {}) {
+    require('./interactionLease').assert(page);
     try {
       const digits = String(pinValue || '').trim();
       if (!/^\d{6}$/.test(digits)) return { ok: false, error: 'pin_value_invalid' };
@@ -4113,6 +4121,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       await sleep(250);
       if (hasOfficial || !hasSplit) {
         for (const ch of digits) {
+          require('./interactionLease').assert(page);
           try { await page.keyboard.type(String(ch), { delay: perDigitDelayMs }).catch(()=>{}); } catch {}
           await sleep(betweenDigitPauseMs);
         }
@@ -4460,6 +4469,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   }
 
   async function focusOfficialPinInputAnywhere() {
+    require('./interactionLease').assert(page);
     try {
       return await page.evaluate(() => {
         const norm = s => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
@@ -4549,10 +4559,17 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
       await sleep(350);
 
       // Cadência humana: 8 _ 8 _ 2 _ 5 _ 8 _ 4
-      for (const ch of digits) {
-        try { await page.keyboard.type(String(ch), { delay: 420 }).catch(()=>{}); } catch {}
-        await sleep(220);
-      }
+      const focused=await page.evaluateHandle(()=>document.activeElement),input=focused.asElement();
+      if(!input){await focused.dispose();return {ok:false,error:'pin_input_changed_before_typing'}};
+      try{
+       for(let index=0;index<digits.length;index++){
+        require('./interactionLease').assert(page);
+        const target=await page.evaluate((el,prefix)=>!!el?.isConnected&&document.activeElement===el&&!el.disabled&&(el.id==='mw-numeric-code-input-prevent-composer-focus-steal'||Number(el.getAttribute('maxlength'))===6&&/pin|one-time-code/i.test([el.getAttribute('aria-label'),el.getAttribute('autocomplete')].join(' ')))&&String(el.value||'')===prefix,input,digits.slice(0,index));
+        if(!target)return {ok:false,error:'pin_input_focus_or_value_changed',typedDigits:index};
+        await page.keyboard.type(digits[index],{delay:420});await sleep(220);
+       }
+      }finally{await focused.dispose().catch(()=>{})}
+      require('./interactionLease').assert(page);
       await sleep(1400);
 
       const after = await detectMessengerPinModal(page).catch(() => ({ present: false }));
@@ -4616,7 +4633,7 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
   async function dismissPinInputAfterFailures() {
     // Contrato: Esc e/ou X → "Continuar sem restaurar?" → "Não restaurar mensagens" (habilitado).
     pinLog({ event: 'pin_restore_fallback_begin' });
-    try { await page.keyboard.press('Escape').catch(()=>{}); } catch {}
+    try { require('./interactionLease').assert(page);await page.keyboard.press('Escape').catch(()=>{}); } catch {}
     await sleep(900);
     let det = await detectMessengerPinModal(page).catch(() => ({ present: false }));
     if (det && det.kind === 'pin_input') {
@@ -4869,15 +4886,13 @@ async function tryDismissMessengerPinModal(page, { logPrefix='[PIN]', maxTries =
           pinLog({
             event: 'pin_enter_attempt',
             attempt,
-            round,
-            pin: DEFAULT_PIN,
-            pinIncorrectBefore: !!det.pinIncorrect,
+            round,            pinIncorrectBefore: !!det.pinIncorrect,
             hasOfficialPinInput: !!det.hasOfficialPinInput
           });
           const enterResult = await tryEnterPin(DEFAULT_PIN, round);
           if (!enterResult.ok) {
             pinLog({ event: 'pin_enter_failed', attempt, round, error: enterResult.error || null });
-            continue;
+            return {ok:false,error:enterResult.error||'pin_input_unconfirmed',dismissed:false,pinEntered:false};
           }
           pinLog({
             event: 'pin_entered',
@@ -8173,86 +8188,18 @@ async function _maybeClickUseAnotherProfile(page) {
  */
 async function tryClickAymhContinuar(page) {
   try {
-    if (!page || (typeof page.isClosed === 'function' && page.isClosed())) {
-      return { ok: false, error: 'page_closed' };
-    }
-    const r = await page.evaluate(() => {
-      function norm(s) {
-        try { return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
-        catch { return String(s || '').toLowerCase(); }
-      }
-      const bodyTxt = norm(document.body ? (document.body.innerText || document.body.textContent || '') : '');
-      const hasUsarOutroPerfil =
-        bodyTxt.includes('usar outro perfil') || bodyTxt.includes('use another profile');
-      const hasEmail = !!document.querySelector('input[name="email"], input#email, input[type="email"]');
-      const hasPass = !!document.querySelector('input[name="pass"], input#pass, input[type="password"]');
-      if (!hasUsarOutroPerfil) return { ok: false, error: 'not_aymh_chooser' };
-      if (hasEmail || hasPass) return { ok: false, error: 'already_has_login_inputs' };
-
-      const candidates = Array.from(document.querySelectorAll('[role="button"],button,a')).slice(0, 1600);
-      let best = null;
-      for (const el of candidates) {
-        const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
-        const txt = norm(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-        if (/^continuar\s+como\b/.test(aria) || /^continue\s+as\b/.test(aria)) continue;
-        if (/^continuar\s+como\b/.test(txt) || /^continue\s+as\b/.test(txt)) continue;
-        const isContinuar =
-          aria === 'continuar' || txt === 'continuar' || aria === 'continue' || txt === 'continue' ||
-          /^continuar(\s|$)/.test(aria) || /^continue(\s|$)/.test(aria) ||
-          /^continuar(\s|$)/.test(txt) || /^continue(\s|$)/.test(txt);
-        if (!isContinuar) continue;
-        const ariaDisabled = el.getAttribute && el.getAttribute('aria-disabled') === 'true';
-        const tabIndex = el.getAttribute && el.getAttribute('tabindex') === '-1';
-        if (ariaDisabled || tabIndex) continue;
-        const r0 = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
-        if (!r0 || r0.width < 2 || r0.height < 2) continue;
-        best = el;
-        // Preferência: aria "Continuar …" (botão principal do card) sobre txt genérico
-        if (aria && /^continuar(\s|$)/.test(aria)) break;
-      }
-      if (!best) return { ok: false, error: 'continuar_not_found' };
-      try { best.scrollIntoView({ block: 'center', inline: 'center' }); } catch {}
-      const rect = best.getBoundingClientRect ? best.getBoundingClientRect() : null;
-      return {
-        ok: true,
-        x: rect ? (rect.left + rect.width / 2) : null,
-        y: rect ? (rect.top + rect.height / 2) : null,
-        label: (best.getAttribute && best.getAttribute('aria-label')) || ''
-      };
-    }).catch((e) => ({ ok: false, error: (e && e.message) || 'evaluate_failed' }));
-
-    if (!(r && r.ok)) {
-      return { ok: false, error: (r && r.error) ? String(r.error) : 'click_failed' };
-    }
-    // Um clique só: mouse real quando há coords; senão fallback DOM click.
-    if (typeof r.x === 'number' && typeof r.y === 'number') {
-      try { await page.mouse.click(r.x, r.y, { delay: 28 }).catch(() => {}); } catch {}
-    } else {
-      try {
-        await page.evaluate(() => {
-          function norm(s) {
-            try { return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(); }
-            catch { return String(s || '').toLowerCase(); }
-          }
-          const candidates = Array.from(document.querySelectorAll('[role="button"],button,a')).slice(0, 1600);
-          for (const el of candidates) {
-            const aria = norm(el.getAttribute && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
-            const txt = norm(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
-            if (/^continuar\s+como\b/.test(aria) || /^continue\s+as\b/.test(aria)) continue;
-            if (aria === 'continuar' || txt === 'continuar' || /^continuar(\s|$)/.test(aria) || /^continuar(\s|$)/.test(txt)) {
-              try { el.click(); } catch {}
-              return true;
-            }
-          }
-          return false;
-        });
-      } catch {}
-    }
-    await sleep(1200);
-    return { ok: true, label: r.label || '' };
-  } catch (e) {
-    return { ok: false, error: (e && e.message) ? String(e.message) : 'tryClickAymhContinuar_failed' };
-  }
+    if(!page||page.isClosed?.())return {ok:false,error:'page_closed'};
+    require('./interactionLease').assert(page);
+    const chooser=await page.evaluate(()=>{
+      const text=String(document.body?.innerText||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase();
+      return {saved:/usar outro perfil|use another profile/.test(text),inputs:!!document.querySelector('input[name="email"],input#email,input[type="email"],input[name="pass"],input#pass,input[type="password"]')};
+    });
+    if(!chooser.saved)return {ok:false,error:'not_aymh_chooser'};
+    if(chooser.inputs)return {ok:false,error:'already_has_login_inputs'};
+    const result=await require('./interactionReadiness').clickControl(page,['Continuar','Continue'],{exact:true,timeoutMs:30000});
+    if(!result.ok)return {ok:false,error:result.reason||'continuar_not_found'};
+    await sleep(1200);return {ok:true,label:'Continuar'};
+  }catch(error){return {ok:false,error:String(error.message||error)}}
 }
 
 async function _maybeClickCloseX(page) {
@@ -8306,6 +8253,11 @@ async function classifyFacebookLoginSurface(page) {
   if (reason.includes('checkpoint_back_to_facebook')) {
     return { kind: 'comecar', lr };
   }
+  // A Messenger PIN can also be type=password. Never type the account
+  // password into that field or count it as a failed login attempt.
+  const messengerPin=await detectMessengerPinModal(page);
+  if(messengerPin?.probeFailed)return {kind:'probe_failed',error:'messenger_pin_probe_failed',lr};
+  if(messengerPin?.present)return {kind:'messenger_pin',pin:messengerPin,lr};
   if (!(lr && lr.loginRequired) && !(surface && surface.hasPass)) return { kind: 'in', lr };
   if (reason.includes('aymh') || reason.includes('continuar') || reason.includes('pre_screen')) return { kind: 'continuar', lr };
   if (surface && surface.hasPass && !surface.hasEmail) return { kind: 'password', lr };
@@ -8332,6 +8284,12 @@ async function driveFacebookLogin(page, { login, password, nome, maxPerStep = 3 
       const savedIn = await require('./pcSessionLogin.js').persistFreshSessionCookies(page, nome);
       if (savedIn && savedIn.ok) return { ok: true, steps };
       return { ok: false, error: (savedIn && savedIn.reason) || 'not_in', steps };
+    }
+    if(kind==='probe_failed')return {ok:false,error:s.error||'login_surface_probe_failed',steps};
+    if(kind==='messenger_pin'){
+      const restored=await tryDismissMessengerPinModal(page,{logPrefix:'[LOGIN][PIN]',maxTries:1});
+      if(!restored?.ok)return {ok:false,error:restored?.error||'messenger_pin_pending',steps};
+      continue;
     }
     if (kind === 'terminal') return { ok: false, terminal: s.terminal || 'human', error: s.terminal || 'human', steps };
     if (kind === 'hacked_stop') return { ok: false, terminal: 'hacked_review', error: 'hacked_review', steps };

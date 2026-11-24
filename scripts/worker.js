@@ -14705,7 +14705,7 @@ const handlers = {
       let prevConfigurando = false;
       try {
       // 0.5) se este login_remediate foi explicitamente disparado (operador), pode limpar humanHold para permitir execução.
-      if(isAccountProvisioningPending(nome)||/^stock_provision/i.test(String(operator||''))){const prepared=await prepareCadastroBrowser(nome,operator);cadastroBrowser=prepared.browser;}
+      if(isAccountProvisioningPending(nome)||/^stock_provision/i.test(String(operator||''))||require('./serverConfig').readServerConfigEffective().cadastro?.proxyEnabled===true){const prepared=await prepareCadastroBrowser(nome,operator);cadastroBrowser=prepared.browser;}
       if (overrideHumanHold) {
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
@@ -20688,7 +20688,7 @@ async function nurseTick() {
         if(want.active===true&&!ctrl.virtus&&!ctrl._virtusStarting&&!ctrl.configurando&&!ctrl.humanControl&&!want.humanHold&&!isRobeBusy(nome)){
           ctrl._virtusStarting=true;
           const initialize=()=>startVirtusByEngine(ctrl.browser,nome,autoMode,{epoch:ctrl.virtusEpoch||0});
-          const start=proxySession.snapshot().offlinePlanned?proxySession.run(proxySession.snapshot().lastCheckedAt?'observe':'warm',initialize):Promise.resolve().then(initialize);
+          const start=Promise.resolve().then(initialize); // runtime startup owns its proxy turn; never nest another turn here
           ctrl.virtus=start;ctrl.trabalhando=true;
           start.catch(error=>{ctrl.virtus=null;ctrl.trabalhando=false;try{logger.error('[VIRTUS_PROXY][START_FAILED]',{nome,error:error.message})}catch{}}).finally(()=>{ctrl._virtusStarting=false});
         }
@@ -21848,7 +21848,7 @@ async function nurseTick() {
       // Curador enterprise: PIN do Messenger / "Continuar sem restaurar?"
       try {
         // Só tenta curar quando NÃO está configurando e não está com Robe executando (evita interferir no fluxo de postagem)
-        if (ctrl && !ctrl.configurando && !(robeMeta[nome] && robeMeta[nome].emExecucao === true) && ctrl.browser && typeof ctrl.browser.pages === 'function') {
+        if (ctrl && !ctrl.configurando && !(robeMeta[nome] && robeMeta[nome].emExecucao === true) && ctrl.browser && !ctrl.browser.__ctVirtusProxy && typeof ctrl.browser.pages === 'function') {
           robeMeta[nome] = robeMeta[nome] || {};
           const nowp = Date.now();
           const cd = Number(robeMeta[nome].pinCooldownUntil || 0) || 0;

@@ -1,7 +1,9 @@
 'use strict';
 function isTransient(error) {
  const value=String(error||'');
+ if(/^interaction_without_healthy_proxy_turn(?::|$)|^(?:mobile_transport_not_healthy|virtus_transport_unhealthy|virtus_transport_lost_during_turn)$/.test(value))return true;
   if(/^(?:proxy_index_unavailable|proxy_index_queue_full|proxy_job_not_found|proxy_worker_unavailable|proxy_job_canceled|proxy_index_job_canceled)$/.test(value))return true;
+ if(/^(?:pin_input_changed_before_typing|pin_input_focus_or_value_changed|pin_input_not_found|messenger_pin_probe_failed|login_surface_probe_failed)$/.test(value))return true;
  if(value==='account_security:security_step_unconfirmed'||value==='fetch failed')return true;
  if(/^(maintenance|carrier_maintenance|operation_control_in_flight|carrier_ack_timeout)$/.test(value))return true;
  if(value.startsWith('pc_login_navigation_failed:'))return true;

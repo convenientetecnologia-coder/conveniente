@@ -19,3 +19,8 @@ test('retry survives restart with bounded delay and never retries identity or au
  const queued={id:'same',payload:{actions:[{stockAccountId:2}]}};
  assert.equal(retryPlan(queued,{results:[{type:'stock_provision',details:{results:[{stockAccountId:2,profileName:'cidade-1',ok:false,error:'carrier_unavailable'}]}}]},1000),null);
 });
+
+test('lost interaction lease is a technical deferral, not invalid credentials',()=>{
+ const retry=require('./stockProvisionRetry');for(const e of ['interaction_without_healthy_proxy_turn:cadastro','interaction_without_healthy_proxy_turn:virtus','mobile_transport_not_healthy','virtus_transport_lost_during_turn'])assert.equal(retry.isTransient(e),true,e);
+ for(const e of ['still_login_required:login_form','invalid_cookie','checkpoint_captcha'])assert.equal(retry.isTransient(e),false,e);
+});

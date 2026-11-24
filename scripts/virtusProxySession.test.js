@@ -135,3 +135,11 @@ test('incomplete bootstrap is an explicit deferred result, never a ready result'
  const {session}=await operationalFixture();await session.boot();session.noteInbox({ok:false,state:'incomplete',reason:'document_loading'});session.finishBoot();await session.turn.tail;
  assert.equal(session.snapshot().bootstrapOutcome.ok,false);assert.equal(session.snapshot().bootstrapOutcome.reason,'document_loading');await session.close();
 });
+
+test('real worker nurse startup does not nest a second turn inside runtime initialization',async()=>{
+ const {session}=await operationalFixture();session.finishBoot();
+ const fs=require('fs'),vm=require('vm'),source=fs.readFileSync(require.resolve('./worker'),'utf8');
+ const a=source.indexOf('          const initialize=()=>startVirtusByEngine(ctrl.browser,nome,autoMode,'),b=source.indexOf('          ctrl.virtus=start;',a);assert.ok(a>0&&b>a);
+ const start=vm.runInNewContext('(function(){'+source.slice(a,b)+'return start})()',{ctrl:{browser:{}},nome:'test',autoMode:{},proxySession:session,Promise,startVirtusByEngine:()=>session.withRuntimeStartup(async()=>{session.noteInbox({ok:true,state:'marketplace_ready'});return 'initialized'})});
+ const result=await Promise.race([start,new Promise((_,reject)=>setTimeout(()=>reject(Error('nested_turn_deadlock')),1000))]);assert.equal(result,'initialized');assert.ok(session.snapshot().lastCheckedAt>0);await session.close();
+});
