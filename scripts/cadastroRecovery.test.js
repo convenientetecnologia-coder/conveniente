@@ -37,7 +37,15 @@ test('rejected cookie jar requires a known identity or assigned-stock reference'
 });
 test('version three permits the remaining budget once, without resetting real password attempts',()=>{
  const old={...want,credentialRecoveryVersion:1,provisioningResult:{state:'failed',error:'fetch failed'}};
- assert.equal(eligible(old,manifest),true);assert.equal(eligible({...old,credentialRecoveryVersion:3},manifest),false);
+ assert.equal(eligible(old,manifest),true);assert.equal(eligible({...old,credentialRecoveryVersion:3},manifest),true);assert.equal(eligible({...old,credentialRecoveryVersion:4},manifest),false);
  assert.equal(eligible(old,{...manifest,accountFlags:{loginAttemptCount:2}}),false);
  assert.equal(eligible({...want,credentialRecoveryVersion:2},manifest),true);
+});
+
+test('technical anti-loop failures without a provisioning result get one bounded recovery; restrictions do not',async()=>{
+ const m={...manifest,stockAccountId:42,accountFlags:{loginRequired:true,loginReason:'aymh_continue',loginRemediateFailed:true,loginRemediateFailedReason:'kill_guard_until',loginAttemptCount:0}};
+ let d={perfis:{a:{active:false,credentialRecoveryVersion:3}}};const opts={read:async()=>m,update:async f=>{d=f(d)}};
+ assert.deepEqual(await recover({...opts,snapshot:structuredClone(d)}),['a']);assert.equal(d.perfis.a.credentialRecoveryVersion,4);assert.equal(d.perfis.a.provisioningPending,true);assert.equal(d.perfis.a.credentialRecoveryPreviousResult.error,'kill_guard_until');
+ assert.equal(eligible({active:false},{...m,accountFlags:{...m.accountFlags,loginReason:'checkpoint_captcha',captchaCheckpoint:true}}),false);
+ assert.equal(eligible({active:false},{...m,accountFlags:{...m.accountFlags,loginAttemptCount:2}}),false);
 });

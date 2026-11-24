@@ -1,0 +1,4 @@
+'use strict';
+function eligible(flags){const f=flags||{};return f.loginRemediateFailed===true&&!/captcha|checkpoint|identity|two_factor|2fa/.test(String(f.loginReason||''))&&require('./stockProvisionRetry').isTransient(f.loginRemediateFailedReason)&&!['banned','captchaCheckpoint','identityRequired','identitySubmitted','twoFactor','idVirtus','whatsappConfirm','accountCodePhone','accountCodeWhatsapp','marketplaceDisabled','appealSubmitted'].some(k=>f[k]===true)}
+function repair(manifest,now=Date.now()){if(!eligible(manifest?.accountFlags))return manifest;const m={...manifest,accountFlags:{...manifest.accountFlags}},f=m.accountFlags;m.loginTechnicalRecovery={at:now,previousReason:f.loginRemediateFailedReason};for(const k of ['loginRemediateFailed','loginRemediateFailedAt','loginRemediateFailedReason','loginRemediateFailedSource','loginRemediateFailedStage'])delete f[k];return m}
+module.exports={eligible,repair};

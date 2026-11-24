@@ -1913,7 +1913,8 @@ async function readAccountFlags(nome) {
       return (hit.flags && typeof hit.flags === 'object') ? hit.flags : {};
     }
     const m = await manifestStore.read(n).catch(() => null);
-    const flags = (m && m.accountFlags) ? m.accountFlags : {};
+    let flags = (m && m.accountFlags) ? m.accountFlags : {};
+    if(require('./loginTechnicalRecovery').eligible(flags)){const fixed=await manifestStore.update(n,current=>require('./loginTechnicalRecovery').repair(current));const fresh=fixed&&fixed.accountFlags?fixed:await manifestStore.read(n);flags=fresh?.accountFlags||flags;}
     __accountFlagsCache.set(n, { at: now, flags });
     // Bound simples: evita crescimento infinito em hosts com muitos perfis históricos.
     if (__accountFlagsCache.size > 800) {
@@ -2159,6 +2160,10 @@ function refuseOutsideCadastroMark(nome) {
     try { provisionAudit.append({ ts: now, event: 'cadastro_mark_refused', nome: String(nome || '') }); } catch {}
   }
   return true;
+}
+
+async function recordLoginFlow(nome,event){
+ await manifestStore.update(nome,m=>({...m,loginFlow:require('./loginFlowState').evolve(m?.loginFlow,event)}));
 }
 
 async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
@@ -8773,7 +8778,7 @@ async function activateOnce(nome, source = '', operator = '', {networkPurpose='a
     // Ultra enterprise: em fechamentos planejados (ex.: login_remediate pós-sucesso),
     // não bloquear reabertura imediata com kill_guard. Kill guard é anti-flap para falhas.
     const _source = String(source || '');
-    const _bypassKillGuard = /login_remediate_post_success/i.test(_source);
+    const _bypassKillGuard = /^(?:login_remediate_post_success|cadastro_network_transition)$/i.test(_source);
     if (killGuardActive(nome) && !_bypassKillGuard) {
       await reportAction(nome, 'guard_skip_open', 'Abertura negada por kill_guard_until');
       return { ok:false, error:"kill_guard_until" };
@@ -12534,12 +12539,14 @@ async function finishAccountProvisioningResult(nome,result){
 async function prepareCadastroBrowser(nome, operator) {
   const proxy=require('./serverConfig').readServerConfigEffective().cadastro?.proxyEnabled===true;
   const current=controllers.get(nome),expected=proxy?'proxy':'direct';
+  let plannedTransition=false;
   if(current?.browser?.isConnected?.()&&current.browser.__ctCadastroNetworkMode===expected){current.browser.__ctCadastroProxy?.assertHealthy();return current;}
   if(current?.browser?.isConnected?.()){
     await stopVirtus(nome,{configure:true});
     await hardCloseController(nome,current,{reason:'cadastro_network_mode',allowKillUserDataDir:false});
+    plannedTransition=true;
   }
-  const opened=await activateOnce(nome,'cadastro_prepare',operator,{networkPurpose:'cadastro'});
+  const opened=await activateOnce(nome,plannedTransition?'cadastro_network_transition':'cadastro_prepare',operator,{networkPurpose:'cadastro'});
   if(opened?.ok!==true)throw Error(opened?.error||'cadastro_browser_open_failed');
   const ready=controllers.get(nome);
   if(!ready?.browser?.isConnected?.()||ready.browser.__ctCadastroNetworkMode!==expected)throw Error('cadastro_network_mode_unconfirmed');
@@ -14501,6 +14508,9 @@ const handlers = {
     const boot = await __deltaAwaitHostBootReady();
     if (!boot.ready) return { ok: false, error: 'host_boot_not_ready' };
     let cadastroBrowser=null;
+    let chargedCredentialAttempt=false, credentialSubmitted=false;
+    const restoreUnsubmittedBudget=async()=>{if(!chargedCredentialAttempt||credentialSubmitted)return;chargedCredentialAttempt=false;await manifestStore.update(nome,m=>{m.accountFlags=m.accountFlags||{};m.accountFlags.loginAttemptCount=Math.max(0,Number(m.accountFlags.loginAttemptCount||0)-1);robeMeta[nome]=robeMeta[nome]||{};robeMeta[nome].loginAttemptCount=m.accountFlags.loginAttemptCount;return m});invalidateAccountFlagsCache(nome);};
+    await recordLoginFlow(nome,{stage:'queued'});
     try {
     return await lockProfileAction(nome, async () => {
       const startedAt = Date.now();
@@ -14696,6 +14706,7 @@ const handlers = {
           return false;
         }
         const n = await bumpLoginAttemptCount(nome);
+        chargedCredentialAttempt=true;
         pushStep({ step: 'login_attempt_begin', n, max: LOGIN_ATTEMPT_MAX });
         return true;
       };
@@ -14705,7 +14716,7 @@ const handlers = {
       let prevConfigurando = false;
       try {
       // 0.5) se este login_remediate foi explicitamente disparado (operador), pode limpar humanHold para permitir execução.
-      if(isAccountProvisioningPending(nome)||/^stock_provision/i.test(String(operator||''))||require('./serverConfig').readServerConfigEffective().cadastro?.proxyEnabled===true){const prepared=await prepareCadastroBrowser(nome,operator);cadastroBrowser=prepared.browser;}
+      if(isAccountProvisioningPending(nome)||/^stock_provision/i.test(String(operator||''))||require('./serverConfig').readServerConfigEffective().cadastro?.proxyEnabled===true){await recordLoginFlow(nome,{stage:'waiting_proxy'});const prepared=await prepareCadastroBrowser(nome,operator);cadastroBrowser=prepared.browser;}
       if (overrideHumanHold) {
         try {
           await fileStore.withDesiredFileLockUpdate((d) => {
@@ -14780,10 +14791,10 @@ const handlers = {
         pushStep({ step: 'attempt1_inject_cookies_skipped', reason: 'already_posting' });
       } else if (pSession) {
         try {
-          pushStep({ step: 'attempt1_restore_cookies' });
+          await recordLoginFlow(nome,{stage:'cookies',cookiesAttempted:true});pushStep({ step: 'attempt1_restore_cookies' });
           const restored = await pcGate.tryExistingPcSession(pSession, nome);
           sessionRestored = !!(restored && restored.in === true);
-          pushStep({ step: 'attempt1_restore_cookies_done', in: sessionRestored, reason: restored && restored.reason ? String(restored.reason) : null });
+          await recordLoginFlow(nome,{cookiesRestored:sessionRestored});pushStep({ step: 'attempt1_restore_cookies_done', in: sessionRestored, reason: restored && restored.reason ? String(restored.reason) : null });
         } catch (e) {
           pushStep({ step: 'attempt1_restore_cookies_fail', error: (e && e.message) || String(e) });
         }
@@ -15007,8 +15018,7 @@ const handlers = {
           }
           const driven = await withTimeout('loginFb', (async () => {
             const pc = require('./pcSessionLogin.js');
-            await pc.openFreshLoginPage(p0, nome);
-            return pc.attemptCredentialRelogin(p0, nome, { login: login2, password: password2 });
+            return pc.attemptCredentialRelogin(p0, nome, { login: login2, password: password2,onProgress:async event=>{if(event.submitted)credentialSubmitted=true;await recordLoginFlow(nome,event)} });
           })(), stageTimeoutMs.loginFb + stageTimeoutMs.loginMsg);
           pushStep({
             step: 'login_drive_done',
@@ -15511,8 +15521,8 @@ const handlers = {
           }
         } catch {}
       }
-    }).then(result=>finishAccountProvisioningResult(nome,result));
-    } catch(error){return await finishAccountProvisioningResult(nome,{ok:false,error:String(error.message||error)})}
+    }).then(async result=>{await restoreUnsubmittedBudget();await recordLoginFlow(nome,result?.ok?{verified:true}:{error:result?.error||'login_not_completed'});return finishAccountProvisioningResult(nome,result)});
+    } catch(error){await restoreUnsubmittedBudget();await recordLoginFlow(nome,{error:String(error.message||error)});return await finishAccountProvisioningResult(nome,{ok:false,error:String(error.message||error)})}
     finally{await closeCadastroBrowser(nome,cadastroBrowser)}
   },
 
@@ -17898,6 +17908,8 @@ perfis.push({
   loginRemediateFailed,
   loginRemediateFailedAt,
   loginRemediateFailedReason,
+  loginFlow:man?.loginFlow||null,
+  loginStatus:require('./loginFlowState').summarize({...man?.accountFlags,loginRequired,loginReason,loginRemediateFailed,loginRemediateFailedReason,loginFlow:man?.loginFlow}),
   banned,
   bannedAt,
   bannedText,
@@ -19493,6 +19505,7 @@ async function autoLoginRemediateTick() {
         });
       } catch {}
     } else if (!st.lastOk&&require('./stockProvisionRetry').isTransient(st.lastError)) {
+      st.attempts24h=(st.attempts24h||[]).filter(ts=>ts!==st.lastStartAt);st.lastStartAt=prevLastStartAt;
       st.queued=true;st.nextAt=Date.now()+60000;
       try{provisionAudit.append({ts:Date.now(),event:'auto_login_technical_retry',nome,error:st.lastError});}catch{}
     } else if (!st.lastOk) {

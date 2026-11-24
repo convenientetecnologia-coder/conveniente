@@ -61,7 +61,7 @@ for (const mode of ['cookies_first', 'password_first']) {
       }),
       manifestStore: { read: async () => ({ login: 'synthetic-user', password: 'synthetic-pass' }) },
       ctrl: { trabalhando: false, browser: { pages: async () => [{}] } },
-      authMode: mode, nome: 'test', pushStep: () => {}, beginCredentialAttempt: async () => true
+      recordLoginFlow:async()=>{}, authMode: mode, nome: 'test', pushStep: () => {}, beginCredentialAttempt: async () => true
     });
     assert.equal(result, true);
     assert.deepEqual(calls, ['cookies']);

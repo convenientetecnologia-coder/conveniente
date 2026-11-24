@@ -176,7 +176,7 @@ async function loginFormStillVisible(page) {
     }
     const email = document.querySelector('input[name="email"], input#email, input[type="email"], input[autocomplete="username"]');
     const pass = document.querySelector('input[name="pass"], input#pass, input[type="password"]');
-    return visible(email) && visible(pass);
+    return visible(pass)&&!/pin/i.test(pass.getAttribute('aria-label')||'')&&(visible(email)||pass.name==='pass'||pass.id==='pass');
   }).catch(() => false);
 }
 
@@ -197,6 +197,15 @@ async function badLoginText(page) {
     || t.includes('informacoes de login incorretas')
     || t.includes('incorrect login')
     || t.includes('login information you entered is incorrect');
+}
+
+async function credentialRejection(page){
+ if(!await loginFormStillVisible(page)&&!onLoginOrTwoStep(pageUrl(page)))return null;
+ const text=await pageText(page);
+ if(/senha incorreta|incorrect password|wrong password/.test(text))return 'password_rejected';
+ if(/informacoes de login incorretas|incorrect login|login information you entered is incorrect/.test(text))return 'credentials_rejected';
+ if(/ocorreu um erro|an error occurred/.test(text))return 'login_ui_error';
+ return null;
 }
 
 async function humanConfirmScreen(page) {
@@ -1121,7 +1130,7 @@ async function waitForLoginImageCaptcha(page) {
   return page.$('img[src*="/captcha/tfbimage/"]').catch(() => null);
 }
 
-async function attemptCredentialRelogin(page, nome, { login, password } = {}) {
+async function attemptCredentialRelogin(page, nome, { login, password, onProgress = async () => {} } = {}) {
   const user = String(login || '').trim();
   const pass = String(password || '').trim();
   if (!user || !pass) return { ok: false, error: 'missing_credentials' };
@@ -1131,33 +1140,17 @@ async function attemptCredentialRelogin(page, nome, { login, password } = {}) {
     return { ok: false, error: 'whatsapp_confirm', terminal: 'whatsapp_confirm' };
   }
 
-  await openFreshLoginPage(page, nome);
-  let inputs = await waitForLoginForm(page, nome);
-  if (!inputs) return { ok: false, error: 'login_form_not_found' };
-
-  const typeInto = async (handle, value) => {
-    try { await handle.click({ clickCount: 3 }); } catch {}
-    try { await page.keyboard.press('Backspace'); } catch {}
-    try { await handle.type(String(value || ''), { delay: 15 }); } catch {}
-  };
-  await typeInto(inputs.email, user);
-  await typeInto(inputs.pass, pass);
-  await sleep(120);
-
-  let submitted = false;
-  for (const sel of ['button[name="login"]', 'button[type="submit"]', '#loginbutton', 'input[type="submit"]']) {
-    const btn = await page.$(sel).catch(() => null);
-    if (!btn) continue;
-    try { await btn.click({ delay: 30 }); submitted = true; break; } catch {}
+  require('./interactionLease').assert(page);
+  if(await feedOpened(page)){
+    const existing=await persistFreshSessionCookies(page,nome);
+    if(existing?.ok===true){await onProgress({stage:'verifying',existingSession:true});return {ok:true,existingSession:true}}
   }
-  if (!submitted) {
-    try { await page.keyboard.press('Enter'); submitted = true; } catch {}
-  }
-  if (!submitted) return { ok: false, error: 'login_submit_failed' };
-  await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+  const form=await require('./credentialForm').submit(page,{login:user,password:pass,openFresh:()=>openFreshLoginPage(page,nome),onProgress});
+  if(!form.ok)return form;
   await sleep(800);
-
-  if (await badLoginText(page)) return { ok: false, error: 'login_not_accepted' };
+  const rejected=await credentialRejection(page);
+  if(rejected)return {ok:false,error:rejected,submitted:true,entry:form.entry};
+  if (await badLoginText(page)) return { ok: false, error: 'login_ui_error',submitted:true };
   if (await hackedScreen(page)) return { ok: false, error: 'hacked_review', terminal: 'hacked_review' };
 
   const box = await watchAndSolveLoginCheckbox(page, nome, user, pass);
@@ -1195,7 +1188,7 @@ async function attemptCredentialRelogin(page, nome, { login, password } = {}) {
     return { ok: false, error: 'whatsapp_confirm', terminal: 'whatsapp_confirm' };
   }
   if (blockedSaveUrl(pageUrl(page)) || await loginFormStillVisible(page) || await badLoginText(page) || await humanConfirmScreen(page) || await hackedScreen(page)) {
-    return { ok: false, error: 'login_not_accepted' };
+    return { ok: false, error: await credentialRejection(page)||'login_result_unconfirmed',submitted:true };
   }
   const saved = await persistFreshSessionCookies(page, nome);
   if (!saved || saved.ok !== true) return { ok: false, error: (saved && saved.reason) || 'session_not_saved' };

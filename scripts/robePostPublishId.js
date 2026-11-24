@@ -1173,56 +1173,8 @@ async function clickExactWord(page, words) {
 }
 
 async function clickBlueOverlay(page, labels) {
-  if (!(await require('./interactionReadiness').waitControl(page,labels,{exact:true,timeoutMs:15000})).ok) return false;
-  const handle = await page.evaluateHandle((wanted) => {
-    const normLocal = (s) => {
-      try {
-        return String(s || '')
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .toLowerCase()
-          .replace(/\s+/g, ' ')
-          .trim();
-      } catch {
-        return String(s || '').toLowerCase().trim();
-      }
-    };
-    const want = new Set(Array.isArray(wanted) ? wanted : []);
-    const hits = [];
-    for (const el of Array.from(document.querySelectorAll('[role="button"],button'))) {
-      const aria = normLocal(el.getAttribute('aria-label') || '');
-      if (!want.has(aria)) continue;
-      if (el.getAttribute('aria-disabled') === 'true') continue;
-      if (el.getAttribute('aria-hidden') === 'true') continue;
-      if (el.closest && el.closest('[aria-hidden="true"]')) continue;
-      if (String(el.getAttribute('tabindex') || '') === '-1') continue;
-      let rect = el.getBoundingClientRect();
-      if (rect.width < 8 || rect.height < 8) continue;
-      if (rect.bottom < 0 || rect.top > window.innerHeight) {
-        try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch {}
-        rect = el.getBoundingClientRect();
-      }
-      if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
-      const style = window.getComputedStyle(el);
-      if (!style || style.display === 'none' || style.visibility === 'hidden') continue;
-      hits.push({ el, area: rect.width * rect.height });
-    }
-    hits.sort((a, b) => a.area - b.area);
-    return hits[0] ? hits[0].el : null;
-  }, labels);
-  const el = handle && handle.asElement && handle.asElement();
-  if (!el) {
-    try { if (handle) await handle.dispose(); } catch {}
-    return false;
-  }
-  try {
-    await el.click({ delay: 80 });
-    return true;
-  } catch {
-    return false;
-  } finally {
-    try { await handle.dispose(); } catch {}
-  }
+  const result=await require('./interactionReadiness').clickControl(page,labels,{exact:true,timeoutMs:30000});
+  return result.ok===true;
 }
 
 async function uploadPromptOpen(page) {

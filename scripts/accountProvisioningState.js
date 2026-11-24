@@ -3,6 +3,7 @@ const {AsyncLocalStorage}=require('async_hooks');
 const cadastroMarks=new AsyncLocalStorage();
 function unready(want){return want?.provisioningPending===true||['blocked','failed'].includes(want?.provisioningResult?.state)}
 function restriction(error){
+ if(require('./stockProvisionRetry').isTransient(error))return null;
  const e=String(error||'').toLowerCase();
  if(/^(?:login_form_not_found|login_result_missing|login_submit_failed|session_not_saved)$/.test(e))return null;
  if(/account_code_/.test(e))return 'account_code';
