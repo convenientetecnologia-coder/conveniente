@@ -1,5 +1,5 @@
 'use strict';
-async function snapshot(page){return page.evaluate(()=>{
+async function snapshot(page){require('./interactionLease').assert(page);return page.evaluate(()=>{
  const norm=s=>String(s||'').replace(/\s+/g,' ').trim();
  const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>2&&r.height>2&&r.bottom>0&&r.top<innerHeight&&r.right>0&&r.left<innerWidth&&s.visibility!=='hidden'&&s.display!=='none'};
  const grid=Array.from(document.querySelectorAll('[role="grid"][aria-label]')).find(g=>norm(g.getAttribute('aria-label')).toLowerCase()==='marketplace'&&visible(g));

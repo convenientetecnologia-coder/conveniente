@@ -19,7 +19,7 @@ async function holdNavigation({page,request,state,ready,clock=Date.now,sleep=ms=
    if(attached===true&&clock()-start>=state.holdMs){
     if(!current())break;
     if(request.isInterceptResolutionHandled?.()){await abort();return evidence('request_already_resolved');}
-    await request.continue();
+    require('./interactionLease').assert(page);await request.continue();
     state.released=true;state.active=false;state.earReadyAtRelease=true;
     return evidence('released');
    }

@@ -532,78 +532,8 @@ function isSellingUrl(url) {
 }
 
 async function clickByText(page, patterns, { withinDialog = false, exact = false } = {}) {
-  const pats = (Array.isArray(patterns) ? patterns : [patterns])
-    .map((p) => norm(p))
-    .filter(Boolean);
-  if (!pats.length) return false;
-  if (!(await require('./interactionReadiness').waitControl(page,pats,{exact,withinDialog,timeoutMs:15000})).ok) return false;
-  try {
-    return await page.evaluate(
-      (patsIn, withinDialogIn, exactIn) => {
-        const normLocal = (s) => {
-          try {
-            return String(s || '')
-              .normalize('NFD')
-              .replace(/[\u0300-\u036f]/g, '')
-              .toLowerCase()
-              .replace(/\s+/g, ' ')
-              .trim();
-          } catch {
-            return String(s || '').toLowerCase().trim();
-          }
-        };
-        const isDisabled = (el) =>
-          el.getAttribute('aria-disabled') === 'true' ||
-          el.getAttribute('disabled') != null ||
-          String(el.getAttribute('tabindex') || '') === '-1' ||
-          (typeof el.closest === 'function' && !!el.closest('[aria-disabled="true"]'));
-        const tryClickIn = (root) => {
-          const selectors =
-            'button,[role="button"],a,[role="link"],[role="radio"],div[tabindex="0"],span[role="button"],[role="option"]';
-          const nodes = Array.from(root.querySelectorAll(selectors));
-          for (const el of nodes) {
-            if (isDisabled(el)) continue;
-            if (document.readyState === 'loading' || el.closest('[aria-busy="true"],[aria-hidden="true"],[inert]')) continue;
-            const rect=el.getBoundingClientRect(), style=getComputedStyle(el);
-            if(rect.width<2||rect.height<2||style.display==='none'||style.visibility==='hidden'||Number(style.opacity)===0)continue;
-            const top=document.elementFromPoint(Math.max(0,Math.min(innerWidth-1,rect.left+rect.width/2)),Math.max(0,Math.min(innerHeight-1,rect.top+rect.height/2)));
-            if(!top||!(top===el||el.contains(top)))continue;
-            const aria = normLocal(el.getAttribute('aria-label') || '');
-            const txt = normLocal(el.innerText || el.textContent || '');
-            const label = `${aria} ${txt}`.trim();
-            if (!label) continue;
-            for (const p of patsIn) {
-              const hit = exactIn
-                ? aria === p || txt === p || label === p
-                : aria === p || txt === p || aria.includes(p) || txt.includes(p) || label.includes(p);
-              if (!hit) continue;
-              try {
-                el.click();
-                return true;
-              } catch {}
-            }
-          }
-          return false;
-        };
-        // Checkpoint de identidade é página cheia (não dialog). Se withinDialog achar
-        // dialogs irrelevantes e falhar, cai no document — sem engessar o fluxo.
-        if (withinDialogIn) {
-          const dialogs = Array.from(
-            document.querySelectorAll('div[role="dialog"], [aria-modal="true"]')
-          );
-          for (const d of dialogs) {
-            if (tryClickIn(d)) return true;
-          }
-        }
-        return tryClickIn(document);
-      },
-      pats,
-      !!withinDialog,
-      !!exact
-    );
-  } catch {
-    return false;
-  }
+  const result=await require('./interactionReadiness').clickControl(page,patterns,{withinDialog,exact,timeoutMs:15000});
+  return result.ok===true;
 }
 
 /** Espera calma até conseguir clicar (páginas de checkpoint são pesadas). */

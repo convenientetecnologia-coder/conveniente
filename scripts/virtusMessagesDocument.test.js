@@ -73,3 +73,10 @@ test('conversation folder can be entered before its thread links mount, only wit
  now=0;await assert.rejects(wait({page,allowMarketplaceEntry:async()=>false,clock:()=>now,sleep:async ms=>now+=ms,timeoutMs:500}),/document_not_ready/);
  now=0;page.evaluate=async()=>({ready:false,reason:'messages_loading'});await assert.rejects(wait({page,allowMarketplaceEntry:async()=>true,clock:()=>now,sleep:async ms=>now+=ms,timeoutMs:500}),/document_not_ready/);
 });
+
+test('recovery callback cannot reload after its chair is lost',async()=>{
+ const {ensure}=require('./virtusMessagesDocument');let healthy=true,reloads=0;
+ const page={browser:()=>({__ctVirtusProxy:{snapshot:()=>({state:healthy?'online':'offline',operationId:'lease'}),turn:{lease:{snapshot:()=>({healthy})}}}}),evaluate:async()=>{healthy=false;return true},reload:async()=>reloads++};
+ const error=Error('incomplete');error.details={reason:'styles_unavailable'};
+ await assert.rejects(ensure({page,probe:async()=>{throw error}}),/interaction_without_healthy_proxy_turn/);assert.equal(reloads,0);
+});

@@ -3616,23 +3616,9 @@ async function isLocalizacaoValida(page) {
 }
 
 // ————————— FAST-LANE: readiness da página “Criar item” —————————
-// Timeout reduzido a 3500ms e fallback curto.
+// Fast probe followed by a bounded stable-form wait.
 async function waitForCreateItemReady(page, { timeout = 3500 } = {}) {
-  const start = Date.now();
-  async function check() {
-    // Presença (não exige “visível”), pois janela minimizada pode alterar métricas de visibilidade
-    return await page.evaluate(() => {
-      const file = document.querySelector('input[type="file"][accept*="image"], input[type="file"]');
-      const titulo = Array.from(document.querySelectorAll('input')).find(i => i.getAttribute('aria-label') === 'Título' || i.getAttribute('placeholder') === 'Título');
-      const catLbl = Array.from(document.querySelectorAll('label[role="combobox"] span')).find(s => (s.textContent || '').includes('Categoria'));
-      return !!file && (!!titulo || !!catLbl);
-    });
-  }
-  while ((Date.now() - start) < timeout) {
-    try { if (await check()) return true; } catch {}
-    await sleep(100);
-  }
-  return false;
+  return (await require('./composerReadiness').wait(page,{timeoutMs:timeout,vehicle:false})).ok===true;
 }
 
 // Preenche Localização via ciclo global (locais.js) e retorna a localização usada
@@ -4140,8 +4126,8 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
       // #region agent log
       try { provisionAudit.append({ ts: Date.now(), event: 'dbg_robe_open_create_attempt', nome: String(nome || ''), attempt: Number(attempt || 0), baseAttId: String(baseAttId || '') }); } catch {}
       // #endregion
-      // SUPRESSOR para o killer de about:blank durante patch+goto (20s de guarda)
-      armBlankSuppress(browser, nome, 20_000);
+      // Protect the bounded navigation from the blank-page reaper.
+      armBlankSuppress(browser, nome, 150_000);
 
       if (browser && browser.__ctRobeRail) {
         p = await require('./robeRail').soleCreatePage(browser, nome);
@@ -4173,7 +4159,7 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
         if (/gateway_proxy_required:/i.test(em)) throw e;
       }
       stepLog.appendJSONL(nome, 'robe', { attempt: baseAttId, step: 'goto_create', try: attempt });
-      await p.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await p.goto('https://www.facebook.com/marketplace/create/item', { waitUntil: 'domcontentloaded', timeout: 120000 });
       await captureCreatePageVitals(p, nome, baseAttId, `open_create_attempt_${attempt}_after_goto`);
       // MKT Desativado (URL-gated create) — antes de LR/compose
       // Contrato: fecha aba create (economia) → throw → worker marca pill + humano na aba 0.
@@ -4282,18 +4268,18 @@ async function openCreateItemPageRobust(browser, nome, coords, baseAttId) {
         } catch {}
         if (attempt < 3) {
           // Reativa suppress só para a próxima tentativa (goto create)
-          armBlankSuppress(browser, nome, 20_000);
+          armBlankSuppress(browser, nome, 150_000);
           await new Promise(r => setTimeout(r, 600 * attempt));
           continue;
         }
       }
       if (e && e.ROBE_PROBE_FAILED === true) {
-        armBlankSuppress(browser, nome, 20_000);
+        armBlankSuppress(browser, nome, 150_000);
         await new Promise(r => setTimeout(r, 350));
         continue; // retry da ação sem classificar como login_required
       }
       if (/detached|Target closed|Execution context was destroyed|Protocol error.*Target closed/i.test(msg)) {
-        armBlankSuppress(browser, nome, 20_000);
+        armBlankSuppress(browser, nome, 150_000);
         await new Promise(r => setTimeout(r, 300));
         continue; // retry
       }
@@ -4947,18 +4933,9 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     // GUARDA ULTRA-RÁPIDO: Detecta <span>Limite atingido</span> e ABORTA na hora
     // Aguarda DOM básico sem fragilidade, com fallback
     const waitBody = async () => {
-      const ok = await page.waitForFunction(() => !!(document && document.body), { timeout: 15000 }).catch(()=>false);
-      if (ok) return true;
-      // Se a página fechou, classifique explicitamente
-      if (typeof page.isClosed === 'function' && page.isClosed()) {
-        throw new Error('page_closed_before_body');
-      }
-      try {
-        await connectLane.withHeavyNav({ kind: 'robe_create_body_reload', nome }, async () => {
-          await page.reload({ waitUntil: 'domcontentloaded', timeout: 10000 });
-        });
-      } catch {}
-      return await page.waitForFunction(() => !!(document && document.body), { timeout: 5000 }).catch(()=>false) || false;
+      const result=await require('./composerReadiness').waitBody(page,{timeoutMs:120000});
+      stepLog.appendJSONL(nome,'robe',{attempt:attId,step:'create_body_readiness',...result});
+      return result.ok===true;
     };
     const hasBody = await waitBody();
     if (!hasBody) throw new Error('create_body_not_available');
@@ -5063,7 +5040,7 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = [], phot
     }
     // A timeout is not permission to interact with an unfinished composer.
     // Keep the existing proxy turn while waiting; do not reload a healthy page.
-    const createReady = readyFast || await waitForCreateItemReady(page, { timeout: 120000 });
+    const createReady = await waitForCreateItemReady(page, { timeout: 120000 });
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'create_form_readiness', ok: createReady });
     if (!createReady) throw new Error('create_form_not_ready');
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'create_ready_fastlane', ok: readyFast });

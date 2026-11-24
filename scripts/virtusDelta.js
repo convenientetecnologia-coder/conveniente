@@ -438,7 +438,7 @@ async function __gotoWithBootInterlock(page, targetUrl, {
     { kind: "delta_boot_goto", nome: String(profileName || "").slice(0, 120) },
     async () => {
   if (!enabled) {
-    return await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+    require('./interactionLease').assert(page);return await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
   }
   const holdMs = Math.max(3000, Number(bootInterlockHoldMs || 3000) || 3000);
   let armedState = null;
@@ -480,7 +480,7 @@ async function __gotoWithBootInterlock(page, targetUrl, {
     );
   } catch (_) {}
   try {
-    return await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
+    require('./interactionLease').assert(page);return await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
   } finally {
     try {
       const state = page && page.__deltaBootInterlock;
@@ -8760,6 +8760,7 @@ async function proxyMarketplaceTarget(page){
  });
 }
 async function prepareProxyInbox(page,healthCheck){
+ try{require('./interactionLease').assert(page)}catch(error){return {ok:false,state:'incomplete',reason:error.message}};
  if(healthCheck){const health=await healthCheck(page);if(!health.ok)return {ok:false,state:'blocked',health:health.state,reason:health.reason};}
  try{
  const restored=await require('./virtusInboxRoute').restore({page,healthCheck,onRecovery:e=>logInfo('[virtusDelta][proxy_route_recovery] '+JSON.stringify(e))});
@@ -8772,7 +8773,7 @@ async function prepareProxyInbox(page,healthCheck){
     const entry=doc.reason==='conversation_list_unconfirmed'&&!!(await proxyMarketplaceTarget(page));
     return {...doc,ready:doc.ready||entry,signature:[doc.reason,doc.links||0,entry].join(':')};
   },network:()=>page.__ctVirtusProxySession?.visitNetwork(page)||{}}),
-  click:async()=>{const target=await proxyMarketplaceTarget(page);if(!target)throw Error('virtus_marketplace_target_disappeared');await page.mouse.click(target.x,target.y,{delay:clickDelayMs()})},
+  click:async()=>{const target=await proxyMarketplaceTarget(page);if(!target)throw Error('virtus_marketplace_target_disappeared');require('./interactionLease').assert(page);await page.mouse.click(target.x,target.y,{delay:clickDelayMs()})},
   settled:async()=>{
    const position=await require('./marketplaceListPosition').reset(page);
    const readiness=await require('./virtusInboxReady').wait({probe:async()=>{const current=await page.evaluate(require('./marketplaceListPosition').position,false);if(!current.ok)return {ready:false,reason:current.reason,signature:''};return require('./virtusInboxReady').snapshot(page)},network:()=>page.__ctVirtusProxySession?.visitNetwork(page)||{}});

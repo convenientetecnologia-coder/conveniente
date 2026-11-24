@@ -10,3 +10,27 @@ test('navegador real: ignora botão desabilitado, espera layout estável e overl
  const p=require('puppeteer');const b=await p.launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',args:['--no-sandbox']});
  try{const page=await b.newPage();await page.setContent('<button disabled id="b">Enviar</button><div id="cover" style="position:fixed;inset:0;background:white"></div><script>setTimeout(()=>document.querySelector("#b").disabled=false,500);setTimeout(()=>document.querySelector("#cover").remove(),1000)</script>');const r=await waitControl(page,['Enviar'],{exact:true,stableMs:500,timeoutMs:8000,pollMs:100});assert.equal(r.ok,true);assert.ok(r.waitedMs>=1400);assert.equal(await page.evaluate(()=>document.querySelector('#b').disabled),false)}finally{await b.close()}
 });
+
+test('real browser: menuitem renewal and hidden duplicate Continue target use the visible stable control',{timeout:25000},async()=>{
+ const {clickControl}=require('./interactionReadiness'),p=require('puppeteer'),b=await p.launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',args:['--no-sandbox']});
+ try{const page=await b.newPage();await page.setContent('<div aria-hidden="true"><button onclick="window.bad=true">Continuar</button></div><button tabindex="-1" onclick="window.good=true">Continuar</button><div role="menuitem" onclick="window.renew=true" style="width:250px;height:40px">Renovar no Marketplace</div>');
+ assert.equal((await clickControl(page,['Continuar'],{exact:true,stableMs:100,timeoutMs:2000,pollMs:50})).ok,true);
+ assert.deepEqual(await page.evaluate(()=>({good:window.good===true,bad:window.bad===true})),{good:true,bad:false});
+ assert.equal((await clickControl(page,['Renovar no Marketplace'],{exact:true,stableMs:100,timeoutMs:2000,pollMs:50})).ok,true);assert.equal(await page.evaluate(()=>window.renew),true);
+ }finally{await b.close()}
+});
+test('real browser: covered duplicate cannot starve an available target; remounted controls wait again',{timeout:25000},async()=>{
+ const {clickControl}=require('./interactionReadiness'),p=require('puppeteer'),b=await p.launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',args:['--no-sandbox']});
+ try{const page=await b.newPage();await page.setContent('<button style="position:absolute;top:0;left:0;width:120px;height:40px" onclick="window.bad=true">Continuar</button><div style="position:absolute;top:0;left:0;width:120px;height:40px;background:white;z-index:10"></div><button id="good" style="position:absolute;top:100px" onclick="window.good=true">Continuar</button><script>setTimeout(()=>{const e=document.querySelector("#good");e.replaceWith(e.cloneNode(true))},100)</script>');
+ const r=await clickControl(page,['Continuar'],{exact:true,stableMs:300,pollMs:50,timeoutMs:3000});assert.equal(r.ok,true);assert.ok(r.waitedMs>=350);assert.equal(await page.evaluate(()=>window.good===true&&!window.bad),true);
+ }finally{await b.close()}
+});
+
+test('real browser: a chair lost during the stable-control wait prevents the click',{timeout:20000},async()=>{
+ const {clickControl}=require('./interactionReadiness'),p=require('puppeteer'),b=await p.launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',args:['--no-sandbox']});
+ try{const page=await b.newPage();await page.setContent('<button onclick="window.clicked=true">Continuar</button>');let healthy=true;
+ page.__ctVirtusProxySession={snapshot:()=>({state:healthy?'online':'offline',operationId:'test-chair'}),turn:{lease:{snapshot:()=>({healthy})}}};
+ const timer=setTimeout(()=>healthy=false,150);const r=await clickControl(page,['Continuar'],{exact:true,stableMs:600,pollMs:50,timeoutMs:3000});clearTimeout(timer);
+ assert.equal(r.ok,false);assert.match(r.reason,/interaction_without_healthy_proxy_turn/);assert.equal(await page.evaluate(()=>window.clicked===true),false);
+ }finally{await b.close()}
+});

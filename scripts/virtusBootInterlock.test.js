@@ -39,3 +39,8 @@ test('worker capture predicate accepts installed listener without waiting for th
  const ready=vm.runInNewContext('('+source.slice(start,end).trim()+')',context);
  assert.equal(ready('account',f.page),true);assert.equal(ready('account',{}),false);
 });
+
+test('listener becoming ready cannot release a held navigation after the chair has been lost',async()=>{
+ const f=fixture();f.page.__ctVirtusProxySession={snapshot:()=>({state:'offline',operationId:'old'})};
+ await assert.rejects(holdNavigation(f.options),/interaction_without_healthy_proxy_turn/);assert.equal(f.calls.includes('navigate'),false);assert.equal(f.calls.includes('abort'),true);
+});

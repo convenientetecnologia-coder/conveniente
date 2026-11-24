@@ -23,7 +23,7 @@ function inspectDocument(){
 }
 async function wait({page,timeoutMs=120000,stableMs=2000,clock=Date.now,sleep=ms=>new Promise(r=>setTimeout(r,ms)),allowMarketplaceEntry=null}){
  const start=clock();let since=null,last,reasonSince=start,reason;
- while(clock()-start<=timeoutMs){last=await page.evaluate(inspectDocument);
+ while(clock()-start<=timeoutMs){require('./interactionLease').assert(page);last=await page.evaluate(inspectDocument);
   // The conversations list may contain only the Marketplace folder. Opening
   // that folder is what mounts thread links; requiring those links beforehand
   // creates a circular wait. The caller supplies the already-scoped target
@@ -46,7 +46,7 @@ async function ensure({page,probe=wait,clock=Date.now,cooldownMs=600000,onRecove
   const previous=recoveryTimes.get(page);
   if(recoveryLimited(previous,recoveryKey,clock(),cooldownMs))throw error;
   recoveryTimes.set(page,{at:clock(),key:recoveryKey});onRecovery({reason,at:clock()});
-  await page.reload({waitUntil:'domcontentloaded',timeout:120000});
+  require('./interactionLease').assert(page);await page.reload({waitUntil:'domcontentloaded',timeout:120000});
   return probe({page,timeoutMs:60000});
  }
 }
@@ -61,7 +61,7 @@ async function recoverBrowserError({page,clock=Date.now,cooldownMs=600000,onReco
  const previous=recoveryTimes.get(page);
  if(recoveryLimited(previous,recoveryKey,clock(),cooldownMs))throw Error('virtus_browser_error_recovery_cooldown');
  recoveryTimes.set(page,{at:clock(),key:recoveryKey});onRecovery({reason:'browser_network_error',at:clock()});
- await page.reload({waitUntil:'domcontentloaded',timeout:120000});
+ require('./interactionLease').assert(page);await page.reload({waitUntil:'domcontentloaded',timeout:120000});
  return {reloaded:true};
 }
 async function threadNavigationGuard(page){

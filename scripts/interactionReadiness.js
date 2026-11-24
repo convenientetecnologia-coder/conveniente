@@ -1,11 +1,11 @@
 'use strict';
 // Wait on an observed, enabled target, not a fixed delay or global network-idle.
-// No clicks/reloads/replays here. A changed target resets the stability window.
+// A changed target resets the stability window. Only clickControl performs a click; no reloads or implicit replays.
 async function waitStable(probe,{timeoutMs=60000,stableMs=1500,pollMs=250,clock=Date.now,sleep=ms=>new Promise(r=>setTimeout(r,ms)),isClosed=()=>false}={}){
  const started=clock();let signature=null,since=0,last=null;
  while(clock()-started<timeoutMs){
   if(isClosed())return {ok:false,reason:'page_closed'};
-  try{last=await probe()}catch{last=null}
+  try{last=await probe()}catch(error){if(error?.code==='interaction_without_healthy_proxy_turn')return {ok:false,reason:error.message,waitedMs:clock()-started};last=null}
   const stamp=clock();
   if(last?.ready&&last.signature){
    if(last.signature!==signature){signature=last.signature;since=stamp}
@@ -27,23 +27,44 @@ function inspectElement(el){
  return {ready:true,signature:[registry.ids.get(el),location.href,el.tagName,el.getAttribute('aria-label')||el.textContent?.trim().slice(0,160)||'',Math.round(r.x),Math.round(r.y),Math.round(r.width),Math.round(r.height)].join('|')};
 }
 async function waitElement(page,handle,options={}){
- return waitStable(()=>page.evaluate(inspectElement,handle),{...options,isClosed:()=>page.isClosed?.()===true});
+ return waitStable(()=>{require('./interactionLease').assert(page);return page.evaluate(inspectElement,handle)},{...options,isClosed:()=>page.isClosed?.()===true});
 }
-async function waitControl(page,labels,{exact=false,withinDialog=false,timeoutMs=15000,...options}={}){
+async function controlHandle(page,labels,{exact=false,withinDialog=false,excludeSubstrings=[]}={}){
+ require('./interactionLease').assert(page);
  const wanted=(Array.isArray(labels)?labels:[labels]).map(x=>String(x||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim()).filter(Boolean);
- if(!wanted.length)return {ok:false,reason:'no_labels'};
- const probe=async()=>{
-  const handle=await page.evaluateHandle(({wanted,exact,withinDialog})=>{
-   const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
-   const roots=withinDialog?[...document.querySelectorAll('[role="dialog"],[aria-modal="true"]'),document]:[document];
-   for(const root of roots)for(const el of root.querySelectorAll('button,[role="button"],a,[role="link"],[role="radio"],[role="option"],div[tabindex="0"]')){
-    const a=norm(el.getAttribute('aria-label')),t=norm(el.innerText||el.textContent);if(!wanted.some(p=>exact?(a===p||t===p):(a.includes(p)||t.includes(p))))continue;
-    const r=el.getBoundingClientRect(),style=getComputedStyle(el);if(r.width<2||r.height<2||style.visibility==='hidden'||style.display==='none'||Number(style.opacity)===0||el.disabled||el.getAttribute('aria-disabled')==='true'||el.closest('[aria-busy="true"],[aria-disabled="true"],[inert]'))continue;
-    return el;
-   }return null;
-  },{wanted,exact,withinDialog});
-  try{const el=handle.asElement();return el?await page.evaluate(inspectElement,el):null}finally{await handle.dispose()}
- };
- return waitStable(probe,{timeoutMs,...options,isClosed:()=>page.isClosed?.()===true});
+ return page.evaluateHandle(({wanted,exact,withinDialog,excludeSubstrings})=>{
+  const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
+  const roots=withinDialog?[...document.querySelectorAll('[role="dialog"],[aria-modal="true"]'),document]:[document];let offscreen=null;
+  for(const root of roots)for(const el of root.querySelectorAll('button,[role="button"],[role="menuitem"],a,[role="link"],[role="radio"],[role="option"],input[type="button"],input[type="submit"],div[tabindex="0"]')){
+   const a=norm(el.getAttribute('aria-label')),t=norm(el.innerText||el.textContent||el.value);
+   if(excludeSubstrings.some(x=>a.includes(norm(x))||t.includes(norm(x)))||!wanted.some(p=>exact?(a===p||t===p):(a.includes(p)||t.includes(p))))continue;
+   const r=el.getBoundingClientRect(),style=getComputedStyle(el);
+   if(r.width<2||r.height<2||style.visibility==='hidden'||style.display==='none'||Number(style.opacity)===0||el.disabled||el.getAttribute('aria-disabled')==='true'||el.closest('[aria-busy="true"],[aria-disabled="true"],[aria-hidden="true"],[inert]'))continue;
+   if(r.bottom<=0||r.top>=innerHeight||r.right<=0||r.left>=innerWidth){offscreen=offscreen||el;continue}
+   const hit=document.elementFromPoint(Math.max(0,Math.min(innerWidth-1,r.left+r.width/2)),Math.max(0,Math.min(innerHeight-1,r.top+r.height/2)));
+   if(hit&&(hit===el||el.contains(hit)))return el;
+  }
+  if(offscreen){offscreen.scrollIntoView({block:'center',inline:'nearest'});return offscreen}return null;
+ },{wanted,exact,withinDialog,excludeSubstrings});
 }
-module.exports={waitStable,waitElement,waitControl};
+async function waitControl(page,labels,{timeoutMs=15000,...options}={}){
+ return waitStable(async()=>{
+  const handle=await controlHandle(page,labels,options);
+  try{const el=handle.asElement();return el?await page.evaluate(inspectElement,el):null}finally{await handle.dispose()}
+ },{timeoutMs,...options,isClosed:()=>page.isClosed?.()===true});
+}
+async function clickControl(page,labels,{timeoutMs=15000,...options}={}){
+ const started=Date.now();let handle=null;
+ try{
+  // Hold the exact element that became stable; do not re-select a hidden duplicate.
+  const result=await waitStable(async()=>{
+   if(handle)await handle.dispose();handle=await controlHandle(page,labels,options);
+   const el=handle.asElement();return el?await page.evaluate(inspectElement,el):null;
+  },{timeoutMs,...options,isClosed:()=>page.isClosed?.()===true});
+  if(!result.ok)return result;
+  const el=handle?.asElement();if(!el||!(await page.evaluate(inspectElement,el))?.ready)return {ok:false,reason:'control_changed_before_click'};
+  require('./interactionLease').assert(page);await el.click();return {ok:true,via:'stable_handle',waitedMs:Date.now()-started};
+ }catch(error){return {ok:false,reason:'control_click_failed',error:String(error.message||error)}}
+ finally{if(handle)await handle.dispose().catch(()=>{})}
+}
+module.exports={waitStable,waitElement,waitControl,clickControl};

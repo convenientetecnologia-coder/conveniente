@@ -9,7 +9,7 @@ async function restore({page,healthCheck,onRecovery=()=>{}}){
  const health=await healthCheck(page);
  if(!health?.ok)return {navigated:false,blocked:health};
  onRecovery({reason:'messages_route_lost',fromPath:new URL(page.url()).pathname});
- await page.goto('https://www.facebook.com/messages/',{waitUntil:'domcontentloaded',timeout:120000});
+ require('./interactionLease').assert(page);await page.goto('https://www.facebook.com/messages/',{waitUntil:'domcontentloaded',timeout:120000});
  return {navigated:true};
 }
 module.exports={outsideInbox,restore};
