@@ -7,7 +7,7 @@ test('os dois handlers reais persistem resultado antes de devolver o controle ao
   const helperStart=source.indexOf('async function finishAccountProvisioningResult('),helperEnd=source.indexOf('async function prepareCadastroBrowser(',helperStart);
   const marker='  async '+method+'(',start=source.indexOf(marker),end=source.indexOf('    finally{await closeCadastroBrowser(nome,cadastroBrowser)}',start)+'    finally{await closeCadastroBrowser(nome,cadastroBrowser)}\n  },'.length;
   const fn=vm.runInNewContext(source.slice(helperStart,helperEnd)+'\n({'+source.slice(start,end)+'}).'+method,{
-   require,Date,__deltaAwaitHostBootReady:async()=>({ready:true}),lockProfileAction:async()=>({ok:false,error}),fileStore:{withDesiredFileLockUpdate:async fn=>{events.push('persisted');return fn(desired)}},provisionAudit:{append(){}},closeCadastroBrowser:async()=>events.push('closed')
+   require,Date,recordLoginFlow:async()=>{},__deltaAwaitHostBootReady:async()=>({ready:true}),lockProfileAction:async()=>({ok:false,error}),fileStore:{withDesiredFileLockUpdate:async fn=>{events.push('persisted');return fn(desired)}},provisionAudit:{append(){}},closeCadastroBrowser:async()=>events.push('closed')
   });
   const r=await fn({nome:'account'});assert.equal(r.error,error);assert.equal(events.at(-1),'closed');
   if(error.includes('502')){assert.equal(desired.perfis.account.provisioningPending,true);assert.equal(desired.perfis.account.provisioningResult,undefined)}else{assert.equal(desired.perfis.account.provisioningPending,false);assert.equal(desired.perfis.account.provisioningResult.state,'blocked');assert.deepEqual(events,['persisted','closed']);}

@@ -7,7 +7,7 @@ test('rejected cookies reach one actual credential attempt in the configure hand
  const result=await vm.runInNewContext('(async()=>{'+source.slice(start,end)+';return driven})()',{
   require:name=>name==='./configureLoginFallback'?{run:args=>fallback.run({...args,attempt:async()=>{calls.push('password');return {ok:true}}})}:require(name),
   browserHelper:{detectLoginRequired:async()=>({loginRequired:true,reason:'login_form'})},rr:'login_form',workPage:{goto:async()=>calls.push('messages')},nome:'fixture',login2:'fixture',password2:'fixture',ctrl:{browser:{__ctCadastroProxy:{assertHealthy(){calls.push('healthy')},noteStage(){}}}},
-  readLoginAttemptCount:async()=>0,LOGIN_ATTEMPT_MAX:2,bumpLoginAttemptCount:async()=>{calls.push('budget');return 1},stopLoginAfterBudget:async()=>{throw Error('unexpected')},provisionAudit:{append(){}},Date,Error
+  recordLoginFlow:async()=>{},refundLoginAttemptCount:async()=>{},readLoginAttemptCount:async()=>0,LOGIN_ATTEMPT_MAX:2,bumpLoginAttemptCount:async()=>{calls.push('budget');return 1},stopLoginAfterBudget:async()=>{throw Error('unexpected')},provisionAudit:{append(){}},Date,Error
  });
  assert.equal(result.ok,true);assert.deepEqual(calls.filter(c=>c!=='healthy'),['budget','password','messages']);
 });
@@ -44,3 +44,8 @@ test('trust-device continuation does not spend a password attempt and still ente
 });
 
 test('trust screen appearing after password submission gets resumed before returning failure',async()=>{let checks=0;const result=await fallback.run({page:{goto:async()=>{}},begin:async()=>true,resume:async()=>++checks===1?null:{ok:true,via:'trust_device_resume'},attempt:async()=>({ok:false,error:'login_not_accepted'})});assert.equal(result.ok,true);assert.equal(checks,2)});
+
+test('cadastro records actual submission and refunds only failures before submission',async()=>{
+ for(const submitted of [false,true]){let refunded=0,reported=0;const result=await fallback.run({page:{},begin:async()=>true,refund:async()=>refunded++,onProgress:async e=>{if(e.submitted)reported++},attempt:async(p,n,o)=>{if(submitted)await o.onProgress({stage:'verifying',submitted:true});return{ok:false,error:submitted?'password_rejected':'login_input_not_ready'}}});assert.equal(result.ok,false);assert.equal(refunded,submitted?0:1);assert.equal(reported,submitted?1:0)}
+ let refunds=0;await assert.rejects(fallback.run({page:{},begin:async()=>true,refund:async()=>refunds++,attempt:async()=>{throw Error('connection lost')}}),/connection lost/);assert.equal(refunds,1);
+});

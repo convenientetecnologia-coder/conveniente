@@ -2315,6 +2315,10 @@ async function bumpLoginAttemptCount(nome) {
   return next;
 }
 
+async function refundLoginAttemptCount(nome){
+ await manifestStore.update(nome,m=>{m.accountFlags=m.accountFlags||{};const next=Math.max(0,Number(m.accountFlags.loginAttemptCount||0)-1);m.accountFlags.loginAttemptCount=next;robeMeta[nome]=robeMeta[nome]||{};robeMeta[nome].loginAttemptCount=next;return m});invalidateAccountFlagsCache(nome);
+}
+
 async function stopLoginAfterBudget(nome, source) {
   try {
     await setLoginRequiredFlag(nome, { reason: 'login_attempt_budget', source: String(source || 'login') });
@@ -12525,6 +12529,7 @@ async function completeAccountProvisioning(nome, source, {verifiedAuth=false}={}
 }
 
 async function finishAccountProvisioningResult(nome,result){
+  await recordLoginFlow(nome,result?.ok?{verified:true}:{error:result?.error||'login_not_completed'});
   await require('./accountProvisioningState').settle([{...result,profileName:nome}],{
     update:fn=>fileStore.withDesiredFileLockUpdate(fn),audit:row=>provisionAudit.append(row)
   });
@@ -13628,6 +13633,7 @@ const handlers = {
     let cadastroBrowser=null;
     try {
     return await lockProfileAction(nome, async () => {
+      await recordLoginFlow(nome,{stage:'queued'});await recordLoginFlow(nome,{stage:'waiting_proxy'});
       const prepared=await prepareCadastroBrowser(nome,operator);cadastroBrowser=prepared.browser;
       logger.info('[HANDLER] configure chamada', { nome });
       const ctrl = controllers.get(nome);
@@ -13954,6 +13960,7 @@ const handlers = {
           } catch {}
 
           const driven = await require('./configureLoginFallback').run({page:workPage,nome,login:login2,password:password2,
+            onProgress:event=>recordLoginFlow(nome,event),refund:()=>refundLoginAttemptCount(nome),
             assertHealthy:()=>ctrl.browser.__ctCadastroProxy?.assertHealthy(),
             resume:async()=>{if(rr!=='trust_device'&&(await browserHelper.detectLoginRequired(workPage))?.reason!=='trust_device')return null;const pc=require('./pcSessionLogin');const trust=await pc.clickTrustThisDevice(workPage,nome);if(trust?.left===true){const saved=await pc.persistFreshSessionCookies(workPage,nome);if(saved?.ok)return {ok:true,via:'trust_device_resume'};}return {ok:false,terminal:'trust_device',error:'trust_device_unconfirmed'};},
             begin:async()=>{
@@ -14509,7 +14516,7 @@ const handlers = {
     if (!boot.ready) return { ok: false, error: 'host_boot_not_ready' };
     let cadastroBrowser=null;
     let chargedCredentialAttempt=false, credentialSubmitted=false;
-    const restoreUnsubmittedBudget=async()=>{if(!chargedCredentialAttempt||credentialSubmitted)return;chargedCredentialAttempt=false;await manifestStore.update(nome,m=>{m.accountFlags=m.accountFlags||{};m.accountFlags.loginAttemptCount=Math.max(0,Number(m.accountFlags.loginAttemptCount||0)-1);robeMeta[nome]=robeMeta[nome]||{};robeMeta[nome].loginAttemptCount=m.accountFlags.loginAttemptCount;return m});invalidateAccountFlagsCache(nome);};
+    const restoreUnsubmittedBudget=async()=>{if(!chargedCredentialAttempt||credentialSubmitted)return;chargedCredentialAttempt=false;await refundLoginAttemptCount(nome);};
     await recordLoginFlow(nome,{stage:'queued'});
     try {
     return await lockProfileAction(nome, async () => {
