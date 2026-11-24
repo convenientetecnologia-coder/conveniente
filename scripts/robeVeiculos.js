@@ -2610,6 +2610,11 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
         timeout: 8000
       }).catch(() => {});
     }
+    // A timeout is not permission to interact with an unfinished composer.
+    // Keep the existing proxy turn while waiting; do not reload a healthy page.
+    const createReady = readyFast || await waitForCreateItemReady(page, { timeout: 120000 });
+    stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'create_form_readiness', ok: createReady });
+    if (!createReady) throw new Error('create_form_not_ready');
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'create_ready_fastlane', ok: readyFast });
 
     // Micro settle (2 frames + 100–220 ms); substituído por sleep apenas (alteração)
