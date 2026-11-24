@@ -31,3 +31,14 @@ test('the worker requires a checked inbox and a released chair before marking bo
  assert.equal((await observe('a',{active:true},100)).state,'deferred');assert.equal((await observe('a',{provisioningPending:true},100)).state,'waiting');
  assert.equal((await observe('deleted',{},100)).state,'blocked');
 });
+
+test('finished startup cannot regress to waiting while another account completes',()=>{
+ const d=fixture();batch.apply(d,{startedAt:100,observations:{a:{state:'ready',reason:'inbox_verified_offline'}},now:200});
+ batch.apply(d,{startedAt:100,observations:{a:{state:'waiting',reason:'opening'},b:{state:'deferred',reason:'document_failed'}},now:300});
+ assert.equal(batch.active(d),false);assert.equal(d._openAll.progress.a.state,'ready');assert.deepEqual(d._openAll.summary,{ready:1,blocked:0,deferred:1});
+});
+test('orphan progress cannot inflate completed count beyond the batch queue',()=>{
+ const d=fixture();d._openAll.progress.orphan={state:'ready'};
+ batch.apply(d,{startedAt:100,observations:{a:{state:'ready'},b:{state:'ready'}},now:200});
+ assert.deepEqual(Object.keys(d._openAll.progress).sort(),['a','b']);assert.equal(d._openAll.summary.ready,2);
+});

@@ -20195,6 +20195,8 @@ async function nurseTick() {
           if(terminal||w.humanHold||['blocked','failed'].includes(w.provisioningResult?.state))return {state:'blocked',reason:terminal||w.provisioningResult?.reason||'human_hold'};
           if(!w.active&&!controllers.has(n))return {state:'blocked',reason:'account_inactive'};
           const c=controllers.get(n),session=c?.browser?.__ctVirtusProxy;
+          const startup=session?.snapshot().bootstrapOutcome;
+          if(startup?.at>=startedAt)return {state:startup.ok?'ready':'deferred',reason:startup.ok?'inbox_verified_offline':startup.reason||'startup_incomplete'};
           if(session?.snapshot().startupFinished&&!session.snapshot().operationId&&!c.configurando&&!isProfileOpening(n)){
             const inbox=session.snapshot().lastInbox;
             if(inbox?.ok===true)return {state:'ready',reason:'inbox_verified_offline'};

@@ -124,3 +124,14 @@ test('runtime restart failure releases its chair and cannot retain stale inbox s
  await assert.rejects(session.withRuntimeStartup(async()=>{throw Error('navigation_failed')}),/navigation_failed/);
  assert.equal(session.snapshot().lastCheckedAt,0);assert.equal(session.snapshot().lastInbox,null);assert.equal(session.snapshot().state,'offline');await session.close();
 });
+
+test('startup outcome survives a later runtime restart and is not replaced by that visit status',async()=>{
+ const {session}=await operationalFixture();await session.boot();session.noteInbox({ok:true,state:'marketplace_ready'});session.finishBoot();await session.turn.tail;
+ const first=session.snapshot().bootstrapOutcome;assert.equal(first.ok,true);assert.ok(first.at>0);
+ await session.withRuntimeStartup(async()=>{session.noteInbox({ok:false,state:'incomplete',reason:'later_navigation_failed'});return {stop(){}}});
+ assert.deepEqual(session.snapshot().bootstrapOutcome,first);assert.equal(session.snapshot().lastInbox.ok,false);await session.close();
+});
+test('incomplete bootstrap is an explicit deferred result, never a ready result',async()=>{
+ const {session}=await operationalFixture();await session.boot();session.noteInbox({ok:false,state:'incomplete',reason:'document_loading'});session.finishBoot();await session.turn.tail;
+ assert.equal(session.snapshot().bootstrapOutcome.ok,false);assert.equal(session.snapshot().bootstrapOutcome.reason,'document_loading');await session.close();
+});

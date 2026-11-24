@@ -8,10 +8,13 @@ function holds(){const now=Date.now();if(now-cached.at<1000)return cached.held;t
 function apply(desired,{startedAt,observations,now=Date.now()}){
  const batch=desired?._openAll;if(!active(desired)||batch.startedAt!==startedAt)return {changed:false};
  const queue=[...new Set([...(batch.queue||[]),...Object.keys(desired.perfis||{}).filter(n=>desired.perfis[n]?.provisioningPending&&!desired.perfis[n]?.humanHold)])];
- const progress={...(batch.progress||{})};let changed=queue.length!==(batch.queue||[]).length;
+ const progress=Object.fromEntries(Object.entries(batch.progress||{}).filter(([name])=>queue.includes(name)));let changed=queue.length!==(batch.queue||[]).length||Object.keys(progress).length!==Object.keys(batch.progress||{}).length;
  for(const [name,value]of Object.entries(observations)){
   if(!queue.includes(name))continue;
   const prior=progress[name];
+  // Completing one startup attempt is monotonic within this batch. Later
+  // revisits/restarts have their own status and cannot re-open the barrier.
+  if(TERMINAL.has(prior?.state)&&!TERMINAL.has(value.state))continue;
   if(!prior||prior.state!==value.state||prior.reason!==value.reason){progress[name]={...value,at:now};changed=true}
  }
  const timedOut=now-startedAt>=2*60*60*1000;

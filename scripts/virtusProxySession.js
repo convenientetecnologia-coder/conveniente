@@ -17,7 +17,10 @@ async function create({nome,onState=()=>{},dependencies={}}){
  const rail=rails.createDirectSwitch({requireProxy:true});let port;
  try{
   port=await rail.listen();
-  const turn=new VirtusTurn({rail,onState,onTrace:dependencies.onTrace||(trace=>require('./virtusTurnEvidence').record(nome,trace)),beforeDisconnect:async()=>{if(browser)for(const page of await browser.pages())try{await page.setOfflineMode(true)}catch{}},acquire:({intent,signal})=>cp2.begin({nome,purpose:'virtus',intent,messageIsolation:true,observationRecovery:['warm','observe','engaged'].includes(intent)&&!!deliveryLedger.accountBlocked?.(nome),hotUntil:Math.floor(activity.snapshot().hotUntil/1000),signal,isReady:dependencies.isReady||(()=>accountStillWanted(nome))}),prove:async()=>{
+  const turn=new VirtusTurn({rail,onState,onTrace:async trace=>{
+   if(!bootstrapOutcome&&startupFinished&&trace.intent==='warm'&&trace.endedAt){bootstrapOutcome={at:trace.endedAt,ok:trace.checkConfirmed===true,reason:trace.reason||trace.outcome};onState(api.snapshot())}
+   await (dependencies.onTrace||(value=>require('./virtusTurnEvidence').record(nome,value)))(trace);
+  },beforeDisconnect:async()=>{if(browser)for(const page of await browser.pages())try{await page.setOfflineMode(true)}catch{}},acquire:({intent,signal})=>cp2.begin({nome,purpose:'virtus',intent,messageIsolation:true,observationRecovery:['warm','observe','engaged'].includes(intent)&&!!deliveryLedger.accountBlocked?.(nome),hotUntil:Math.floor(activity.snapshot().hotUntil/1000),signal,isReady:dependencies.isReady||(()=>accountStillWanted(nome))}),prove:async()=>{
    const raw=await rails.proveThroughRail(port);let payload;try{payload=JSON.parse(raw)}catch{throw Error('virtus_proxy_invalid_proof')}
    const proof=rails.readExit(payload);if(!proof.ip)throw Error('virtus_proxy_missing_ip');return proof;
   }});
@@ -25,6 +28,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
   const bootGate=new Promise(resolve=>bootResolve=resolve);
   const ready=new Promise((resolve,reject)=>{bootReady=resolve;bootReject=reject});
   const boot=()=>{const task=turn.run('warm',async()=>{bootReady();await bootGate;return lastInbox||{ok:false,state:'incomplete',reason:'startup_inbox_unconfirmed'}});task.catch(bootReject);return ready};
+  let bootstrapOutcome=null;
   let browser=null,timer=null,stopped=false,lastNetworkAt=0,lastSyncNetworkAt=0,connectedAt=Date.now(),observerBusy=false,observerOptions=null,observerLastTickAt=0,lastObserveAttemptAt=0,observerSkipReason=null,observerVersion=0,startupFinished=false,healthCheck=null,lastInbox=null,activeLease=null,expectedSend=null,outgoingEvidence=null,humanHeld=false,humanTimer=null,humanResolve=null,humanTask=null;
   const deliveryLedger=dependencies.deliveryLedger||require("./virtusDeliveryLedger");
   let closedBrowserTimer=null,recoveringClosedBrowser=false,nextTransportRecoveryAt=0,transportRecoveryDelay=2000;
@@ -83,7 +87,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
    visitNetwork(page){return {connectedAt,lastNetworkAt:lastSyncNetworkAt,pending:page?.__ctVirtusPendingInbox?.size||0}},
    setHealthCheck(fn){healthCheck=fn},
    noteInbox(result){lastInbox={...result,at:Date.now()};onState(api.snapshot())},
-   snapshot(){return {...turn.snapshot(),lastNetworkAt,humanHeld,pilot:accountPilot,lastInbox,startupFinished,documentNavigations,lastDocumentNavigation,lastBootGate,rotation:rotationPolicy,lastReplyTiming,activity:activity.snapshot(),pendingBurst:burst.length,observer:{registered:!!observerOptions,lastTickAt:observerLastTickAt,skipReason:observerSkipReason,guard:observerOptions?.describeGuard?.()||null}}},
+   snapshot(){return {...turn.snapshot(),bootstrapOutcome,lastNetworkAt,humanHeld,pilot:accountPilot,lastInbox,startupFinished,documentNavigations,lastDocumentNavigation,lastBootGate,rotation:rotationPolicy,lastReplyTiming,activity:activity.snapshot(),pendingBurst:burst.length,observer:{registered:!!observerOptions,lastTickAt:observerLastTickAt,skipReason:observerSkipReason,guard:observerOptions?.describeGuard?.()||null}}},
    async enterHuman(){
     if(humanTask)return humanTask.ready;
     humanHeld=true;api.finishBoot();let readyResolve,readyReject;const ready=new Promise((r,j)=>{readyResolve=r;readyReject=j});
