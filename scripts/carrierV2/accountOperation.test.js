@@ -1,4 +1,15 @@
 'use strict';
+require('node:test')('Index restart reconciles the exact saved operation without replaying business or erasing uncertainty',async()=>{
+ const crypto=require('node:crypto'),{reconcileExisting}=require('./accountOperation'),f=fixture(),id=crypto.randomUUID(),file=path.join(f.root,crypto.createHash('sha256').update('fixture\0virtus_reply').digest('hex')+'.json'),requests=[];
+ const original={operationId:id,edgeGeneration:crypto.randomUUID(),phase:'active',result:'unknown',sent:true};fs.writeFileSync(file,JSON.stringify(original));let terminal=false;
+ class Client{async request(url,body){requests.push({url,body});return body?{state:'releasing',releaseAccepted:true}:{state:terminal?'released':'active',leaseId:'fixture',leaseGeneration:1,carrierGeneration:'fixture'}}}
+ try{
+  const opts={nome:'fixture',purpose:'virtus',intent:'reply',operationId:id,root:f.root,Client,config:{}};
+  const receipt=await reconcileExisting({...opts,release:true});assert.equal(receipt.releaseAccepted,true);assert.equal(receipt.closed,false);assert.equal(requests[1].body.businessResult,'unknown');
+  terminal=true;assert.equal((await reconcileExisting(opts)).closed,true);const saved=JSON.parse(fs.readFileSync(file));assert.equal(saved.phase,'closed');assert.equal(saved.result,'unknown');
+  await assert.rejects(reconcileExisting({...opts,operationId:crypto.randomUUID()}),/identity_mismatch/);assert.equal(requests.some(r=>/side-effect|ready/.test(r.url)),false);
+ }finally{fs.rmSync(f.root,{recursive:true,force:true})}
+});
 require('node:test')('CT release receipt frees local work but next operation waits for actual remote closure',async()=>{
  const f=fixture();let reads=0,waits=0;
  class Client extends f.Client{

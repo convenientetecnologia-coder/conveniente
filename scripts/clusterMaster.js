@@ -16,6 +16,7 @@ const cellForensic = require('./cellForensic.js');
 const cellLifecycle = require('./cellLifecycle.js');
 const { writeJsonLine, attachLineParser } = require('./cellNet.js');
 const v8HeapGuard = require('./v8HeapGuard.js');
+const indexProxyCoordinator = require('./carrierV2/indexCoordinator').instance();
 
 function newMsgId() { return Math.random().toString(36).slice(2); }
 
@@ -222,6 +223,26 @@ async function createCluster() {
   }
 
   function handleCellInbound(child, idx, msg) {
+    if(msg?.type==='proxy:job'){
+      const owner=String(idx)+':'+String(child.pid||child.helloPid||'unknown');
+      Promise.resolve().then(async()=>{
+        const job=msg.job||{};
+        if(msg.action==='enqueue'){
+          if(route[job.nome]!==idx)throw Error('proxy_job_wrong_worker');
+          return indexProxyCoordinator.enqueue(job,owner,{alive:()=>cellRegistry.pidAlive(child.pid||child.helloPid),ready:async ticket=>{
+            const result=await sendTo(idx,'proxy_ready',{ticket},{timeoutMs:15000});return result?.ok===true&&result.ready===true;
+          }});
+        }
+        try{return await indexProxyCoordinator.command(msg.ticket,owner,msg.action,msg.stage)}catch(error){
+          if(error.message!=='proxy_job_not_found')throw error;
+          if(msg.action==='status')return {ok:true,state:'index_restarted',snapshot:{healthy:false}};
+          if(msg.action==='cancel'&&!msg.operationId)return {ok:true,state:'canceled'};
+          if(!['close','reconcile','cancel'].includes(msg.action)||route[job.nome]!==idx)throw error;
+          return require('./carrierV2/accountOperation').reconcileExisting({nome:job.nome,purpose:job.purpose,intent:job.intent,operationId:msg.operationId,release:msg.action!=='reconcile'});
+        }
+      }).then(result=>cellReply(child,msg.msgId,result)).catch(error=>cellReply(child,msg.msgId,{ok:false,error:String(error.message||error)}));
+      return;
+    }
     if (msg && msg.type === 'cell_hello') {
       child.helloPid = Number(msg.pid) || null;
       return;
@@ -300,6 +321,7 @@ async function createCluster() {
     }
     if (msg && msg.type === 'sup:getStatus') {
       const r = supervisor.getStatus();
+      r.proxyCoordinator=indexProxyCoordinator.snapshot();
       return cellReply(child, msg.msgId, r);
     }
   }

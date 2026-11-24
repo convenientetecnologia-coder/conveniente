@@ -49,7 +49,7 @@ test('abort em espera remove timer e mantém identidade para cancelamento',async
 });
 test('cópias de protocolo e transporte CT/edge não divergem',{skip:!process.env.CT_SOURCE_ROOT},()=>{
  const fs=require('node:fs'),path=require('node:path');
- for(const file of ['protocol.js','session.js'])assert.equal(fs.readFileSync(path.join(__dirname,file),'utf8'),fs.readFileSync(path.join(process.env.CT_SOURCE_ROOT,'lib/carrierV2',file),'utf8'));
+ for(const file of ['protocol.js','session.js'])assert.equal(fs.readFileSync(path.join(__dirname,file),'utf8').replace(/\r\n/g,'\n'),fs.readFileSync(path.join(process.env.CT_SOURCE_ROOT,'lib/carrierV2',file),'utf8').replace(/\r\n/g,'\n'));
 });
 
 test('HTTP e WS usam ID de servidor sem Authorization mesmo com token antigo',()=>{const c=new OperationClient({baseUrl:'https://example.com/api/carrier-v2',serverId:'11111111-1111-1111-1111-111111111111',token:'old'});assert.equal(c.headers()['x-server-id'],c.serverId);assert.equal(c.headers().authorization,undefined)});

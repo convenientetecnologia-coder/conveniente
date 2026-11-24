@@ -63,8 +63,7 @@ async function beginOnce({nome,purpose,intent='observe',hotUntil=0,observationRe
   row=resumeUnaccepted?old:{version:1,nome,type,...(type==='virtus'?{intent,operationSequence:(old?.operationSequence||0)+1}:{}),operationId:crypto.randomUUID(),edgeGeneration:crypto.randomUUID(),phase:'queued',sent:false,result:'not_started',at:Date.now()};persist();client=new Client({...config,edgeGeneration:row.edgeGeneration,releaseReceipt:true});
   const started=Date.now();
   const acquire=resume=>client.acquire({operationId:row.operationId,accountId:nome,type,...(type==='virtus'?{intent,operationSequence:row.operationSequence,serverAccountCount:rotationAccountCount(nome),hotUntil}:{}),eligiblePhoneIds:config.eligiblePhoneIds,signal,isReady:async()=>{await resume();return isReady()},onWait:status=>{row.phase='queued';persist();waiting.set(nome,{type,intent,operationId:row.operationId,since:started,state:status.state});onWait(status)}});
-  const hostAcquire=()=>require('./hostAdmission').run(root,()=>type==='virtus'?acquire(async()=>{}):require('../robeQueue').withoutActiveSlot(acquire),{signal,onWait:status=>{waiting.set(nome,{type,intent,operationId:row.operationId,since:started,state:status.state});onWait(status)}});
-  try{op=await hostAcquire()}finally{if(type!=='virtus')clock.addWait(Date.now()-started);waiting.delete(nome)}
+  try{op=type==='virtus'?await acquire(async()=>{}):await require('../robeQueue').withoutActiveSlot(acquire)}finally{if(type!=='virtus')clock.addWait(Date.now()-started);waiting.delete(nome)}
 
   row.phase='active';row.lease={leaseId:op.status.leaseId,leaseGeneration:op.status.leaseGeneration,carrierGeneration:op.status.carrierGeneration};persist();
   const route=await client.openRoute(op,{heartbeatMs:config.heartbeatMs});
@@ -73,6 +72,7 @@ async function beginOnce({nome,purpose,intent='observe',hotUntil=0,observationRe
    async possibleSideEffect(stage){if(observationRecovery)throw Error("cp2_readonly_effect_refused");if(row.sent&&!stage)return;if(op.heartbeatError||op.transportError)throw Error('cp2_transport_not_healthy');if(stage&&!require('./operationStages').begin(row,stage))return;row.sent=true;row.result='unknown';persist();await client.possibleSideEffect(op)},
    confirm(stage){if(stage&&row.type!=='publish')stage=undefined;require('./operationStages').confirm(row,Date.now(),stage);op.result='confirmed';persist()},
    async close(){if(closed)return;closed=true;try{const receipt=await client.release(op,row.result);row.phase=receipt?.releaseAccepted===true?'release_requested':'closed';persist()}finally{unlock()}},
+   async retryRelease(){const receipt=await client.release(op,row.result);row.phase=receipt?.releaseAccepted===true?'release_requested':'closed';persist();return receipt},
    async reconcileClosed(){
     // Read the authoritative closure of this exact operation. Never repeat a
     // browser action or infer delivery from a disconnected socket.
@@ -85,6 +85,11 @@ async function beginOnce({nome,purpose,intent='observe',hotUntil=0,observationRe
  }catch(error){if(op)try{await client.release(op,row?.result||'not_started')}catch{}unlock();throw error}
 }
 async function begin(options){
+ if(require('../workerIpc').isChild()&&!options._indexOwned){
+  const started=Date.now();
+  const request=()=>require('./indexClient').begin({...options,onWait:status=>{waiting.set(options.nome,{type:options.purpose,intent:options.intent,since:started,...status});options.onWait?.(status)}});
+  try{return options.purpose==='virtus'?await request():await require('../robeQueue').withoutActiveSlot(request)}finally{if(options.purpose!=='virtus')clock.addWait(Date.now()-started);waiting.delete(options.nome)}
+ }
  for(;;){
   if(options.signal?.aborted)throw options.signal.reason||Error('operation_canceled');
   try{return await beginOnce(options)}catch(error){
@@ -99,4 +104,17 @@ async function begin(options){
 function rotationAccountCount(nome){
  try{const desired=JSON.parse(fs.readFileSync(path.join(__dirname,'../../dados/desired.json'),'utf8'));return Math.max(1,Object.values(desired.perfis||{}).filter(p=>p?.active===true&&!p?.humanHold).length)}catch{return 1}
 }
-module.exports={readConfig,ensureConfig,begin,getWaiting:nome=>waiting.get(nome)||null};
+async function reconcileExisting({nome,purpose,intent='observe',operationId,release=false,root=ROOT,Client=OperationClient,config=readConfig()}){
+ config=config||await ensureConfig();if(!config)throw Error('cp2_not_enabled');
+ const type={publish:'publish',renew:'renew',id:'identity',virtus:'virtus',provision:'provision'}[purpose];if(!type)throw Error('cp2_flow_not_supported');
+ const stream=type==='virtus'?'virtus_'+(intent==='reply'?'reply':intent==='human'?'human':'observe'):type,file=root===ROOT?location(nome,stream):path.join(root,crypto.createHash('sha256').update(nome+'\0'+stream).digest('hex')+'.json'),row=JSON.parse(fs.readFileSync(file,'utf8'));
+ if(row.operationId!==operationId)throw Error('proxy_reconciliation_identity_mismatch');
+ const client=new Client({...config,edgeGeneration:row.edgeGeneration,releaseReceipt:true});
+ let status=await client.request('/'+operationId);
+ if(release&&!['released','canceled','expired','unknown','failed'].includes(status.state)){
+  status=await client.request('/'+operationId+(status.state==='queued'?'/cancel-queued':'/release'),status.state==='queued'?{expectedState:'queued'}:{leaseId:status.leaseId,leaseGeneration:status.leaseGeneration,carrierGeneration:status.carrierGeneration,businessResult:row.result});
+  if(status.releaseAccepted){row.phase='release_requested';write(file,row)}
+ }
+ const closed=['released','canceled','expired','unknown','failed'].includes(status.state);if(closed){row.phase='closed';write(file,row)}return {ok:true,closed,state:status.state,releaseAccepted:status.releaseAccepted===true};
+}
+module.exports={readConfig,ensureConfig,begin,reconcileExisting,getWaiting:nome=>waiting.get(nome)||null};

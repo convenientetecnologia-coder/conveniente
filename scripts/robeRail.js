@@ -635,7 +635,7 @@ async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', p
         } : null;
         const confirmed = activePurpose === 'renew' ? snap.operationConfirmed === true : snap.creationConfirmed === true;
         const result = { ok: snap.transportOk === true && confirmed, ...snap, purpose:activePurpose, traffic: total, afterClick, provider: 'phone' };
-        if(result.ok&&carrierOperation)carrierOperation.confirm();
+        if(result.ok&&carrierOperation)await carrierOperation.confirm();
         stepLog.appendJSONL(nome || 'system', 'robe', { step: 'robe_rail_publish_transport', ...result });
         return result;
       },
@@ -675,7 +675,7 @@ async function openRobeRail({ nome, cookies, liveBrowser, purpose = 'publish', p
       }
     };
     api.markIdentityStart=async()=>{if(carrierOperation)await carrierOperation.possibleSideEffect(purpose==='publish'?'identity':undefined)};
-    api.confirmIdentity=()=>{if(carrierOperation)carrierOperation.confirm(purpose==='publish'?'identity':undefined)};
+    api.confirmIdentity=async()=>{if(carrierOperation)await carrierOperation.confirm(purpose==='publish'?'identity':undefined)};
     browser.__ctRobeRail = api;
     browser.__ctIsolatedFlow = { kind: purpose, proxyRequired, rail: api };
     return api;

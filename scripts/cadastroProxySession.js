@@ -39,7 +39,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
     timer=(dependencies.setInterval||setInterval)(()=>{if(operation.snapshot().healthy!==true||(operation.snapshot().absoluteDeadline&&now()>=operation.snapshot().absoluteDeadline*1000)){failure='cadastro_proxy_transport_lost';rail.flip(null);close().catch(error=>onState({...snapshot(),error:String(error.message||error)}))}},500);timer.unref?.();
    },
    async possibleSideEffect(){assertHealthy();await operation.possibleSideEffect();assertHealthy()},
-   confirm(){assertHealthy();operation.confirm();noteStage('verified')},close,
+   async confirm(){assertHealthy();await operation.confirm();noteStage('verified')},close,
    cancel(){abort.abort(Error('cadastro_proxy_canceled'));return close()}
   };return api;
  }catch(error){failure=String(error.message||error);try{await close()}catch{}throw error}

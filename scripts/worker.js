@@ -13118,6 +13118,9 @@ async function executarColetaAnuncio({ coletaId, conta, url }) {
 }
 
 const handlers = {
+  async proxy_ready({ticket}) {
+    try{return {ok:true,ready:await require('./carrierV2/indexClient').ready(ticket)}}catch(error){return {ok:false,ready:false,error:String(error.message||error)}}
+  },
   async ['standby-sweep-probe']() {
     const snap = collectStandbySweepBusy();
     return {
@@ -14292,7 +14295,7 @@ const handlers = {
           if(!fresh?.ok||!fresh.cookies?.length)throw Error('cadastro_session_save_unconfirmed');
           await manifestStore.update(nome,m=>({...m,cookies:fresh.cookies,cookiesUpdatedAt:Date.now()}));
         }
-        ctrl.browser.__ctCadastroProxy?.confirm();
+        await ctrl.browser.__ctCadastroProxy?.confirm();
         await completeAccountProvisioning(nome, 'configure_success', {verifiedAuth:ctrl.browser.__ctNetworkPurpose==='cadastro'});
         try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed']); } catch {}
         try { provisionAudit.append({ ts: Date.now(), event: 'configure_success', nome: String(nome||''), operator: op || null, closedForRamCount: closedForRam.length, isStockProvision: !!isStockProvision }); } catch {}
@@ -15262,7 +15265,7 @@ const handlers = {
           const expected=(cadastroExpectedCookies||[]).some(c=>c.name==='c_user')?cadastroExpectedCookies:(await manifestStore.read(nome)).cookies;
           await require('./cadastroVerification').verify({browser:ctrl.browser,cookies:expected,expectedUserId:require('./cadastroIdentity').expected(await manifestStore.read(nome))});
         }
-        ctrl.browser.__ctCadastroProxy?.confirm();
+        await ctrl.browser.__ctCadastroProxy?.confirm();
         await completeAccountProvisioning(nome, 'login_remediate_success', {verifiedAuth:ctrl.browser.__ctNetworkPurpose==='cadastro'});
         if(cadastroBrowser){await closeCadastroBrowser(nome,cadastroBrowser);cadastroBrowser=null;}
         try { await clearAccountFlags(nome, ['loginRequired','loginRemediateFailed']); } catch {}

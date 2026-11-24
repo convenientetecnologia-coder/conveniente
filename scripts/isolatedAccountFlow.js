@@ -7,7 +7,7 @@ async function run({ page, nome, kind, deadlineAt = 0 }, action) {
   if(parent?.kind==='publish'&&parent.rail?.withStage&&['id','renew'].includes(kind)){
     return parent.rail.withStage(kind,async()=>{
       const result=await require('./carrierV2/clock').run(()=>action(page,parent.rail));
-      if(kind==='id'&&result?.ok&&(result.marked||result.alreadySubmitted||result.marketplacePhoneVerified||result.identityFlowConfirmed))parent.rail.confirmIdentity?.();
+      if(kind==='id'&&result?.ok&&(result.marked||result.alreadySubmitted||result.marketplacePhoneVerified||result.identityFlowConfirmed))await parent.rail.confirmIdentity?.();
       return result;
     });
   }
@@ -23,7 +23,7 @@ async function run({ page, nome, kind, deadlineAt = 0 }, action) {
     if (!pages[0]) throw new Error('isolated_flow_no_page');
     return await require('./carrierV2/clock').run(async()=>{
       const result=await action(pages[0], rail);
-      if(kind==='id'&&result?.ok&&(result.marked||result.alreadySubmitted||result.marketplacePhoneVerified||result.identityFlowConfirmed))rail.confirmIdentity?.();
+      if(kind==='id'&&result?.ok&&(result.marked||result.alreadySubmitted||result.marketplacePhoneVerified||result.identityFlowConfirmed))await rail.confirmIdentity?.();
       return result;
     });
   } finally {

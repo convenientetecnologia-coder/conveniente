@@ -59,6 +59,7 @@ function reply(msgId, data) {
 function onceReply(msgId, fn) {
   replyWait.set(msgId, fn);
 }
+function cancelReply(msgId){replyWait.delete(msgId)}
 
 function hasMaestro() {
   return !!(maestroSocket && !maestroSocket.destroyed);
@@ -71,5 +72,6 @@ module.exports = {
   sendToMaestro,
   reply,
   onceReply,
+  cancelReply,
   hasMaestro
 };

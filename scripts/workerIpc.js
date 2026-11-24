@@ -29,13 +29,16 @@ function request(msg, timeoutMs) {
   payload.msgId = msgId;
   const waitMs = Math.max(2000, Number(timeoutMs || 0) || 12000);
   return new Promise((resolve) => {
-    let done = false;
+    let done = false,t=null,onMsg=null;
     const finish = (data) => {
       if (done) return;
       done = true;
+      if(t)clearTimeout(t);
+      if(onMsg)try{process.off('message',onMsg)}catch{}
+      if(bus.isCellMode())bus.cancelReply?.(msgId);
       resolve(data);
     };
-    const t = setTimeout(() => finish({ ok: false, error: 'timeout' }), waitMs);
+    t = setTimeout(() => finish({ ok: false, error: 'timeout' }), waitMs);
     if (bus.isCellMode()) {
       bus.onceReply(msgId, (data) => {
         try { clearTimeout(t); } catch {}
@@ -47,7 +50,7 @@ function request(msg, timeoutMs) {
       }
       return;
     }
-    const onMsg = (m) => {
+    onMsg = (m) => {
       if (m && m.replyTo === msgId) {
         try { process.off('message', onMsg); } catch {}
         try { clearTimeout(t); } catch {}

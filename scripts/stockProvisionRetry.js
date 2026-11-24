@@ -1,6 +1,7 @@
 'use strict';
 function isTransient(error) {
  const value=String(error||'');
+  if(/^(?:proxy_index_unavailable|proxy_index_queue_full|proxy_job_not_found|proxy_worker_unavailable|proxy_job_canceled|proxy_index_job_canceled)$/.test(value))return true;
  if(value==='account_security:security_step_unconfirmed'||value==='fetch failed')return true;
  if(/^(maintenance|carrier_maintenance|operation_control_in_flight|carrier_ack_timeout)$/.test(value))return true;
  if(value.startsWith('pc_login_navigation_failed:'))return true;

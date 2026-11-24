@@ -170,7 +170,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
     while(!outgoingEvidence&&Date.now()<until&&!stopped)await new Promise(r=>setTimeout(r,250));
     if(!outgoingEvidence)throw Error('virtus_send_server_ack_unconfirmed');
     if(expectedSend.delivery)deliveryLedger.confirm(expectedSend.delivery,outgoingEvidence);
-    activeLease.confirm();visitReplied=true;activity.replied();
+    await activeLease.confirm();visitReplied=true;activity.replied();
     const now=Date.now();lastReplyTiming={confirmedAt:now,sendToConfirmationMs:now-expectedSend.since,customerToConfirmationMs:expectedSend.inboundAt&&now>=expectedSend.inboundAt?now-expectedSend.inboundAt:null};onState(api.snapshot());expectedSend=null;return outgoingEvidence;
    },
    async performVisit(options){
