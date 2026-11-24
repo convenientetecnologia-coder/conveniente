@@ -8693,7 +8693,7 @@ async function startVirtusDeltaWorkerRuntime(browser, nome, cfg = {}) {
     enqueueForceCollectLinkAndCity,
     stop: async () => {
       running = false;
-      if(proxySession)proxySession.stopObserver(proxyObserverVersion);
+      if(proxySession&&proxyObserverVersion!==undefined)proxySession.stopObserver(proxyObserverVersion);
       cityCollectSettledHandler = null;
       try { marketplaceEnforcer.stop(); } catch (_) {}
       try { if (cityTimer) clearInterval(cityTimer); } catch (_) {}
@@ -8722,7 +8722,10 @@ async function startVirtusDeltaRuntime() {
   const a1 = arguments[1];
   const a2 = arguments[2];
   const looksLikeBrowser = a0 && typeof a0.pages === "function";
-  if (looksLikeBrowser) return await startVirtusDeltaWorkerRuntime(a0, a1, a2 || {});
+  if (looksLikeBrowser) {
+    const start=()=>startVirtusDeltaWorkerRuntime(a0,a1,a2||{});
+    return a0.__ctVirtusProxy?await a0.__ctVirtusProxy.withRuntimeStartup(start):await start();
+  }
   return await startVirtusDeltaStandaloneRuntime((a0 && typeof a0 === "object") ? a0 : {});
 }
 

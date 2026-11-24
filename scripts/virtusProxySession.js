@@ -64,6 +64,14 @@ async function create({nome,onState=()=>{},dependencies={}}){
     browser.once('disconnected',()=>{api.close().catch(()=>{})});
    },
    finishBoot(){startupFinished=true;bootResolve()},
+   async withRuntimeStartup(action){
+    // First startup is already covered by boot(). A restarted runtime must
+    // obtain a fresh turn before any navigation or inbox preparation.
+    if(!startupFinished&&turn.state==='online')return action();
+    let runner;
+    await api.run('warm',async()=>{lastInbox=null;runner=await action();return lastInbox||{ok:false,state:'incomplete',reason:'startup_inbox_unconfirmed'}},{startup:true});
+    return runner;
+   },
    noteIncoming(at,threadKey){
     at=Number(at);activity.incoming(at);
     if(threadKey&&Number.isFinite(at)&&at<=Date.now()+5000&&Date.now()-at<=3600000){const key=String(threadKey);const old=inboundByThread.get(key)||0;if(at>old){inboundByThread.delete(key);inboundByThread.set(key,at)}while(inboundByThread.size>256)inboundByThread.delete(inboundByThread.keys().next().value)}
@@ -93,7 +101,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
         const reconnectAt=Date.now();connectedAt=reconnectAt;
         const pages=await browser.pages();
         for(const page of pages)try{await page.setOfflineMode(false)}catch{}
-        if(intent==='human')return await action(lease);
+        if(intent==='human'||turnOptions?.startup===true)return await action(lease);
         // Reconnection must have a ready document before any account action.
         const page=pages.find(p=>/facebook\.com\/messages|messenger\.com/.test(p.url()))||pages[0];
         if(!page)throw Error('virtus_proxy_page_missing');

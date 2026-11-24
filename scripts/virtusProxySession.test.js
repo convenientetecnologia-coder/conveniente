@@ -103,3 +103,24 @@ test('falha de transporte preserva navegador offline enquanto aguarda prova de e
  let safetyTick,closed=0,cleared=0,session;const rail={listen:async()=>1,close:async()=>{},flip(){},trafficSnapshot:()=>({})};class Client{async capabilities(){return {virtusTurns:true}}}
  session=await create({nome:'startup-failure',dependencies:{allowPilot:true,config:{virtus:{proxyEnabled:true}},Client,deliveryLedger:{accountBlocked:()=>false},setClosedBrowserInterval:fn=>{safetyTick=fn;return {unref(){}}},clearClosedBrowserInterval:()=>cleared++,cp2:{ensureConfig:async()=>{},readConfig:()=>({}),begin:async()=>({hop:{port:1},snapshot:()=>({healthy:true}),close:async()=>{throw Error('cp2_release_unconfirmed')}})},rails:{createDirectSwitch:()=>rail,proveThroughRail:async()=>'{"ip":"fixture"}',readExit:x=>x}}});const page={url:()=> 'https://www.facebook.com/messages',on(){},setOfflineMode:async offline=>{if(!offline)session.noteNetwork()},waitForFunction:async()=>{}};session.attach({pages:async()=>[page],on(){},once(){},isConnected:()=>true,close:async()=>closed++});await assert.rejects(session.run('observe',async()=>({ok:true})),/release_unconfirmed/);assert.equal(session.snapshot().startupFinished,false);assert.equal(session.snapshot().observer.registered,false);await safetyTick();assert.equal(closed,0);assert.equal(cleared,0);assert.equal(session.snapshot().state,'blocked');await safetyTick();assert.equal(closed,0);await session.close();
 });
+
+test('runtime restart waits for a fresh chair before navigation and retains it through inbox preparation',async()=>{
+ const {session,calls}=await operationalFixture();
+ session.finishBoot();let grant;session.turn.acquire=()=>new Promise(resolve=>grant=resolve);
+ let navigated=false,finish;const preparation=new Promise(resolve=>finish=resolve);
+ const task=session.withRuntimeStartup(async()=>{navigated=true;await preparation;session.noteInbox({ok:true,state:'marketplace_ready'});return {stop(){}}});
+ await new Promise(r=>setImmediate(r));assert.equal(navigated,false);assert.equal(calls.includes('release'),false);
+ grant({operationId:'restart-chair',hop:{port:1},snapshot:()=>({healthy:true}),close:async()=>calls.push('release')});
+ await new Promise(r=>setImmediate(r));assert.equal(navigated,true);assert.equal(calls.includes('release'),false);
+ finish();const runner=await task;assert.equal(typeof runner.stop,'function');assert.equal(calls.at(-1),'release');assert.ok(session.snapshot().lastCheckedAt>0);await session.close();
+});
+test('first runtime startup reuses its bootstrap chair without deadlocking on a second request',async()=>{
+ const {session,calls}=await operationalFixture();await session.boot();
+ const runner=await session.withRuntimeStartup(async()=>{session.noteInbox({ok:true,state:'marketplace_ready'});session.finishBoot();return 'runtime'});
+ assert.equal(runner,'runtime');await session.turn.tail;assert.equal(calls.filter(x=>x==='connect').length,1);assert.equal(calls.filter(x=>x==='release').length,1);await session.close();
+});
+test('runtime restart failure releases its chair and cannot retain stale inbox success',async()=>{
+ const {session}=await operationalFixture();session.finishBoot();session.noteInbox({ok:true,state:'marketplace_ready'});
+ await assert.rejects(session.withRuntimeStartup(async()=>{throw Error('navigation_failed')}),/navigation_failed/);
+ assert.equal(session.snapshot().lastCheckedAt,0);assert.equal(session.snapshot().lastInbox,null);assert.equal(session.snapshot().state,'offline');await session.close();
+});
