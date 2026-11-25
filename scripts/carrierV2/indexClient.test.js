@@ -13,3 +13,11 @@ test('Index unavailable cannot turn into direct Internet or a fabricated grant',
  const abort=new AbortController();let requested=0;
  await assert.rejects(worker.begin({nome:'fixture',purpose:'virtus',signal:abort.signal,onWait:()=>abort.abort(Error('operator canceled'))},{request:async()=>{requested++;return {ok:false,error:'ipc_send_failed'}},pollMs:0}),/operator canceled/);assert.ok(requested>=1);
 });
+
+test('unhealthy lease is returned even while its worker stays alive, unblocking the same account only after closure proof',async()=>{
+ let healthy=true,phase='active',proof=false,timer,closed=0;const broker=new Coordinator({acquire:async()=>({operationId:'expired-operation',hop:{port:1},snapshot:()=>({healthy,phase}),close:async()=>{closed++;phase='release_requested'},reconcileClosed:async()=>proof})});
+ const request=async m=>{try{return m.action==='enqueue'?broker.enqueue(m.job,'worker',{ready:id=>worker.ready(id)}):await broker.command(m.ticket,'worker',m.action,m.stage)}catch(e){return{ok:false,error:e.message}}};
+ const old=await worker.begin({nome:'account',purpose:'publish'},{request,pollMs:0,setTimer:fn=>{timer=fn;return{unref(){}}},clearTimer:()=>{}});
+ const human={id:require('crypto').randomUUID(),nome:'account',purpose:'virtus',intent:'human'};broker.enqueue(human,'worker');await new Promise(setImmediate);assert.equal(broker.jobs.get(human.id).state,'queued');
+ healthy=false;await timer();assert.equal(closed,1);assert.equal(old.snapshot().healthy,false);assert.equal(broker.jobs.get(human.id).state,'queued');proof=true;healthy=true;await broker.sweep();for(let i=0;i<10&&broker.jobs.get(human.id).state!=='granted';i++)await new Promise(setImmediate);assert.equal(broker.jobs.get(human.id).state,'granted');
+});

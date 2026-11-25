@@ -3241,6 +3241,7 @@ async function _buildHumanOverlayData(nome, { localOnly = false } = {}) {
       stockAccountId: (robeMeta[nome] && robeMeta[nome].overlayCredCache && robeMeta[nome].overlayCredCache.stockAccountId) ? robeMeta[nome].overlayCredCache.stockAccountId : null,
       login,
       password,
+      proxyHuman:controllers.get(nome)?.browser?.__ctVirtusProxy?.humanStatus?.()||null,
       reason: _overlayReasonFromFlags(flags),
       flags: {
         loginRequired: flags && flags.loginRequired === true,
@@ -3289,9 +3290,9 @@ async function _installOverlayOnPage(nome, page) {
           // Evidência enterprise (sem credenciais)
           try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_resume_clicked', nome: String(nome || '') }); } catch {}
         } catch {}
-        try { await handlers['human-resume']({ nome }); } catch {}
-        try { await syncHumanOverlay(nome); } catch {}
-        return true;
+        let result;try{result=await handlers['human-resume']({nome})}catch(error){result={ok:false,error:String(error.message||error)}}
+        try { await syncHumanOverlay(nome,{localOnly:true}); } catch {}
+        return result;
       });
     } catch (e) {
       // Se já existe, ok. Se falhar por outro motivo, registrar para diagnóstico.
@@ -3300,6 +3301,9 @@ async function _installOverlayOnPage(nome, page) {
         try { provisionAudit.append({ ts: Date.now(), event: 'human_overlay_expose_resume_failed', nome: String(nome||''), error: msg.slice(0, 220) }); } catch {}
       }
     }
+
+    try{await page.exposeFunction('__ctHumanOverlayProxyStatus',()=>controllers.get(nome)?.browser?.__ctVirtusProxy?.humanStatus?.()||{supported:false})}catch{}
+    try{await page.exposeFunction('__ctHumanOverlayRenewProxy',async()=>{const proxy=controllers.get(nome)?.browser?.__ctVirtusProxy;if(!proxy||!controllers.get(nome)?.humanControl)return {ok:false,error:'human_proxy_not_active'};if(controllers.get(nome)?._proxyHumanResuming)return {ok:false,error:'human_resume_in_progress'};return proxy.renewHuman()})}catch{}
 
     // Ações do HUD (enterprise): fechar navegador / pause robe 24h / excluir conta.
     // Importante: o HUD roda no browser, mas as ações rodam no Node via exposeFunction (sem CORS).
@@ -3570,7 +3574,9 @@ async function _installOverlayOnPage(nome, page) {
                   <div class="row"><div class="k">Motivo</div><div class="v mono" id="reason"></div></div>
                   <div class="row"><div class="k">Login</div><div class="v mono" id="login"></div></div>
                   <div class="row"><div class="k">Senha</div><div class="v mono" id="pass"></div></div>
+                  <div class="row" id="proxyLeaseRow" style="display:none"><div class="k">Cadeira</div><div class="v" id="proxyLeaseStatus"></div></div>
                   <div class="btns">
+                    <button id="renewProxyLease" style="display:none">Renovar cadeira (+5 min)</button>
                     <button id="copyLogin">Copiar login</button>
                     <button id="copyPass">Copiar senha</button>
                     <button id="renewListings" title="Gerenciar classificados → scroll → selecionar → renovar (não fecha o navegador)">Renovar classificado</button>
@@ -4215,6 +4221,7 @@ async function _installOverlayOnPage(nome, page) {
               }
               try { $('deleteAcc').disabled = false; } catch {}
             });
+            $('renewProxyLease')?.addEventListener('click',async()=>{const b=$('renewProxyLease');window.__ctHumanProxyRenewBusy=true;b.disabled=true;try{$('proxyLeaseStatus').textContent='Renovando conexão...';const r=await window.__ctHumanOverlayRenewProxy();if(!r?.ok)$('hint').textContent='Falha ao renovar cadeira: '+String(r?.error||'não confirmada');}catch{$('hint').textContent='Não foi possível renovar a cadeira.'}finally{window.__ctHumanProxyRenewBusy=false;b.disabled=false}});
             $('resume')?.addEventListener('click', async () => {
               try { window.__ctHumanOverlayLog && window.__ctHumanOverlayLog({ event:'resume_click' }); } catch {}
               try { stopOverlayAutoScroll('resume'); } catch {}
@@ -4222,8 +4229,8 @@ async function _installOverlayOnPage(nome, page) {
               try { $('resume').disabled = true; } catch {}
               try {
                 if (typeof window.__ctHumanOverlayResume === 'function') {
-                  await window.__ctHumanOverlayResume();
-                  try { $('hint').textContent = 'Retomada solicitada. Aguarde...'; } catch {}
+                  const result=await window.__ctHumanOverlayResume();
+                  try{$('hint').textContent=result?.ok?'Retomada validada.':'Retomada não confirmada: '+String(result?.error||'aguarde');}catch{}
                 } else {
                   try { $('hint').textContent = 'Falha: binding de retomar indisponível. Aguarde resincronização.'; } catch {}
                 }
@@ -4463,6 +4470,9 @@ async function _installOverlayOnPage(nome, page) {
             } catch {}
           };
 
+          let proxyPollBusy=false;
+          const proxyTick=async()=>{if(proxyPollBusy||!document.getElementById(HOST_ID)||typeof window.__ctHumanOverlayProxyStatus!=='function')return;proxyPollBusy=true;try{const s=await window.__ctHumanOverlayProxyStatus();const root=document.getElementById(HOST_ID)?.shadowRoot,row=root?.getElementById('proxyLeaseRow'),out=root?.getElementById('proxyLeaseStatus'),button=root?.getElementById('renewProxyLease');if(!row||!out||!button)return;row.style.display=s.supported?'':'none';button.style.display=s.supported?'':'none';if(s.supported){button.disabled=s.state==='resuming'||window.__ctHumanProxyRenewBusy===true;const seconds=Math.max(0,Math.ceil(Number(s.remainingMs||0)/1000)),timer=Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0');out.textContent=s.state==='online'?'Online — '+timer+' restantes':s.state==='resuming'?'Validando retomada — aguardando cadeira/conversas':s.state==='waiting'?'Aguardando cadeira prioritária':s.state==='expired'?'Tempo encerrado — renovar para reconectar':'Offline — renovar para conectar';}}catch{}finally{proxyPollBusy=false}};
+          if(window.__ctHumanProxyStatusTimer)clearInterval(window.__ctHumanProxyStatusTimer);window.__ctHumanProxyStatusTimer=setInterval(()=>proxyTick(),1000);proxyTick();
           window.addEventListener('DOMContentLoaded', () => { try { render(); } catch {} }, { once: true });
           // Resiliência: se SPA mexer no DOM e remover, recria.
           setInterval(() => { try { render(); } catch {} }, 5000);
@@ -11417,6 +11427,7 @@ async function getRobeModuleFor(nome) {
 
 // Wrapper: startRobeDynamic (substitui hook global robeHelper.startRobe)
 async function startRobeDynamic(browser, nome, robePauseMs, workingNow, photoDeletePolicy = "after_all_working_posted") {
+  if(isProfileHumanHeld(nome))return {ok:false,error:'profile_in_human_mode'};
   if(browser?.__ctVirtusProxy&&require('./proxyOpenBatch').holds())return {ok:false,blocked:true,error:'host_opening_batch'};
   const authFlags=await readAccountFlags(nome);
   if(authFlags?.loginRequired===true){
@@ -16194,7 +16205,8 @@ const handlers = {
         read:()=>readJsonFile(desiredPath,{perfis:{}}).perfis?.[nome],
         update:fn=>fileStore.withDesiredFileLockUpdate(d=>{d.perfis=d.perfis||{};d.perfis[nome]=fn(d.perfis[nome]||{});return d}),
         guard:on=>syncDeltaHumanHoldBrowserGuard(nome,on,{reason:'proxy_manual_resume'}),
-        overlay:()=>{if(robeMeta[nome])robeMeta[nome].forceOverlayUntil=0;return syncHumanOverlay(nome,{hide:true});},snapshot:()=>snapshotStatusAndWrite({force:true})
+        overlay:({hide=true}={})=>{if(hide&&robeMeta[nome])robeMeta[nome].forceOverlayUntil=0;return hide?syncHumanOverlay(nome,{hide:true,localOnly:true}):ensureHumanOverlay(nome,controllers.get(nome),{reason:'resume_failed',localOnly:true});},snapshot:()=>snapshotStatusAndWrite({force:true}),
+        validate:()=>require('./humanResumeInbox').restore({browser:controllers.get(nome).browser,health:page=>require('./virtusOnlineHealth').check(page,{securityCheck:p=>require('./accountSecurityGate').check({page:p,nome})}),prepare:(page,health)=>require('./virtusDelta').prepareProxyInbox(page,health)})
       }));
     }
     return lockProfileAction(nome, async () => {

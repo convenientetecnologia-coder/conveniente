@@ -29,7 +29,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
   const ready=new Promise((resolve,reject)=>{bootReady=resolve;bootReject=reject});
   const boot=()=>{const task=turn.run('warm',async()=>{bootReady();await bootGate;return lastInbox||{ok:false,state:'incomplete',reason:'startup_inbox_unconfirmed'}});task.catch(bootReject);return ready};
   let bootstrapOutcome=null;
-  let browser=null,timer=null,stopped=false,lastNetworkAt=0,lastSyncNetworkAt=0,connectedAt=Date.now(),observerBusy=false,observerOptions=null,observerLastTickAt=0,lastObserveAttemptAt=0,observerSkipReason=null,observerVersion=0,startupFinished=false,healthCheck=null,lastInbox=null,activeLease=null,expectedSend=null,outgoingEvidence=null,humanHeld=false,humanTimer=null,humanResolve=null,humanTask=null;
+  let browser=null,timer=null,stopped=false,lastNetworkAt=0,lastSyncNetworkAt=0,connectedAt=Date.now(),observerBusy=false,observerOptions=null,observerLastTickAt=0,lastObserveAttemptAt=0,observerSkipReason=null,observerVersion=0,startupFinished=false,healthCheck=null,lastInbox=null,activeLease=null,expectedSend=null,outgoingEvidence=null,humanHeld=false,humanControl=null;
   const deliveryLedger=dependencies.deliveryLedger||require("./virtusDeliveryLedger");
   let closedBrowserTimer=null,recoveringClosedBrowser=false,nextTransportRecoveryAt=0,transportRecoveryDelay=2000;
   let lastDocumentNavigation=null,documentNavigations=0,plannedNavigationReason=null,lastBootGate=null;
@@ -87,16 +87,12 @@ async function create({nome,onState=()=>{},dependencies={}}){
    visitNetwork(page){return {connectedAt,lastNetworkAt:lastSyncNetworkAt,pending:page?.__ctVirtusPendingInbox?.size||0}},
    setHealthCheck(fn){healthCheck=fn},
    noteInbox(result){lastInbox={...result,at:Date.now()};onState(api.snapshot())},
-   snapshot(){return {...turn.snapshot(),bootstrapOutcome,lastNetworkAt,humanHeld,pilot:accountPilot,lastInbox,startupFinished,documentNavigations,lastDocumentNavigation,lastBootGate,rotation:rotationPolicy,lastReplyTiming,activity:activity.snapshot(),pendingBurst:burst.length,observer:{registered:!!observerOptions,lastTickAt:observerLastTickAt,skipReason:observerSkipReason,guard:observerOptions?.describeGuard?.()||null}}},
-   async enterHuman(){
-    if(humanTask)return humanTask.ready;
-    humanHeld=true;api.finishBoot();let readyResolve,readyReject;const ready=new Promise((r,j)=>{readyResolve=r;readyReject=j});
-    const gate=new Promise(r=>humanResolve=r),cancel=new AbortController();turn.cancelWaitingObservation();
-    const task=api.run('human',async()=>{humanTimer=setTimeout(()=>{humanResolve?.();},dependencies.humanLeaseMs||5*60*1000);humanTimer.unref?.();readyResolve();await gate},{signal:cancel.signal});
-    humanTask={ready,task,cancel};
-    task.then(()=>{},readyReject).finally(()=>{clearTimeout(humanTimer);humanTask=null;humanHeld=false}).catch(()=>{});return ready;
-   },
-   async leaveHuman(){if(!humanTask){humanHeld=false;return}const {task,cancel}=humanTask;clearTimeout(humanTimer);cancel.abort(Error('virtus_human_canceled'));humanResolve?.();try{await task}catch(error){if(error.message!=='virtus_human_canceled')throw error}finally{humanHeld=false}},
+   snapshot(){return {...turn.snapshot(),bootstrapOutcome,lastNetworkAt,humanHeld,human:humanControl?.status()||null,pilot:accountPilot,lastInbox,startupFinished,documentNavigations,lastDocumentNavigation,lastBootGate,rotation:rotationPolicy,lastReplyTiming,activity:activity.snapshot(),pendingBurst:burst.length,observer:{registered:!!observerOptions,lastTickAt:observerLastTickAt,skipReason:observerSkipReason,guard:observerOptions?.describeGuard?.()||null}}},
+   enterHuman(){return humanControl.enter()},
+   leaveHuman(){return humanControl.leave()},
+   renewHuman(){return humanControl.renew()},
+   resumeHuman(validate){return humanControl.resume(validate)},
+   humanStatus(){return humanControl.status()},
    async run(intent,action,turnOptions){
     if(intent==='reply'&&activeLease&&!activeLease.snapshot().reconciliationOnly&&['warm','observe','engaged'].includes(visitIntent)&&!humanHeld&&!visitReplied&&burst.length<1){return new Promise((resolve,reject)=>burst.push({action,resolve,reject}))}
     return turn.run(intent,async lease=>{
@@ -223,8 +219,9 @@ async function create({nome,onState=()=>{},dependencies={}}){
     };
     timer=(dependencies.setObserverInterval||setInterval)(()=>tick().catch(error=>onState({...api.snapshot(),error:String(error.message||error)})),5000);timer.unref?.();return version;
    },
-   async close(){if(stopped)return;stopped=true;(dependencies.clearClosedBrowserInterval||clearInterval)(closedBrowserTimer);closedBrowserTimer=null;api.stopObserver();humanResolve?.();bootResolve();await turn.close()}
+   async close(){if(stopped)return;stopped=true;(dependencies.clearClosedBrowserInterval||clearInterval)(closedBrowserTimer);closedBrowserTimer=null;api.stopObserver();await humanControl.leave();bootResolve();await turn.close()}
   };
+  humanControl=new(require('./humanProxyLease').HumanProxyLease)({run:(action,options)=>api.run('human',action,options),beforeEnter:()=>{api.finishBoot();turn.cancelWaitingObservation()},lease:()=>activeLease,state:()=>turn.state,holding:value=>{humanHeld=value},notify:()=>onState(api.snapshot()),spanMs:dependencies.humanLeaseMs||300000});
   return api;
  }catch(error){await rail.close();throw error}
 }

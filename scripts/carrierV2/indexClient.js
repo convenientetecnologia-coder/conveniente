@@ -19,7 +19,7 @@ async function begin(options,{request=ipc.request,pollMs=1000,setTimer=setInterv
  finally{readiness.delete(id)}
  let last=granted.snapshot,lastAt=Date.now(),closed=false,checking=false,operationStarted=false;
  const refresh=response=>{if(response.snapshot){last=response.snapshot;lastAt=Date.now()}return response};
- const timer=setTimer(async()=>{if(closed||checking)return;checking=true;try{refresh(await rpc('status'))}catch{last={...last,healthy:false}}finally{checking=false}},2000);timer.unref?.();
+ const timer=setTimer(async()=>{if(closed||checking)return;checking=true;try{refresh(await rpc('status'));if(last?.healthy===false||last?.absoluteDeadline&&Date.now()>=last.absoluteDeadline*1000)await api.close()}catch{last={...last,healthy:false}}finally{checking=false}},2000);timer.unref?.();
  const assertHealthy=()=>{if(last?.healthy!==true||Date.now()-lastAt>30000||last.absoluteDeadline&&Date.now()>=last.absoluteDeadline*1000)throw Error('cp2_transport_not_healthy')};
  const api={operationId:granted.operationId,hop:granted.hop,
   async possibleSideEffect(stage){assertHealthy();refresh(await rpc('effect',{stage}));assertHealthy()},
