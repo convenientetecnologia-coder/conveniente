@@ -43,3 +43,20 @@ test('sucesso sem quantidade persiste renovação e entra na contagem de contas'
  const aggregate=require('./renewMetrics').aggregateRenovadosFromPerfis;
  assert.deepEqual(aggregate([{...manifest.accountFlags,marketplaceRenewDoneToday:true}]),{renovados:1,renovados_qtd:0});
 });
+
+test('loading indicator prevents readiness even when Renew is enabled',async()=>{assert.equal((await run({hasHeader:true,renewBtn:{enabled:true},loading:true,signature:'same'})).ok,false)});
+test('list count or content changes reset the stability window',async()=>{const r=await run(clock=>({hasHeader:true,renewBtn:{enabled:true},signature:String(Math.floor(clock/4000))}));assert.equal(r.ok,false)});
+test('slow list loading succeeds only after content and enabled control stabilize',async()=>{const r=await run(clock=>({hasHeader:true,renewBtn:{enabled:true},loading:clock<10000,signature:clock<10000?String(clock):'loaded'}));assert.equal(r.ok,true)});
+
+test('scroll cannot turn missing DOM or perpetual loading into successful completion',async()=>{
+ const a=source.indexOf('async function scrollToAgeThreshold('),b=source.indexOf('async function scrollToTop(',a);
+ for(const snapshot of [null,{moved:false,loading:true,ageHit:false}]){
+  const fn=vm.runInNewContext(source.slice(a,b)+';scrollToAgeThreshold',{Date,Math,SCROLL_STOP_AGE_DAYS:46,SCROLL_STUCK_TICKS_LIMIT:2,SCROLL_STEP_PX:380,SCROLL_INTERVAL_MS:900,progress:async()=>{},safeEvaluate:async()=>snapshot,sleep:async()=>{}});
+  const result=await fn({},{scrollStopAgeDays:20});assert.equal(result.ok,false);assert.equal(result.reason,'listing_scroll_budget_exhausted');
+ }
+});
+test('scroll cancellation stops before reading or scrolling the DOM',async()=>{
+ const a=source.indexOf('async function scrollToAgeThreshold('),b=source.indexOf('async function scrollToTop(',a);let reads=0;
+ const fn=vm.runInNewContext(source.slice(a,b)+';scrollToAgeThreshold',{Date,Math,SCROLL_STOP_AGE_DAYS:46,SCROLL_STUCK_TICKS_LIMIT:2,progress:async()=>{},safeEvaluate:async()=>{reads++},sleep:async()=>{}});
+ assert.equal((await fn({},{isAborted:()=>true})).ok,false);assert.equal(reads,0);
+});

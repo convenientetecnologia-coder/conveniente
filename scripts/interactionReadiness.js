@@ -27,6 +27,7 @@ function inspectElement(el){
  return {ready:true,signature:[registry.ids.get(el),location.href,el.tagName,el.getAttribute('aria-label')||el.textContent?.trim().slice(0,160)||'',Math.round(r.x),Math.round(r.y),Math.round(r.width),Math.round(r.height)].join('|')};
 }
 async function waitElement(page,handle,options={}){
+ options={...options,timeoutMs:require('./interactionBudget').timeout(page,options.timeoutMs??60000)};
  return waitStable(()=>{require('./interactionLease').assert(page);return page.evaluate(inspectElement,handle)},{...options,isClosed:()=>page.isClosed?.()===true});
 }
 async function controlHandle(page,labels,{exact=false,withinDialog=false,excludeSubstrings=[],withinSelector=null}={}){
@@ -49,12 +50,14 @@ async function controlHandle(page,labels,{exact=false,withinDialog=false,exclude
  },{wanted,exact,withinDialog,excludeSubstrings,withinSelector});
 }
 async function waitControl(page,labels,{timeoutMs=15000,...options}={}){
+ timeoutMs=require('./interactionBudget').timeout(page,timeoutMs);
  return waitStable(async()=>{
   const handle=await controlHandle(page,labels,options);
   try{const el=handle.asElement();return el?await page.evaluate(inspectElement,el):null}finally{await handle.dispose()}
  },{timeoutMs,...options,isClosed:()=>page.isClosed?.()===true});
 }
 async function clickControl(page,labels,{timeoutMs=15000,...options}={}){
+ timeoutMs=require('./interactionBudget').timeout(page,timeoutMs);
  const started=Date.now();let handle=null;
  try{
   // Hold the exact element that became stable; do not re-select a hidden duplicate.

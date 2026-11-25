@@ -12,7 +12,7 @@ const SCROLL_STOP_AGE_DAYS = 46;
 const SCROLL_STEP_PX = 380;
 const SCROLL_INTERVAL_MS = 900;
 const SCROLL_STUCK_TICKS_LIMIT = 180;
-const RENEW_SCREEN_WAIT_MS = 120000;
+const RENEW_SCREEN_WAIT_MS = 180000;
 const ACTIONS_MENU_WAIT_MS = 120000;
 const SELECT_ALL_WAIT_MS = 120000;
 const NAV_TIMEOUT_MS = 120000;
@@ -91,6 +91,7 @@ function normalizeTxt(s) {
 }
 
 async function safeEvaluate(page, fn, ...args) {
+  require('./interactionLease').assert(page);
   try {
     return await page.evaluate(fn, ...args);
   } catch {
@@ -240,7 +241,7 @@ async function ensureSelling(page, { onProgress } = {}) {
   return true;
 }
 
-async function scrollToAgeThreshold(page, { onProgress, scrollStopAgeDays = SCROLL_STOP_AGE_DAYS } = {}) {
+async function scrollToAgeThreshold(page, { onProgress, scrollStopAgeDays = SCROLL_STOP_AGE_DAYS, deadlineAt=0, isAborted=null } = {}) {
   const ageDays = Math.max(1, Math.min(120, Math.floor(Number(scrollStopAgeDays) || SCROLL_STOP_AGE_DAYS) || SCROLL_STOP_AGE_DAYS));
   await progress(page, onProgress, 'scroll_down', `Rolando classificados até ${ageDays} dia(s)...`);
   const targetIso = (() => {
@@ -256,6 +257,7 @@ async function scrollToAgeThreshold(page, { onProgress, scrollStopAgeDays = SCRO
   let stuckTicks = 0;
   let lastTop = -1;
   for (let tick = 0; tick < SCROLL_STUCK_TICKS_LIMIT + 40; tick++) {
+    if((isAborted&&isAborted())||(deadlineAt&&now()>=require('./carrierV2/clock').effective(deadlineAt)))return {ok:false,reason:'scroll_budget_exhausted'};
     const snap = await safeEvaluate(
       page,
       ({ step, targetIso, SCROLL_STOP_AGE_DAYS }) => {
@@ -378,11 +380,13 @@ async function scrollToAgeThreshold(page, { onProgress, scrollStopAgeDays = SCRO
           const targetDate = new Date(`${targetIso}T00:00:00`);
           if (!Number.isNaN(targetDate.getTime()) && oldestTs <= targetDate.getTime()) ageHit = true;
         }
-        return { moved: after !== before, top: after, ageHit, oldestTs, targetIso };
+        const loading=[...document.querySelectorAll('[aria-busy="true"],[role="progressbar"]')].some(el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>2&&r.height>2&&s.display!=='none'&&s.visibility!=='hidden'&&!el.closest('[aria-hidden="true"]')});
+        return { moved: after !== before, top: after, ageHit, oldestTs, targetIso, loading };
       },
       { step: SCROLL_STEP_PX, targetIso, SCROLL_STOP_AGE_DAYS }
     );
 
+    if(!snap||snap.loading){await sleep(SCROLL_INTERVAL_MS);continue;}
     if (snap && snap.ageHit) {
       await progress(page, onProgress, 'scroll_done', 'Scroll concluído (data alvo alcançada).');
       return { ok: true, reason: 'age_threshold_reached' };
@@ -407,7 +411,7 @@ async function scrollToAgeThreshold(page, { onProgress, scrollStopAgeDays = SCRO
     }
     await sleep(SCROLL_INTERVAL_MS);
   }
-  return { ok: true, reason: 'tick_budget' };
+  return { ok: false, reason: 'listing_scroll_budget_exhausted' };
 }
 
 async function scrollToTop(page) {
@@ -447,7 +451,7 @@ async function scrollToTop(page) {
 async function waitRenewScreenStable(page, { onProgress, timeoutMs = RENEW_SCREEN_WAIT_MS } = {}) {
   await progress(page, onProgress, 'renew_screen', 'Aguardando botão Renovar...');
   const t0 = now();
-  let readySince = null;
+  let readySince = null, signature=null;
   let lastSnapshot = null;
   while (now() - t0 < timeoutMs) {
     const snap = await safeEvaluate(page, () => {
@@ -466,11 +470,15 @@ async function waitRenewScreenStable(page, { onProgress, timeoutMs = RENEW_SCREE
         renewBtn = { enabled };
         if (enabled) break;
       }
-      return { hasHeader, renewBtn };
+      const root=document.querySelector('[role="dialog"],[aria-modal="true"]')||document.querySelector('[role="main"]')||document.body;
+      const visible=el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>2&&r.height>2&&s.display!=='none'&&s.visibility!=='hidden'&&!el.closest('[aria-hidden="true"]')};
+      const loading=document.readyState==='loading'||!!(root&&[...root.querySelectorAll('[aria-busy="true"],[role="progressbar"],[role="status"]')].some(el=>visible(el)&&(el.getAttribute('aria-busy')==='true'||el.getAttribute('role')==='progressbar'||/carregando|loading/i.test(el.innerText))));
+      const signature=text.slice(0,16000);
+      return { hasHeader, renewBtn, loading, signature };
     });
     lastSnapshot = snap;
-    if (snap && snap.hasHeader && snap.renewBtn && snap.renewBtn.enabled) {
-      if (readySince === null) readySince = now();
+    if (snap && snap.hasHeader && snap.renewBtn && snap.renewBtn.enabled && !snap.loading) {
+      if (readySince === null || signature!==snap.signature){readySince=now();signature=snap.signature;}
       if (now() - readySince >= RENEW_READY_STABLE_MS) return { ok: true, reason: 'ready', snapshot: snap };
     } else readySince = null;
     await sleep(1000);
@@ -1256,7 +1264,8 @@ async function runMarketplaceRenewListings({
     }
     if (aborted()) return abortResult();
 
-    const scrolled = await scrollToAgeThreshold(page, { onProgress, scrollStopAgeDays: ageDays });
+    const scrolled = await scrollToAgeThreshold(page, { onProgress, scrollStopAgeDays: ageDays, deadlineAt, isAborted });
+    if(!scrolled?.ok)return {ok:false,error:scrolled?.reason||'listing_scroll_unconfirmed',renewedCount:0};
     audit('renew_listings_scrolled', { reason: scrolled && scrolled.reason, scrollStopAgeDays: ageDays });
     if (aborted()) return abortResult();
 

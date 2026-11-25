@@ -15,7 +15,7 @@ async function inspect(page){
   return {ready:true,buttons,file,text,cnh,signature:JSON.stringify([text,buttons.map(b=>b.label),file])};
  });}catch(error){if(/execution context.*destroy|cannot find context|context.*not found|cannot find.*context|inspected target navigated/i.test(String(error.message||error)))return {ready:false};throw error;}
 }
-async function navigate({page,deadlineAt,detect,selectCnh,reveal=async()=>{},record=()=>{},clock=Date.now,sleep=ms=>new Promise(r=>setTimeout(r,ms)),stepTimeoutMs=60000,stableMs=700,click=(labels,timeoutMs)=>require('./interactionReadiness').clickControl(page,labels,{exact:true,withinDialog:true,timeoutMs})}){
+async function navigate({page,deadlineAt,detect,selectCnh,reveal=async()=>{},record=()=>{},clock=Date.now,sleep=ms=>new Promise(r=>setTimeout(r,ms)),stepTimeoutMs=120000,stableMs=700,click=(labels,timeoutMs)=>require('./interactionReadiness').clickControl(page,labels,{exact:true,withinDialog:true,timeoutMs})}){
  const terminal=new Set(['success','pending_review','marketplace_phone_confirm','marketplace_phone_entry','marketplace_phone_code','marketplace_phone_success']);
  let transitions=0,idleSince=clock();
  while(clock()<deadlineAt){
@@ -35,7 +35,7 @@ async function navigate({page,deadlineAt,detect,selectCnh,reveal=async()=>{},rec
    pick([/^(avancar|next)$/, /^a seguir:.*verificacao/, /^continue para a verificacao/])||
    pick([/^(?:confirme|confirmar|verificar|verifique)(?: sua)? identidade$/, /^(?:confirm|verify)(?: your)? identity$/]);
   if(!label){if(clock()-idleSince>=stepTimeoutMs)return {ok:false,error:'identity_control_not_ready',screen,transitions};await sleep(250);continue;}
-  const clicked=await click([label],Math.max(1,Math.min(15000,deadlineAt-clock())));
+  const clicked=await click([label],Math.max(1,Math.min(60000,deadlineAt-clock())));
   record({event:'control_click',screen,label,clicked:clicked?.ok===true});
   if(!clicked?.ok){if(clock()-idleSince>=stepTimeoutMs)return {ok:false,error:'identity_control_not_clickable',screen,transitions};await sleep(250);continue;}
   const until=Math.min(deadlineAt,clock()+stepTimeoutMs);let candidate=null,since=0,changed=false;
