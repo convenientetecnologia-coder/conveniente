@@ -69,6 +69,19 @@ test('document without body is a loading state, not an exception',async()=>{
   assert.equal((await navigation.inspect(page)).ready,false);
  }finally{await page.close()}
 });
+test('upload identity button rendered outside the first main is still found',{timeout:15000},async()=>{
+ const page=await browser.newPage();try{
+  await page.setContent('<main role="main"><h1>Painel anterior</h1></main><section><h1>Carregar seu documento de identidade</h1><p>Para continuar a vender e enviar mensagens no Marketplace, precisamos de uma foto do seu documento de identidade oficial.</p><div role="button" aria-label="Carregar documento de identidade" tabindex="0"><div role="none"><span>Carregar documento de identidade</span></div></div></section>');
+  await page.evaluate(()=>document.querySelector('[role=button]').onclick=()=>{document.body.innerHTML='<h1>Carregue uma foto do seu documento</h1><input type=file><button>Carregar</button>'});
+  const result=await navigate(page,{stepTimeoutMs:5000});assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.screen,'upload_photo');
+ }finally{await page.close()}
+});
+test('unrelated visible dialog does not hide the actual identity action',{timeout:15000},async()=>{
+ const page=await fixture(['load']);try{
+  await page.evaluate(()=>{const d=document.createElement('div');d.setAttribute('role','dialog');d.innerHTML='<p>Ajuda</p>';document.body.append(d)});
+  const result=await navigate(page,{stepTimeoutMs:5000});assert.equal(result.ok,true,JSON.stringify(result));assert.deepEqual(await page.evaluate(()=>window.clicks),['load']);
+ }finally{await page.close()}
+});
 test('destroyed execution context is retried but unhealthy transport is never swallowed',async()=>{
  const page={browser:()=>({}),evaluate:async()=>{throw Error('Execution context was destroyed, most likely because of a navigation.')}};
  assert.equal((await navigation.inspect(page)).ready,false);

@@ -5,7 +5,8 @@ async function inspect(page){
   const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
   const visible=el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>2&&r.height>2&&s.visibility!=='hidden'&&s.display!=='none'&&!el.closest('[aria-hidden="true"],[inert]')};
   const dialogs=[...document.querySelectorAll('[role="dialog"],[aria-modal="true"]')].filter(visible);
-  const root=dialogs.at(-1)||document.querySelector('[role="main"]')||document.body;
+  const identityRoot=dialogs.findLast(el=>/identidade|identity|documento|document|carteira|license/.test(norm(el.innerText)));
+  const root=identityRoot||document.body;
   if(!root||document.readyState==='loading')return {ready:false};
   const buttons=[...root.querySelectorAll('button,[role="button"],a,[role="link"],[tabindex="0"]')].filter(visible).map(el=>({label:norm(el.getAttribute('aria-label')||el.innerText||el.textContent),enabled:!el.disabled&&!el.closest('[aria-disabled="true"],[aria-busy="true"]')}));
   const file=!!root.querySelector('input[type="file"]');
@@ -34,7 +35,7 @@ async function navigate({page,deadlineAt,detect,selectCnh,reveal=async()=>{},rec
    pick([/^(continuar|continue)$/])||pick([/^(carregar|enviar|upload|adicionar) (?:seu |your )?(?:documento de identidade|identity document|id)$/])||
    pick([/^(avancar|next)$/, /^a seguir:.*verificacao/, /^continue para a verificacao/])||
    pick([/^(?:confirme|confirmar|verificar|verifique)(?: sua)? identidade$/, /^(?:confirm|verify)(?: your)? identity$/]);
-  if(!label){if(clock()-idleSince>=stepTimeoutMs)return {ok:false,error:'identity_control_not_ready',screen,transitions};await sleep(250);continue;}
+  if(!label){if(clock()-idleSince>=stepTimeoutMs)return {ok:false,error:'identity_control_not_ready',screen,transitions,controls:before.buttons.map(b=>({label:b.label.slice(0,100),enabled:b.enabled})).slice(0,24)};await sleep(250);continue;}
   const clicked=await click([label],Math.max(1,Math.min(60000,deadlineAt-clock())));
   record({event:'control_click',screen,label,clicked:clicked?.ok===true});
   if(!clicked?.ok){if(clock()-idleSince>=stepTimeoutMs)return {ok:false,error:'identity_control_not_clickable',screen,transitions};await sleep(250);continue;}
