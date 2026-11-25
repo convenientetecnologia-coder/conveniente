@@ -64,8 +64,11 @@ class Coordinator{
   if(this.sweeping)return;this.sweeping=true;
   try{for(const job of this.jobs.values()){
    if(['queued','acquiring'].includes(job.state)&&(!job.alive()||this.clock()-job.seen>90000)){job.abort.abort(Error('proxy_worker_unavailable'));job.state='canceled';job.ended=this.clock();}
-   if(job.state==='granted'&&(!job.alive()||this.clock()-job.seen>90000)){await this.command(job.id,job.owner,'close').catch(e=>{job.error=e.message});}
+   if(job.state==='granted'&&(!job.alive()||this.clock()-job.seen>90000||job.handle.snapshot().healthy===false)){await this.command(job.id,job.owner,'close').catch(e=>{job.error=e.message});}
    if(job.state==='releasing'&&!job.closing)try{
+    // A lost release can fail again after CT already closed this exact operation.
+    // Closure proof must be checked before retrying a request that can keep failing.
+    if(await job.handle.reconcileClosed()){this.closed(job);continue;}
     if(!['closed','release_requested'].includes(job.handle.snapshot().phase)&&job.handle.retryRelease)await job.handle.retryRelease();
     if(await job.handle.reconcileClosed())this.closed(job);
    }catch(error){job.error=String(error.message||error)}

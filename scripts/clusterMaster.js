@@ -224,12 +224,13 @@ async function createCluster() {
 
   function handleCellInbound(child, idx, msg) {
     if(msg?.type==='proxy:job'){
-      const owner=String(idx)+':'+String(child.pid||child.helloPid||'unknown');
+      const ownerPid=child.pid||child.helloPid;
+      const owner=String(idx)+':'+String(ownerPid||'unknown');
       Promise.resolve().then(async()=>{
         const job=msg.job||{};
         if(msg.action==='enqueue'){
           if(route[job.nome]!==idx)throw Error('proxy_job_wrong_worker');
-          return indexProxyCoordinator.enqueue(job,owner,{alive:()=>cellRegistry.pidAlive(child.pid||child.helloPid),ready:async ticket=>{
+          return indexProxyCoordinator.enqueue(job,owner,{alive:()=>cellRegistry.pidAlive(ownerPid),ready:async ticket=>{
             const result=await sendTo(idx,'proxy_ready',{ticket},{timeoutMs:15000});return result?.ok===true&&result.ready===true;
           }});
         }

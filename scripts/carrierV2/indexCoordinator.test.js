@@ -46,3 +46,12 @@ test('completed history cannot fill the queue and stop future work',async()=>{
  for(let i=0;i<10;i++){const row=job('account-'+i);b.enqueue(row,'w');for(let n=0;n<20&&b.jobs.get(row.id)?.state!=='granted';n++)await wait();const h=b.jobs.get(row.id).handle;await b.command(row.id,'w','close');h.proof();await b.sweep();now++}
  assert.ok(b.jobs.size<=3);assert.equal(b.activeAccounts.size,0);
 });
+
+test('authoritative closure unblocks a human request even if repeating release would always throw',async()=>{
+ let proof=false,retries=0;const h=handle();h.close=async()=>{throw Error('lost release')};h.retryRelease=async()=>{retries++;throw Error('terminal operation rejects release')};h.reconcileClosed=async()=>proof;
+ const b=new Coordinator({acquire:async()=>h}),old=job('same','publish'),human=job('same','virtus','human');b.enqueue(old,'old-worker');await settled(b,1);b.enqueue(human,'new-worker');await assert.rejects(b.command(old.id,'old-worker','close'),/lost release/);proof=true;await b.sweep();await settled(b,2);assert.equal(retries,0);assert.equal(b.jobs.get(old.id).state,'closed');assert.equal(b.jobs.get(human.id).state,'granted');
+});
+
+test('an expired healthy-owner lease is closed and still requires CT closure before reuse',async()=>{
+ let healthy=true,proof=false,closed=0;const h=handle();h.snapshot=()=>({healthy,phase:'active'});h.close=async()=>{closed++};h.reconcileClosed=async()=>proof;const b=new Coordinator({acquire:async()=>h}),a=job('expired','publish');b.enqueue(a,'live-worker');await settled(b,1);healthy=false;await b.sweep();assert.equal(closed,1);assert.equal(b.jobs.get(a.id).state,'releasing');proof=true;await b.sweep();assert.equal(b.jobs.get(a.id).state,'closed');
+});
