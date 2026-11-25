@@ -2,6 +2,12 @@
 const test=require('node:test'),assert=require('node:assert/strict');
 const {waitStable,waitControl}=require('./interactionReadiness');
 function fixture(probe,{closed=()=>false}={}){let ms=0;return {run:options=>waitStable(()=>probe(ms),{timeoutMs:10000,stableMs:1500,pollMs:250,clock:()=>ms,sleep:async n=>{ms+=n},isClosed:()=>closed(ms),...options}),time:()=>ms}}
+test('partially clipped footer button uses its visible hit-tested area instead of an obscured center',{timeout:15000},async()=>{
+ const browser=await require('puppeteer').launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',args:['--no-sandbox']});
+ try{const page=await browser.newPage();await page.setContent('<div style="position:relative;width:400px;height:100px;overflow:hidden"><button style="position:absolute;top:90px;left:20px;width:250px;height:40px" onclick="window.clicked=true">Avançar</button></div>');
+  const result=await require('./interactionReadiness').clickControl(page,['avancar'],{exact:true,timeoutMs:3000,stableMs:200});assert.equal(result.ok,true);assert.equal(await page.evaluate(()=>window.clicked),true);
+ }finally{await browser.close()}
+});
 test('aguarda carregamento lento e estabilidade do alvo sem clicar antes',async()=>{const f=fixture(ms=>ms<5000?{ready:false}:{ready:true,signature:'Enviar'});const r=await f.run();assert.equal(r.ok,true);assert.equal(r.waitedMs,6500)});
 test('troca de DOM, bloqueio e erro de contexto reiniciam a janela de estabilidade',async()=>{const f=fixture(ms=>{if(ms===1000)throw Error('context destroyed');if(ms===2500)return {ready:false};return {ready:true,signature:ms<2000?'old':'new'}});assert.equal((await f.run()).waitedMs,4250)});
 test('controle nunca pronto falha fechado; browser encerrado interrompe a espera',async()=>{assert.equal((await fixture(()=>({ready:false})).run()).ok,false);assert.equal((await fixture(()=>({ready:true,signature:'a'}),{closed:ms=>ms>=500}).run()).reason,'page_closed')});

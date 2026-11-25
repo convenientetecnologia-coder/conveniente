@@ -3,7 +3,7 @@ async function inspect(page){
  require('./interactionLease').assert(page);
  try{return await page.evaluate(()=>{
   const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
-  const visible=el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>2&&r.height>2&&s.visibility!=='hidden'&&s.display!=='none'&&!el.closest('[aria-hidden="true"],[inert]')};
+  const visible=el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>2&&r.height>2&&s.visibility!=='hidden'&&s.display!=='none'&&!el.closest('[inert]')&&(()=>{const hidden=el.closest('[aria-hidden="true"]');return !hidden||(hidden.id==='scrollview'&&/^\/checkpoint\/1501092823525282\//.test(location.pathname)&&!hidden.parentElement?.closest('[aria-hidden="true"]'))})()};
   const dialogs=[...document.querySelectorAll('[role="dialog"],[aria-modal="true"]')].filter(visible);
   const identityRoot=dialogs.findLast(el=>/identidade|identity|documento|document|carteira|license/.test(norm(el.innerText)));
   const root=identityRoot||document.body;
@@ -37,7 +37,7 @@ async function navigate({page,deadlineAt,detect,selectCnh,reveal=async()=>{},rec
    pick([/^(?:confirme|confirmar|verificar|verifique)(?: sua)? identidade$/, /^(?:confirm|verify)(?: your)? identity$/]);
   if(!label){if(clock()-idleSince>=stepTimeoutMs)return {ok:false,error:'identity_control_not_ready',screen,transitions,controls:before.buttons.map(b=>({label:b.label.slice(0,100),enabled:b.enabled})).slice(0,24)};await sleep(250);continue;}
   const clicked=await click([label],Math.max(1,Math.min(60000,deadlineAt-clock())));
-  record({event:'control_click',screen,label,clicked:clicked?.ok===true});
+  record({event:'control_click',screen,label,clicked:clicked?.ok===true,reason:clicked?.reason||null,waitedMs:clicked?.waitedMs||null});
   if(!clicked?.ok){if(clock()-idleSince>=stepTimeoutMs)return {ok:false,error:'identity_control_not_clickable',screen,transitions};await sleep(250);continue;}
   const until=Math.min(deadlineAt,clock()+stepTimeoutMs);let candidate=null,since=0,changed=false;
   while(clock()<until){

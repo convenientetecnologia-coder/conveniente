@@ -4,8 +4,8 @@ const navigation=require('./identityWizardNavigation'),id=require('./robePostPub
 let browser;
 test.before(async()=>{browser=await require('puppeteer').launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',args:['--no-sandbox']})});
 test.after(async()=>browser?.close());
-async function fixture(steps,{mode='div',delay=50}={}){
- const page=await browser.newPage();await page.setContent('<main role="main"></main>');
+async function fixture(steps,{mode='div',delay=50,checkpoint=false}={}){
+ const page=await browser.newPage();if(checkpoint){await page.setRequestInterception(true);page.on('request',r=>r.respond({status:200,contentType:'text/html',body:'<body></body>'}));await page.goto('https://fixture.invalid/checkpoint/1501092823525282/123');}await page.setContent(checkpoint?'<div id="scrollview" aria-hidden="true"><main role="main"></main></div>':'<main role="main"></main>');
  await page.evaluate(({steps,mode,delay})=>{
   window.steps=steps;window.stage=0;window.clicks=[];window.bad=0;
   window.render=()=>{
@@ -84,6 +84,15 @@ test('nested role-main upload button with its internal overlay is recognized and
   const result=await navigate(page,{stepTimeoutMs:5000});assert.equal(result.ok,true,JSON.stringify(result));assert.equal(await page.evaluate(()=>window.clicked),1);
  }finally{await page.close()}
 });
+test('visible checkpoint scrollview with stale aria-hidden is clickable but a hidden duplicate remains rejected',{timeout:15000},async()=>{
+ const page=await browser.newPage();await page.setRequestInterception(true);
+ page.on('request',r=>r.respond({status:200,contentType:'text/html',body:'<div id="scrollview" aria-hidden="true"><main role="main"><h1>Carregar seu documento de identidade</h1><div aria-hidden="true"><button onclick="window.wrong=true">Carregar documento de identidade</button></div><button id="real" onclick="window.good=true">Carregar documento de identidade</button></main></div>'}));
+ try{await page.goto('https://fixture.invalid/checkpoint/1501092823525282/123');
+  assert.ok((await navigation.inspect(page)).buttons.some(b=>b.label==='carregar documento de identidade'));
+  const result=await require('./interactionReadiness').clickControl(page,['Carregar documento de identidade'],{exact:true,timeoutMs:3000,stableMs:100});
+  assert.equal(result.ok,true);assert.equal(await page.evaluate(()=>window.good===true&&!window.wrong),true);
+ }finally{await page.close()}
+});
 test('unrelated visible dialog does not hide the actual identity action',{timeout:15000},async()=>{
  const page=await fixture(['load']);try{
   await page.evaluate(()=>{const d=document.createElement('div');d.setAttribute('role','dialog');d.innerHTML='<p>Ajuda</p>';document.body.append(d)});
@@ -106,4 +115,8 @@ test('real document navigation followed by the full upload introduction continue
   await page.evaluate(()=>document.querySelector('button').onclick=()=>{window.recordFirstClick();location.href='https://fixture.invalid/identity'});
   const result=await navigate(page,{stepTimeoutMs:6000});assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.screen,'upload_photo');assert.equal(firstClicks,1);
  }finally{await page.close()}
+});
+
+test('checkpoint root accessibility flag does not prevent CNH selection and its final advance',{timeout:20000},async()=>{
+ const page=await fixture(['load','intro2','cnh'],{checkpoint:true});try{const result=await navigate(page,{stepTimeoutMs:5000});assert.equal(result.ok,true,JSON.stringify(result));assert.deepEqual(await page.evaluate(()=>window.clicks),['load','intro2','cnh']);assert.equal(await page.evaluate(()=>window.bad),0)}finally{await page.close()}
 });

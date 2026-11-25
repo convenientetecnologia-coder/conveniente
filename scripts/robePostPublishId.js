@@ -727,6 +727,18 @@ async function clickIdentityDocument(page) {
  const result=await require('./interactionReadiness').clickControl(page,labels,{exact:true,withinDialog:true,timeoutMs:15000});return result.ok===true;
 }
 
+async function pageHasNorm(page, testFnSource) {
+  try {
+    return await page.evaluate((src) => {
+      const raw = String((document.body && (document.body.innerText || document.body.textContent)) || '');
+      const n = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+      return (new Function('n', `return (${src});`))(n);
+    }, testFnSource);
+  } catch {
+    return false;
+  }
+}
+
 async function identityRetryStillOpen(page) {
   return pageHasNorm(page, "(n.includes('nao foi possivel') || n.includes('nao conseguimos validar')) && n.includes('identidade')");
 }
@@ -1557,7 +1569,7 @@ async function probeDocTypeRadios(page) {
             if (aria !== 'avancar' && aria !== 'next') continue;
             if (el.disabled || el.closest('[aria-disabled="true"],[aria-busy="true"]')) continue;
             if (el.getAttribute('aria-hidden') === 'true') continue;
-            if (el.closest && el.closest('[aria-hidden="true"]')) continue;
+            if(el.closest){const hidden=el.closest('[aria-hidden="true"]');if(hidden&&!(hidden.id==='scrollview'&&/^\/checkpoint\/1501092823525282\//.test(location.pathname)&&!hidden.parentElement?.closest('[aria-hidden="true"]')))continue;}
             const rect=el.getBoundingClientRect(),style=getComputedStyle(el);
             if(rect.width<2||rect.height<2||style.visibility==='hidden'||style.display==='none')continue;
             return true;
@@ -1631,7 +1643,7 @@ async function clickCnhChoice(page) {
         const aria = normLocal(el.getAttribute('aria-label') || '');
         if (aria !== 'avancar' && aria !== 'next') return false;
         if (el.getAttribute('aria-disabled') === 'true' || el.getAttribute('aria-hidden') === 'true') return false;
-        if (el.closest && el.closest('[aria-hidden="true"]')) return false;
+        if(el.closest){const hidden=el.closest('[aria-hidden="true"]');if(hidden&&!(hidden.id==='scrollview'&&/^\/checkpoint\/1501092823525282\//.test(location.pathname)&&!hidden.parentElement?.closest('[aria-hidden="true"]')))return false;}
         if (String(el.getAttribute('tabindex') || '') === '-1') return false;
         const rect = el.getBoundingClientRect();
         return rect.width >= 8 && rect.height >= 8 && rect.bottom > 0 && rect.top < window.innerHeight;
