@@ -62,3 +62,27 @@ test('selling banner is not an open wizard; opening today listing exposes the re
 test('focusable wrapper with nested role-none spans advances without requiring a button role',async()=>{
  const page=await fixture(['intro','continue'],{mode:'focusable'});try{assert.equal((await navigate(page)).ok,true);assert.deepEqual(await page.evaluate(()=>window.clicks),['intro','continue'])}finally{await page.close()}
 });
+test('document without body is a loading state, not an exception',async()=>{
+ const page=await browser.newPage();try{
+  await page.setContent('<h1>Before navigation</h1>');
+  await page.evaluate(()=>document.documentElement.replaceChildren());
+  assert.equal((await navigation.inspect(page)).ready,false);
+ }finally{await page.close()}
+});
+test('destroyed execution context is retried but unhealthy transport is never swallowed',async()=>{
+ const page={browser:()=>({}),evaluate:async()=>{throw Error('Execution context was destroyed, most likely because of a navigation.')}};
+ assert.equal((await navigation.inspect(page)).ready,false);
+ page.browser=()=>({__ctIsolatedFlow:{proxyRequired:true,rail:{isProxyArmed:false}}});
+ await assert.rejects(navigation.inspect(page),/interaction_without_healthy_proxy_turn/);
+});
+test('real document navigation followed by the full upload introduction continues without replaying clicks',{timeout:20000},async()=>{
+ const page=await browser.newPage();let firstClicks=0;
+ await page.setRequestInterception(true);
+ page.on('request',request=>request.respond({status:200,contentType:'text/html',body:'<!doctype html><main role="main"><h1>Carregar seu documento de identidade</h1><p>Para continuar a vender e enviar mensagens no Marketplace, precisamos de uma foto do seu documento de identidade oficial. Pode ser uma carteira de habilitação, passaporte ou outro tipo de documento de identidade.</p><p>Não aceitamos fotos de telas de computador, telas de celular ou fotocópias. Se houver algum problema, enviaremos um email.</p><div role="button" tabindex="0" aria-label="Carregar documento de identidade" onclick="document.querySelector(\'main\').innerHTML=\'<h1>Carregue uma foto do seu documento</h1><input type=file><button>Carregar</button>\'"><div role="none"><span>Carregar documento de identidade</span><div data-visualcompletion="ignore"></div></div></div></main>'}));
+ try{
+  await page.setContent('<main role="main"><h1>Confirme sua identidade com um documento</h1><button>Avançar</button></main>');
+  await page.exposeFunction('recordFirstClick',()=>firstClicks++);
+  await page.evaluate(()=>document.querySelector('button').onclick=()=>{window.recordFirstClick();location.href='https://fixture.invalid/identity'});
+  const result=await navigate(page,{stepTimeoutMs:6000});assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.screen,'upload_photo');assert.equal(firstClicks,1);
+ }finally{await page.close()}
+});
