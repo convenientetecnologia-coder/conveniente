@@ -1,6 +1,8 @@
 'use strict';
 async function check(page,{browser=require('./browser'),clock=Date.now,securityCheck=null}={}){
  require('./interactionLease').assert(page);
+ const meta=await require('./metaAccountArrivalNotice').dismiss(page);
+ if(meta.present&&!meta.closed)return {ok:false,state:'meta_notice',reason:meta.reason||'close_unconfirmed'};
  const banned=await browser.detectAccountSuspended(page);if(banned.banned)return {ok:false,state:'banned',reason:banned.reason};
  if(securityCheck){const security=await securityCheck(page);if(!security.ok)return security;}
  const captcha=await browser.detectCaptchaChallenge(page);if(captcha.ok===false)throw Error('virtus_captcha_probe_failed');if(captcha.present)return {ok:false,state:'captcha',reason:'captcha_present'};

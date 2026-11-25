@@ -1712,6 +1712,8 @@ async function clickAcceptMessageRequestIfPresent(page, ctx = {}) {
 }
 
 async function ensureMarketplaceFilterActiveCore(page) {
+  const metaNotice=await require('./metaAccountArrivalNotice').dismiss(page);
+  if(metaNotice.present&&!metaNotice.closed)return {ok:false,reason:'meta_notice_close_unconfirmed',active_after:false};
   const now = Date.now();
   const deadline = now + DELTA_MARKETPLACE_ACTIVATE_BUDGET_MS;
   const remainingMs = () => Math.max(0, deadline - Date.now());
