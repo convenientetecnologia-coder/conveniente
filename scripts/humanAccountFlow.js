@@ -10,6 +10,7 @@ async function run({browser,nome,kind,proxy,watch=require('./robePublishEvidence
   const note=(event,extra={})=>{try{audit({ts:Date.now(),event,nome,kind,operationId:lease.operationId,...extra})}catch{}};
   const healthy=()=>{const s=lease.snapshot();if(s.healthy!==true||s.absoluteDeadline&&Date.now()>=s.absoluteDeadline*1000)throw Error('human_action_transport_unhealthy');return s;};
   const rail={
+   operationSnapshot(){return lease.snapshot();},
    get isProxyArmed(){try{healthy();return true}catch{return false}},
    async armAndProve(page){
     healthy();

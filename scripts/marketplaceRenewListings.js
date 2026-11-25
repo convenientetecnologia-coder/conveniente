@@ -1281,81 +1281,11 @@ async function runMarketplaceRenewListings({
       return { ok: false, error: 'select_all_not_found', renewedCount: 0 };
     }
     await humanPause(2200, 4000);
-    // Seleção de muitos anúncios pode demorar — espera Ações ficar habilitado (até 120s).
-    await progress(page, onProgress, 'select_wait', 'Aguardando seleção estabilizar...');
-    const actionsReady = await (async () => {
-      const tWait = now();
-      while (now() - tWait < ACTIONS_MENU_WAIT_MS) {
-        if (aborted()) return false;
-        const snap = await safeEvaluate(page, () => {
-          const norm = (s) => {
-            try {
-              return String(s || '')
-                .normalize('NFD')
-                .replace(/[\u0300-\u036f]/g, '')
-                .toLowerCase()
-                .replace(/\s+/g, ' ')
-                .trim();
-            } catch {
-              return String(s || '').toLowerCase().trim();
-            }
-          };
-          const nodes = document.querySelectorAll('[role="button"],button');
-          for (const el of nodes) {
-            if (!el) continue;
-            let aria = '';
-            let txt = '';
-            try { aria = norm(el.getAttribute('aria-label') || ''); } catch {}
-            try { txt = norm(el.innerText || el.textContent || '').slice(0, 40); } catch {}
-            if (aria !== 'acoes' && aria !== 'actions' && txt !== 'acoes' && txt !== 'actions') continue;
-            const disabled =
-              el.disabled === true || String(el.getAttribute('aria-disabled') || '').toLowerCase() === 'true';
-            return { found: true, enabled: !disabled };
-          }
-          return { found: false, enabled: false };
-        });
-        if (snap && snap.found && snap.enabled) return true;
-        await sleep(1000);
-      }
-      return false;
-    })();
-    if (aborted()) return abortResult();
-    if (!actionsReady) {
-      // Ainda tenta clicar Ações — FB às vezes não marca aria corretamente.
-      await sleep(Math.max(SETTLE_MS, 5000));
-    }
-    await humanPause(1800, 3200);
-    await progress(page, onProgress, 'actions', 'Abrindo Ações...');
-    const actions = await clickByLabels(page, ['Ações', 'Actions'], {
-      roleHints: ['button'],
-      timeoutMs: ACTIONS_MENU_WAIT_MS,
-      requireEnabled: true
-    });
-    if (!actions || !actions.ok) {
-      audit('renew_listings_fail', { stage: 'actions', reason: 'actions_not_found' });
-      return { ok: false, error: 'actions_not_found', renewedCount: 0 };
-    }
-    // Espera menu abrir (item Renovar no Marketplace) — até 120s, FB lento.
-    await progress(page, onProgress, 'actions_menu', 'Aguardando menu Ações...');
-    const menuReady = await waitForLabel(
-      page,
-      ['Renovar no Marketplace', 'Renew in Marketplace', 'Renew on Marketplace'],
-      { timeoutMs: ACTIONS_MENU_WAIT_MS, requireEnabled: false, pollMs: 800 }
-    );
-    if (!menuReady) await sleep(2500);
-    else await humanPause(1600, 3000);
-    if (aborted()) return abortResult();
-
-    await humanPause(1800, 3500);
-    await progress(page, onProgress, 'renew_mp', 'Clicando em Renovar no Marketplace...');
-    const renewMp = await clickByLabels(
-      page,
-      ['Renovar no Marketplace', 'Renew in Marketplace', 'Renew on Marketplace'],
-      { roleHints: ['menuitem', 'button'], timeoutMs: ACTIONS_MENU_WAIT_MS, requireEnabled: true }
-    );
-    if (!renewMp || !renewMp.ok) {
-      audit('renew_listings_fail', { stage: 'renew_marketplace', reason: 'menu_item_not_found' });
-      return { ok: false, error: 'renew_marketplace_not_found', renewedCount: 0 };
+    await progress(page,onProgress,'actions_menu','Abrindo Ações e verificando a opção de renovação...');
+    const choice=await require('./renewActionsMenu').openAndChoose(page,{timeoutMs:ACTIONS_MENU_WAIT_MS,deadlineAt:deadlineAt?require('./carrierV2/clock').effective(deadlineAt):0,onAudit:audit});
+    if(!choice.ok){
+      audit('renew_listings_fail',{stage:'actions_menu',reason:choice.error,menu:choice.menu});
+      return {ok:false,error:choice.error,renewedCount:0};
     }
     // Espera header da tela Renovar (não só sleep cego).
     await progress(page, onProgress, 'renew_open', 'Aguardando tela Renovar classificados...');

@@ -730,110 +730,13 @@ async function recordIdFailure(page, nome, source, error) {
 }
 
 async function clickConfirmeSuaIdentidade(page) {
-  try {
-    const label = await page.evaluate(() => {
-      const normLocal = (s) => {
-        try {
-          return String(s || '')
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase()
-            .replace(/\s+/g, ' ')
-            .trim();
-        } catch {
-          return String(s || '').toLowerCase().trim();
-        }
-      };
-      const buttons = Array.from(document.querySelectorAll('[role="button"],button'));
-      let best = null;
-      for (const el of buttons) {
-        const aria = normLocal(el.getAttribute('aria-label') || '');
-        const own = normLocal(el.innerText || el.textContent || '');
-        if (aria !== 'confirmar identidade' && aria !== 'confirm identity' && own !== 'confirmar identidade' && own !== 'confirm identity') continue;
-        const rect = el.getBoundingClientRect();
-        if (rect.width < 8 || rect.height < 8) continue;
-        const style = window.getComputedStyle(el);
-        if (!style || style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') continue;
-        best = el;
-        break;
-      }
-      if (!best) return '';
-      try { best.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch {}
-      best.click();
-      return String(best.getAttribute('aria-label') || best.innerText || best.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80);
-    });
-    return label || false;
-  } catch {
-    return false;
-  }
+ const labels=['confirmar identidade','confirme sua identidade','verificar identidade','verifique sua identidade','confirm identity','confirm your identity','verify your identity'];
+ const result=await require('./interactionReadiness').clickControl(page,labels,{exact:true,withinDialog:true,timeoutMs:15000});return result.ok===true;
 }
 
 async function clickIdentityDocument(page) {
-  if (await identityDocIntroStillOpen(page)) return false;
-  try {
-    const point = await page.evaluate(() => {
-      const normLocal = (s) => {
-        try {
-          return String(s || '')
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase()
-            .replace(/\s+/g, ' ')
-            .trim();
-        } catch {
-          return String(s || '').toLowerCase().trim();
-        }
-      };
-      const isDoc = (text) => {
-        const n = normLocal(text);
-        if (!n || n.length > 120) return false;
-        const hasThing = n.includes('identidade') || n.includes('identity') || n.includes('documento') || n.includes('document');
-        if (!hasThing) return false;
-        return /\b(carregar|carregue|envie|enviar|upload|adicionar|add)\b/.test(n);
-      };
-      const buttons = Array.from(document.querySelectorAll('[role="button"],button,a,[role="link"]'));
-      let best = null;
-      let bestLen = 999;
-      let bestLabel = '';
-      for (const el of buttons) {
-        const aria = normLocal(el.getAttribute('aria-label') || '');
-        const own = normLocal(el.innerText || el.textContent || '');
-        const label = isDoc(aria) ? aria : (isDoc(own) ? own : '');
-        if (!label) continue;
-        const rect = el.getBoundingClientRect();
-        if (rect.width < 8 || rect.height < 8) continue;
-        const style = window.getComputedStyle(el);
-        if (!style || style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') continue;
-        if (label.length < bestLen) {
-          best = el;
-          bestLen = label.length;
-          bestLabel = String(el.getAttribute('aria-label') || el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 120);
-        }
-      }
-      if (!best) return null;
-      const rect = best.getBoundingClientRect();
-      return { x: rect.left + (rect.width / 2), y: rect.top + (rect.height / 2), label: bestLabel };
-    });
-    if (!point) return false;
-    await page.mouse.move(point.x, point.y);
-    await sleep(300);
-    await page.mouse.click(point.x, point.y, { delay: 60 });
-    return point.label || true;
-  } catch {
-    return false;
-  }
-}
-
-async function pageHasNorm(page, testFnSource) {
-  try {
-    return await page.evaluate((src) => {
-      const raw = String((document.body && (document.body.innerText || document.body.textContent)) || '');
-      const n = raw.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-      return (new Function('n', `return (${src});`))(n);
-    }, testFnSource);
-  } catch {
-    return false;
-  }
+ const labels=['carregar documento de identidade','carregar seu documento de identidade','enviar documento de identidade','upload identity document','upload your id'];
+ const result=await require('./interactionReadiness').clickControl(page,labels,{exact:true,withinDialog:true,timeoutMs:15000});return result.ok===true;
 }
 
 async function identityRetryStillOpen(page) {
@@ -935,107 +838,8 @@ async function identityDocIntroStillOpen(page) {
 }
 
 async function clickAvancar(page) {
-  const beforeRetry = await identityRetryStillOpen(page);
-  const beforeIntro = !beforeRetry && await identityDocIntroStillOpen(page);
-  let point = null;
-  try {
-    point = await page.evaluate(() => {
-      const normLocal = (s) => {
-        try {
-          return String(s || '')
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase()
-            .replace(/\s+/g, ' ')
-            .trim();
-        } catch {
-          return String(s || '').toLowerCase().trim();
-        }
-      };
-      const isAdvance = (text) => {
-        const n = normLocal(text);
-        if (!n || n.length > 40) return false;
-        return n === 'avancar' || n === 'next';
-      };
-      const visible = (el) => {
-        if (!el || !el.getBoundingClientRect) return false;
-        const rect = el.getBoundingClientRect();
-        if (rect.width < 4 || rect.height < 4) return false;
-        if (rect.bottom < 0 || rect.right < 0 || rect.top > window.innerHeight || rect.left > window.innerWidth) return false;
-        const style = window.getComputedStyle(el);
-        return !!(style && style.display !== 'none' && style.visibility !== 'hidden');
-      };
-      const inDialog = (el) => {
-        let p = el;
-        for (let i = 0; i < 14 && p; i++) {
-          const t = normLocal(p.innerText || p.textContent || '');
-          if (t.length > 2500) {
-            p = p.parentElement;
-            continue;
-          }
-          const intro = (t.includes('com um documento') || t.includes('reconhecimento facial') || t.includes('facial recognition')) && (t.includes('identidade') || t.includes('identity'));
-          const retry = (t.includes('nao foi possivel') || t.includes('nao conseguimos validar')) && t.includes('identidade');
-          if (intro || retry) return true;
-          p = p.parentElement;
-        }
-        return false;
-      };
-      const fire = (el) => {
-        if (!el) return;
-        const rect = el.getBoundingClientRect();
-        const x = rect.left + (rect.width / 2);
-        const y = rect.top + (rect.height / 2);
-        for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-          el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }));
-        }
-        try { el.click(); } catch {}
-      };
-      const hits = [];
-      const nodes = Array.from(document.querySelectorAll('a,[role="link"],span,div,button,[role="button"]'));
-      for (const el of nodes) {
-        const aria = normLocal(el.getAttribute('aria-label') || '');
-        const own = normLocal(el.innerText || el.textContent || '');
-        const href = String((el.getAttribute && el.getAttribute('href')) || '');
-        const docLink = /\/checkpoint\/1501092823525282\/\d+/.test(href) || aria.includes('verificacao de identidade') || (aria.includes('a seguir') && aria.includes('identidade'));
-        if (!docLink && !isAdvance(aria) && !isAdvance(own)) continue;
-        if (!visible(el)) {
-          try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch {}
-        }
-        if (!visible(el)) continue;
-        const target = (el.closest && el.closest('a,[role="link"],[role="button"],button')) || el;
-        const textRect = target.getBoundingClientRect();
-        hits.push({
-          el: target,
-          x: textRect.left + (textRect.width / 2),
-          y: textRect.top + (textRect.height / 2),
-          area: textRect.width * textRect.height,
-          inDialog: inDialog(el),
-          docLink
-        });
-      }
-      hits.sort((a, b) => Number(b.docLink) - Number(a.docLink) || Number(b.inDialog) - Number(a.inDialog) || a.area - b.area);
-      const pick = hits[0];
-      if (!pick) return null;
-      try { pick.el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch {}
-      fire(pick.el);
-      return { x: pick.x, y: pick.y };
-    });
-  } catch {}
-  await sleep(900);
-  if ((beforeRetry || beforeIntro) && !(await (beforeRetry ? identityRetryStillOpen(page) : identityDocIntroStillOpen(page)))) {
-    return true;
-  }
-  if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
-    try {
-    await page.mouse.move(point.x, point.y);
-      await sleep(150);
-      await page.mouse.click(point.x, point.y, { delay: 80 });
-    } catch {}
-    await sleep(900);
-  }
-  if (beforeRetry) return !(await identityRetryStillOpen(page));
-  if (beforeIntro) return !(await identityDocIntroStillOpen(page));
-  return !!point;
+  const result=await require('./interactionReadiness').clickControl(page,['avancar','next','a seguir: continue para a verificacao'],{exact:true,withinDialog:true,timeoutMs:15000});
+  return result.ok===true;
 }
 
 async function readNamedButton(page, labels) {
@@ -1136,40 +940,7 @@ async function readVisibleButtonLabels(page) {
 }
 
 async function clickExactWord(page, words) {
-  if (!(await require('./interactionReadiness').waitControl(page,words,{exact:true,timeoutMs:15000})).ok) return false;
-  let point = null;
-  try {
-    point = await page.evaluate((wanted) => {
-      const normLocal = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
-      const want = new Set(wanted);
-      const hits = [];
-      for (const el of Array.from(document.querySelectorAll('span,div,button,[role="button"]'))) {
-        const aria = normLocal(el.getAttribute('aria-label') || '');
-        const own = normLocal(el.innerText || el.textContent || '');
-        if (!want.has(aria) && !want.has(own)) continue;
-        if ((want.has(own) ? own : aria).length > 40) continue;
-        let rect = el.getBoundingClientRect();
-        if (rect.width < 8 || rect.height < 8) continue;
-        if (rect.bottom < 0 || rect.top > window.innerHeight) {
-          try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch {}
-          rect = el.getBoundingClientRect();
-        }
-        if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
-        hits.push({ x: rect.left + (rect.width / 2), y: rect.top + (rect.height / 2), area: rect.width * rect.height });
-      }
-      hits.sort((a, b) => a.area - b.area);
-      return hits[0] || null;
-    }, words);
-  } catch {
-    return false;
-  }
-  if (!point) return false;
-  try {
-    await page.mouse.click(point.x, point.y, { delay: 80 });
-    return true;
-  } catch {
-    return false;
-  }
+ const result=await require('./interactionReadiness').clickControl(page,words,{exact:true,withinDialog:true,timeoutMs:15000});return result.ok===true;
 }
 
 async function clickBlueOverlay(page, labels) {
@@ -1268,31 +1039,8 @@ async function waitPhotoAttached(page, deadlineAt) {
 }
 
 async function clickRoleAria(page, label) {
-  const want = norm(label);
-  if (!want) return false;
-  if (!(await require('./interactionReadiness').waitControl(page,[want],{exact:true,timeoutMs:15000})).ok) return false;
-  try {
-    return await page.evaluate((wanted) => {
-      const normLocal = (s) => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
-      const buttons = Array.from(document.querySelectorAll('[role="button"],button'));
-      for (const el of buttons) {
-        if (el.getAttribute('aria-disabled') === 'true') continue;
-        const aria = normLocal(el.getAttribute('aria-label') || '');
-        const own = normLocal(el.innerText || '').replace(/^\+\s*/, '');
-        if (aria !== wanted && own !== wanted) continue;
-        const rect = el.getBoundingClientRect();
-        if (rect.width < 8 || rect.height < 8) continue;
-        if (rect.bottom < 0 || rect.top > window.innerHeight) {
-          try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); } catch {}
-        }
-        el.click();
-        return true;
-      }
-      return false;
-    }, want);
-  } catch {
-    return false;
-  }
+  const result=await require('./interactionReadiness').clickControl(page,[label],{exact:true,withinDialog:true,timeoutMs:15000});
+  return result.ok===true;
 }
 
 async function carregarButtonVisible(page) {
@@ -1817,12 +1565,13 @@ async function probeDocTypeRadios(page) {
             document.querySelectorAll('button,[role="button"],a,[role="link"],div[tabindex="0"]')
           );
           for (const el of nodes) {
-            const aria = normLocal(el.getAttribute('aria-label') || '');
+            const aria = normLocal(el.getAttribute('aria-label') || el.innerText || el.textContent || '');
             if (aria !== 'avancar' && aria !== 'next') continue;
-            if (el.getAttribute('aria-disabled') === 'true') continue;
+            if (el.disabled || el.closest('[aria-disabled="true"],[aria-busy="true"]')) continue;
             if (el.getAttribute('aria-hidden') === 'true') continue;
             if (el.closest && el.closest('[aria-hidden="true"]')) continue;
-            if (String(el.getAttribute('tabindex') || '') === '-1') continue;
+            const rect=el.getBoundingClientRect(),style=getComputedStyle(el);
+            if(rect.width<2||rect.height<2||style.visibility==='hidden'||style.display==='none')continue;
             return true;
           }
           return false;
@@ -1835,6 +1584,7 @@ async function probeDocTypeRadios(page) {
 }
 
 async function clickCnhChoice(page) {
+  require('./interactionLease').assert(page);
   const out = { clicked: false, verified: false, method: 'cnh_label', label: null };
   let point = null;
   try {
@@ -1909,6 +1659,7 @@ async function clickCnhChoice(page) {
  * Sem marca de seleção, não segue: clique solto já gerou Avançar apagado.
  */
 async function selectDocTypeCnh(page) {
+  require('./interactionLease').assert(page);
   const out = { clicked: false, verified: false, method: null, label: null };
   const labelHit = await clickCnhChoice(page);
   if (labelHit && labelHit.clicked) return Object.assign(out, labelHit);
@@ -2046,11 +1797,9 @@ async function waitCnhSelected(page, { maxMs = 90000, deadlineAt } = {}) {
     const sel = await selectDocTypeCnh(page);
     const avancarBlue = buttonLooksEnabled(await readNamedButton(page, ['avancar', 'next']));
     last = Object.assign({}, probe || {}, sel || {}, { avancarBlue });
-    if ((sel && sel.verified) || avancarBlue) {
-        await sleep(700);
-        const p2 = await probeDocTypeRadios(page);
-      return { ok: true, probe: p2 || probe, sel, avancarBlue: true };
-      }
+    await sleep(700);
+    const p2=await probeDocTypeRadios(page);
+    if(p2?.cnhChecked&&p2?.avancarEnabled)return {ok:true,probe:p2,sel,avancarBlue};
     if (!(probe && probe.cnhLabel)) {
     await clickByText(page, ['ver mais', 'see more'], { withinDialog: false });
     }
@@ -3370,25 +3119,6 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source, network 
   page.__ctIdWizardContext = { nome, source };
   assertBudget(deadlineAt, 'wizard_start');
 
-  const maybeMarketplacePhoneConfirm = async (where, extra = {}) => {
-    const info = await readMarketplacePhoneConfirmInfo(page);
-    const scr = await detectIdWizardScreen(page);
-    const onEntry = scr === 'marketplace_phone_entry';
-    if (!(info && info.detected) && !onEntry && !extra.force) return null;
-    logEvt(nome, source, 'wizard_marketplace_phone_confirm', {
-      where: String(where || 'unknown'),
-      title: info && info.title ? info.title : null,
-      snippet: info && info.snippet ? info.snippet : null,
-      humanRequired: false
-    });
-    return runMarketplacePhoneVerification(page, {
-      nome,
-      source,
-      deadlineAt,
-      skipAdvance: extra.skipAdvance === true || onEntry
-    });
-  };
-
   await sleep(WAIT_STEP_MS);
 
   // Já pode estar na tela final (ID feito antes).
@@ -3396,258 +3126,18 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source, network 
     return finishAlreadySubmitted(page, { nome, source, where: 'open', deadlineAt });
   }
 
-  let screen = await detectIdWizardScreen(page);
-  logEvt(nome, source, 'wizard_screen', { screen });
-  if (screen === 'marketplace_phone_confirm') {
-    const handoff = await maybeMarketplacePhoneConfirm('screen_open');
-    if (handoff) return handoff;
-  }
-
-  // 1) Confirme sua identidade (página do item / selling).
-  // Se a URL já é o checkpoint deste perfil, o botão azul ficou para trás.
-  if ((screen === 'confirm' || screen === 'unknown') && pageIsMarketplaceDocCheckpoint(page)) {
-    await revealMarketplaceDocCheckpoint(page);
-    await sleep(1500);
-    screen = await detectIdWizardScreen(page);
-  }
-  if (screen === 'confirm' || screen === 'unknown') {
-    let confirmBtn = false;
-    const confirmStart = Date.now();
-    while (!confirmBtn && (Date.now() - confirmStart) < 20000 && deadlineLeft(deadlineAt) > 0) {
-      confirmBtn = await clickConfirmeSuaIdentidade(page);
-      if (!confirmBtn) await sleep(1500);
-    }
-    logEvt(nome, source, 'wizard_confirme_identidade', {
-      ok: !!confirmBtn,
-      label: typeof confirmBtn === 'string' ? confirmBtn : null
-    });
-    assertBudget(deadlineAt, 'wizard_after_confirm_btn');
-    if (confirmBtn) await sleep(WAIT_STEP_MS);
-    if (await isSuccessScreen(page)) {
-      return finishAlreadySubmitted(page, { nome, source, where: 'confirm_btn', deadlineAt });
-    }
-    if (confirmBtn) {
-      const waited = await waitForScreenAfterConfirmIdentity(page, { deadlineAt, minMs: 8000, maxMs: 60000 });
-      screen = waited.screen;
-      logEvt(nome, source, 'wizard_after_confirm_settled', {
-        screen,
-        ready: waited.ready === true
-      });
-    } else {
-      screen = await detectIdWizardScreen(page);
-    }
-    if (screen === 'confirm') {
-      return { ok: false, error: 'confirm_identity_not_clicked' };
-    }
-    if (screen === 'marketplace_phone_confirm') {
-      const handoff = await maybeMarketplacePhoneConfirm('after_confirm_btn');
-      if (handoff) return handoff;
-    }
-  }
-
-  // 2) Avançar / "A seguir: continue para a verificação…"
-  if (
-    screen !== 'continuar' &&
-    screen !== 'carregar_doc' &&
-    screen !== 'doc_type' &&
-    screen !== 'upload_photo' &&
-    screen !== 'success' &&
-    screen !== 'marketplace_phone_confirm' &&
-    screen !== 'marketplace_phone_entry'
-  ) {
-    let advanced = false;
-    const advStart = Date.now();
-    while (!advanced && (Date.now() - advStart) < 15000 && deadlineLeft(deadlineAt) > 0) {
-      advanced = await clickAvancar(page);
-      if (!advanced) await sleep(1000);
-    }
-    if (!advanced) {
-      advanced = await waitClickByText(
-      page,
-      [
-        'a seguir: continue para a verificacao',
-        'a seguir: continue para a verificação',
-        'continue para a verificacao',
-        'continue para a verificação',
-        'avancar',
-        'avançar'
-      ],
-        { maxMs: 20000, deadlineAt, withinDialog: false, settleMs: WAIT_STEP_MS + 3000 }
-    );
-    }
-    if (!advanced) {
-      try {
-        advanced = await page.evaluate(() => {
-          const el =
-            document.querySelector('[aria-label*="A seguir"]') ||
-            document.querySelector(
-              '[aria-label*="verificação de identidade"], [aria-label*="verificacao de identidade"]'
-            );
-          if (el && typeof el.click === 'function') {
-            el.click();
-            return true;
-          }
-          return false;
-        });
-        if (advanced) await sleep(WAIT_STEP_MS + 3000);
-      } catch {
-        advanced = false;
-      }
-    }
-    logEvt(nome, source, 'wizard_avancar', { ok: !!advanced });
-    assertBudget(deadlineAt, 'wizard_after_avancar');
-
-    // Atalho: às vezes Avançar → direto "Suas informações foram enviadas..."
-    {
-      const earlyScr = await waitForWizardScreen(page, ['success', 'continuar', 'carregar_doc', 'doc_type', 'upload_photo', 'identity_doc_intro', 'marketplace_phone_confirm', 'marketplace_phone_entry'], {
-        maxMs: 45000,
-        deadlineAt
-      });
-      if (earlyScr === 'success' || earlyScr === 'pending_review') {
-        return finishAlreadySubmitted(page, { nome, source, where: 'avancar', deadlineAt });
-      }
-      screen = earlyScr;
-      if (screen === 'marketplace_phone_confirm' || screen === 'marketplace_phone_entry') {
-        const handoff = await maybeMarketplacePhoneConfirm('after_avancar', {
-          force: true,
-          skipAdvance: screen === 'marketplace_phone_entry'
-        });
-        if (handoff) return handoff;
-      }
-      if (screen === 'identity_retry') {
-        return { ok: false, error: 'avancar_not_clicked' };
-      }
-    }
-  }
-
-  if (screen === 'identity_doc_intro') {
-    await revealMarketplaceDocCheckpoint(page);
-    const introAdvance = await clickDocIntroAvancar(page, deadlineAt);
-    logEvt(nome, source, 'wizard_doc_intro_avancar', { ok: !!introAdvance });
-    if (!introAdvance) return { ok: false, error: 'doc_intro_avancar_not_clicked' };
-    screen = await waitForWizardScreen(page, ['carregar_doc', 'doc_type', 'upload_photo', 'continuar', 'success'], {
-      maxMs: 30000,
-      deadlineAt
-    });
-    if (screen === 'identity_doc_intro') return { ok: false, error: 'doc_intro_avancar_not_clicked' };
-  }
-
-  // 3) Continuar (tela "Verificação de identidade")
-  if (screen === 'continuar' || screen === 'unknown') {
-    const cont = await waitClickByText(page, ['continuar', 'continue'], {
-      maxMs: 90000,
-      deadlineAt,
-      withinDialog: false,
-      exact: true,
-      settleMs: WAIT_STEP_MS + 3000
-    });
-    logEvt(nome, source, 'wizard_continuar', { ok: !!cont });
-    assertBudget(deadlineAt, 'wizard_after_continuar');
-    screen = await waitForWizardScreen(page, ['success', 'carregar_doc', 'doc_type', 'marketplace_phone_confirm'], {
-      maxMs: cont ? 60000 : 20000,
-      deadlineAt
-    });
-    if (screen === 'success' || screen === 'pending_review') {
-      return finishAlreadySubmitted(page, { nome, source, where: 'continuar', deadlineAt });
-    }
-    if (screen === 'marketplace_phone_confirm') {
-      const handoff = await maybeMarketplacePhoneConfirm('after_continuar');
-      if (handoff) return handoff;
-    }
-    // Sem avançar de tela: falha explícita (não queimar budget no passo seguinte).
-    if (!cont && screen !== 'carregar_doc' && screen !== 'doc_type' && screen !== 'upload_photo') {
-      return { ok: false, error: 'continuar_not_clicked' };
-    }
-  }
-
-  // A partir daqui precisa do documento físico.
-  if (!idPath || !fs.existsSync(idPath)) {
-    return { ok: false, error: 'id_png_missing' };
-  }
-
-  // 4) Carregar / enviar o documento de identidade. O texto do botão pode mudar.
-  if (await identityDocIntroStillOpen(page)) screen = 'identity_doc_intro';
-  if (screen === 'carregar_doc' || screen === 'unknown' || screen === 'continuar') {
-    let loadDoc = false;
-    const loadStart = Date.now();
-    while (!loadDoc && (Date.now() - loadStart) < 20000 && deadlineLeft(deadlineAt) > 0) {
-      loadDoc = await clickIdentityDocument(page);
-      if (!loadDoc) await sleep(1500);
-    }
-    if (!loadDoc) {
-      loadDoc = await waitClickByText(
-      page,
-      [
-        'carregar documento de identidade',
-        'carregar seu documento de identidade',
-          'enviar documento de identidade',
-        'upload identity document',
-        'upload your id'
-      ],
-        { maxMs: 20000, deadlineAt, withinDialog: false, settleMs: WAIT_STEP_MS + 3000 }
-    );
-    }
-    logEvt(nome, source, 'wizard_carregar_documento', { ok: !!loadDoc, screenBefore: screen });
-    if (!loadDoc) {
-      // Se já estamos em doc_type/upload, ok; senão falha explícita.
-      screen = await detectIdWizardScreen(page);
-      if (screen !== 'doc_type' && screen !== 'upload_photo') {
-        return { ok: false, error: 'carregar_documento_not_clicked' };
-      }
-    } else {
-      screen = await waitForWizardScreen(page, ['doc_type', 'upload_photo', 'marketplace_phone_confirm', 'identity_doc_intro'], {
-        maxMs: 90000,
-        deadlineAt
-      });
-      if (screen === 'identity_doc_intro' || await identityDocIntroStillOpen(page)) {
-        const introAdvance = await clickDocIntroAvancar(page, deadlineAt);
-        logEvt(nome, source, 'wizard_doc_intro_avancar', { ok: !!introAdvance, where: 'after_carregar' });
-        if (!introAdvance) return { ok: false, error: 'doc_intro_avancar_not_clicked' };
-        screen = await waitForWizardScreen(page, ['carregar_doc', 'doc_type', 'upload_photo', 'continuar', 'success'], {
-          maxMs: 30000,
-          deadlineAt
-        });
-        if (screen === 'identity_doc_intro') return { ok: false, error: 'doc_intro_avancar_not_clicked' };
-      }
-      if (screen === 'marketplace_phone_confirm') {
-        const handoff = await maybeMarketplacePhoneConfirm('after_carregar_documento');
-        if (handoff) return handoff;
-      }
-    }
-  }
-
-  // 5) Escolha tipo: Carteira de habilitação (radio) → Avançar fica clicável
-  if (screen === 'doc_type' || screen === 'unknown') {
-    const before = await probeDocTypeRadios(page);
-    logEvt(nome, source, 'wizard_cnh_probe', {
-      radioCount: before && before.radioCount,
-      cnhChecked: !!(before && before.cnhChecked),
-      avancarEnabled: !!(before && before.avancarEnabled),
-      items: (before && before.items) || []
-    });
-
-    const cnhWait = await waitCnhSelected(page, { maxMs: 120000, deadlineAt });
-    const cnhOk = !!(cnhWait && cnhWait.ok);
-    logEvt(nome, source, 'wizard_cnh', {
-      ok: cnhOk,
-      verified: cnhOk,
-      cnhChecked: !!(cnhWait && cnhWait.probe && cnhWait.probe.cnhChecked),
-      avancarEnabled: !!(cnhWait && cnhWait.probe && cnhWait.probe.avancarEnabled),
-      radioCount: cnhWait && cnhWait.probe && cnhWait.probe.radioCount,
-      method: cnhWait && cnhWait.sel && cnhWait.sel.method,
-      avancarBlue: !!(cnhWait && cnhWait.avancarBlue),
-      items: (cnhWait && cnhWait.probe && cnhWait.probe.items) || []
-    });
-    if (!cnhOk) return { ok: false, error: 'cnh_not_selected' };
-    await sleep(WAIT_STEP_MS);
-    assertBudget(deadlineAt, 'wizard_after_cnh');
-
-    // 6) Avançar só quando estiver azul, e só segue se a tela de colocar o documento abrir.
-    const leftList = await advanceBlueAndSeeUpload(page, deadlineAt);
-    logEvt(nome, source, 'wizard_avancar_pos_cnh', { ok: !!leftList });
-    if (!leftList) return { ok: false, error: 'avancar_pos_cnh_not_clicked' };
-    screen = await waitForWizardScreen(page, ['upload_photo'], { maxMs: 90000, deadlineAt });
-  }
+  const navigation=await require('./identityWizardNavigation').navigate({
+    page,deadlineAt:Date.now()+deadlineLeft(deadlineAt),
+    detect:()=>detectIdWizardScreen(page),
+    selectCnh:()=>waitCnhSelected(page,{maxMs:Math.min(120000,deadlineLeft(deadlineAt)),deadlineAt}),
+    reveal:()=>revealMarketplaceDocCheckpoint(page),
+    record:({event,...entry})=>logEvt(nome,source,'wizard_navigation',{action:event,...entry})
+  });
+  logEvt(nome,source,'wizard_navigation_done',navigation);
+  if(!navigation.ok)return navigation;
+  if(navigation.screen==='success'||navigation.screen==='pending_review')return finishAlreadySubmitted(page,{nome,source,where:'navigation',deadlineAt});
+  if(navigation.screen.startsWith('marketplace_phone_'))return runMarketplacePhoneVerification(page,{nome,source,deadlineAt,skipAdvance:navigation.screen!=='marketplace_phone_confirm'});
+  if(!idPath||!fs.existsSync(idPath))return {ok:false,error:'id_png_missing'};
 
   // 7) Upload id.png via input[type=file] (mesmo padrão do ROBE de fotos)
   let input = null;
@@ -3769,7 +3259,7 @@ async function runIdDocWizard(page, { idPath, deadlineAt, nome, source, network 
     const sendStart = Date.now();
     while (!sent && Date.now() - sendStart < 90000 && deadlineLeft(deadlineAt) > 0) {
       try {
-        const ready = buttonLooksEnabled(await readNamedButton(page, ['enviar', 'submit', 'send']));
+        const ready = (await require('./interactionReadiness').waitControl(page,['enviar','submit','send'],{exact:true,withinDialog:true,timeoutMs:Math.max(1,Math.min(15000,deadlineLeft(deadlineAt)))})).ok;
         if (!ready) {
           await sleep(800);
           continue;
@@ -4214,6 +3704,8 @@ module.exports = {
   clickVerClassificadoMenu,
   waitListingIdentityPrompt,
   runIdDocWizard,
+  detectIdWizardScreen,
+  waitCnhSelected,
   runRobeAutoId,
   runHumanVerifyId,
   pageHandleState,

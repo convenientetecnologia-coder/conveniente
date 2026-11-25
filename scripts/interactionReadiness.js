@@ -29,13 +29,14 @@ function inspectElement(el){
 async function waitElement(page,handle,options={}){
  return waitStable(()=>{require('./interactionLease').assert(page);return page.evaluate(inspectElement,handle)},{...options,isClosed:()=>page.isClosed?.()===true});
 }
-async function controlHandle(page,labels,{exact=false,withinDialog=false,excludeSubstrings=[]}={}){
+async function controlHandle(page,labels,{exact=false,withinDialog=false,excludeSubstrings=[],withinSelector=null}={}){
  require('./interactionLease').assert(page);
  const wanted=(Array.isArray(labels)?labels:[labels]).map(x=>String(x||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim()).filter(Boolean);
- return page.evaluateHandle(({wanted,exact,withinDialog,excludeSubstrings})=>{
+ return page.evaluateHandle(({wanted,exact,withinDialog,excludeSubstrings,withinSelector})=>{
   const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
-  const roots=withinDialog?[...document.querySelectorAll('[role="dialog"],[aria-modal="true"]'),document]:[document];let offscreen=null;
-  for(const root of roots)for(const el of root.querySelectorAll('button,[role="button"],[role="menuitem"],a,[role="link"],[role="radio"],[role="option"],input[type="button"],input[type="submit"],div[tabindex="0"]')){
+  const roots=withinSelector?[...document.querySelectorAll(withinSelector)]:withinDialog?[...document.querySelectorAll('[role="dialog"],[aria-modal="true"]'),document]:[document];let offscreen=null;
+  const selector='button,[role="button"],[role="menuitem"],a,[role="link"],[role="radio"],[role="option"],input[type="button"],input[type="submit"],div[tabindex="0"]';
+  for(const root of roots)for(const el of [...(root.matches?.(selector)?[root]:[]),...root.querySelectorAll(selector)]){
    const a=norm(el.getAttribute('aria-label')),t=norm(el.innerText||el.textContent||el.value);
    if(excludeSubstrings.some(x=>a.includes(norm(x))||t.includes(norm(x)))||!wanted.some(p=>exact?(a===p||t===p):(a.includes(p)||t.includes(p))))continue;
    const r=el.getBoundingClientRect(),style=getComputedStyle(el);
@@ -45,7 +46,7 @@ async function controlHandle(page,labels,{exact=false,withinDialog=false,exclude
    if(hit&&(hit===el||el.contains(hit)))return el;
   }
   if(offscreen){offscreen.scrollIntoView({block:'center',inline:'nearest'});return offscreen}return null;
- },{wanted,exact,withinDialog,excludeSubstrings});
+ },{wanted,exact,withinDialog,excludeSubstrings,withinSelector});
 }
 async function waitControl(page,labels,{timeoutMs=15000,...options}={}){
  return waitStable(async()=>{
