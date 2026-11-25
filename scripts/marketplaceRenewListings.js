@@ -474,19 +474,12 @@ async function waitRenewScreenStable(page, { onProgress, timeoutMs = RENEW_SCREE
       const visible=el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>2&&r.height>2&&s.display!=='none'&&s.visibility!=='hidden'&&!el.closest('[aria-hidden="true"]')};
       const loading=document.readyState==='loading'||!!(root&&[...root.querySelectorAll('[aria-busy="true"],[role="progressbar"],[role="status"]')].some(el=>visible(el)&&(el.getAttribute('aria-busy')==='true'||el.getAttribute('role')==='progressbar'||/carregando|loading/i.test(el.innerText))));
       const signature=text.slice(0,16000);
-      const dialogText = root && root.matches('[role="dialog"],[aria-modal="true"]') ? norm(root.innerText) : '';
-      const blocked = dialogText.match(/\b(\d+) classificados? nao podem ser renovados\b/);
-      const selected = text.match(/\b(\d+) classificados? selecionados\b/);
-      const noneEligible = !!(blocked && selected && Number(blocked[1]) > 0 &&
-        Number(blocked[1]) === Number(selected[1]) && renewBtn && !renewBtn.enabled);
-      return { hasHeader, renewBtn, loading, signature, noneEligible };
+      return { hasHeader, renewBtn, loading, signature };
     });
     lastSnapshot = snap;
-    if (snap && snap.hasHeader && snap.renewBtn && (snap.renewBtn.enabled || snap.noneEligible) && !snap.loading) {
+    if (snap && snap.hasHeader && snap.renewBtn && snap.renewBtn.enabled && !snap.loading) {
       if (readySince === null || signature!==snap.signature){readySince=now();signature=snap.signature;}
-      if (now() - readySince >= RENEW_READY_STABLE_MS) return snap.noneEligible
-        ? { ok: false, reason: 'no_eligible_listings', snapshot: snap }
-        : { ok: true, reason: 'ready', snapshot: snap };
+      if (now() - readySince >= RENEW_READY_STABLE_MS) return { ok: true, reason: 'ready', snapshot: snap };
     } else readySince = null;
     await sleep(1000);
   }
@@ -1327,11 +1320,6 @@ async function runMarketplaceRenewListings({
     const stable = await waitRenewScreenStable(page, { onProgress, timeoutMs: RENEW_SCREEN_WAIT_MS });
     if (!stable || stable.ok !== true) {
       const error = (stable && stable.reason) || 'renew_screen_unconfirmed';
-      if (error === 'no_eligible_listings') {
-        await progress(page, onProgress, 'no_eligible_listings', 'Facebook informou que todos os classificados selecionados não podem ser renovados. Nenhuma renovação realizada.');
-        audit('renew_listings_unavailable', { reason: error, renewed: false, durationMs: now() - startedAt });
-        return { ok: false, renewed: false, renewedCount: 0, error, reason: error };
-      }
       audit('renew_listings_fail', { stage: 'renew_screen', reason: error, snapshot: stable && stable.snapshot, durationMs: now() - startedAt });
       return { ok: false, renewedCount: 0, error, reason: error };
     }

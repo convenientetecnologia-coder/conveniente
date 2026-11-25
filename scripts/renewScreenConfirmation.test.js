@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync(require('node:path').join(__dirname, 'marketplaceRenewListings.js'), 'utf8');
-async function run(snapshot) {
+async function run(snapshot, timeoutMs = 20000) {
   let clock = 1000;
   const start = source.indexOf('async function waitRenewScreenStable(');
   const end = source.indexOf('\n/**', start);
@@ -17,7 +17,7 @@ async function run(snapshot) {
     RENEW_READY_MIN_ELAPSED_MS: 12000,
     RENEW_READY_STABLE_MS: 6000
   });
-  return fn({});
+  return fn({}, { timeoutMs });
 }
 test('botão habilitado libera sem contagem', async () => {
  const r=await run({hasHeader:true,renewBtn:{enabled:true}});assert.equal(r.ok,true);assert.equal(r.reason,'ready');assert.equal(r.count,undefined);
@@ -28,30 +28,19 @@ test('botão desabilitado, ausente ou fora da tela não libera', async () => {
 test('botão transitório não libera', async () => {const r=await run(clock=>({hasHeader:true,renewBtn:{enabled:clock<4000}}));assert.equal(r.ok,false);});
 test('botão disponível após carregamento libera', async () => {const r=await run(clock=>({hasHeader:true,renewBtn:{enabled:clock>=8000}}));assert.equal(r.ok,true);});
 
-test('explicit all-ineligible result is stable and never reports renewal success', async () => {
- const r=await run({hasHeader:true,renewBtn:{enabled:false},noneEligible:true,loading:false,signature:'15 blocked / 15 selected'});
- assert.equal(r.ok,false);assert.equal(r.reason,'no_eligible_listings');
+test('all blocked count can stay unchanged for two minutes before eligibility finishes', async () => {
+ let lastRead=0;
+ const result=await run(clock=>{
+  lastRead=clock;
+  return {hasHeader:true,renewBtn:{enabled:clock>=121000},loading:false,
+   signature:clock<121000?'200 classificados não podem ser renovados':'25 não podem / 175 podem ser renovados'};
+ },180000);
+ assert.equal(result.ok,true);assert.equal(result.reason,'ready');assert.ok(lastRead>=127000);
 });
 
-test('loading or changing all-ineligible result is not accepted', async () => {
- for(const snapshot of [()=>({hasHeader:true,renewBtn:{enabled:false},noneEligible:true,loading:true}),clock=>({hasHeader:true,renewBtn:{enabled:false},noneEligible:true,signature:String(clock)})]){
-  assert.equal((await run(snapshot)).reason,'renew_button_unavailable_timeout');
- }
-});
-
-test('DOM requires disabled renewal and equal positive selected/blocked counts in the modal',async()=>{
- const start=source.indexOf('async function waitRenewScreenStable('),end=source.indexOf('\n/**',start);
- for(const [selected,blocked,enabled,expected] of [[15,15,false,'no_eligible_listings'],[15,14,false,'renew_button_unavailable_timeout'],[0,0,false,'renew_button_unavailable_timeout'],[15,15,true,'ready']]){
-  let clock=0;
-  const control={getAttribute:k=>k==='aria-label'?'Renovar':k==='aria-disabled'?String(!enabled):null,innerText:'Renovar',getBoundingClientRect:()=>({width:100,height:30}),closest:()=>null};
-  const root={innerText:`Renovar classificados ${blocked} classificados não podem ser renovados`,matches:()=>true,querySelectorAll:()=>[]};
-  const fn=vm.runInNewContext(source.slice(start,end)+';waitRenewScreenStable',{
-   now:()=>clock,sleep:async ms=>{clock+=ms},progress:async()=>{},safeEvaluate:async(_page,fn)=>fn(),RENEW_SCREEN_WAIT_MS:10000,RENEW_READY_STABLE_MS:6000,
-   document:{body:{innerText:`${selected} classificados selecionados ${root.innerText}`},readyState:'complete',querySelectorAll:()=>[control],querySelector:()=>root},
-   getComputedStyle:()=>({display:'block',visibility:'visible'})
-  });
-  assert.equal((await fn({})).reason,expected);
- }
+test('unchanged blocked count until timeout remains unconfirmed, never definitive ineligibility',async()=>{
+ const result=await run({hasHeader:true,renewBtn:{enabled:false},loading:false,signature:'200 classificados não podem ser renovados'},180000);
+ assert.equal(result.ok,false);assert.equal(result.reason,'renew_button_unavailable_timeout');
 });
 
 test('sucesso sem quantidade persiste renovação e entra na contagem de contas', async () => {
