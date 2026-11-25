@@ -6,7 +6,7 @@ async function inspect(page){
   const visible=el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>2&&r.height>2&&s.visibility!=='hidden'&&s.display!=='none'&&!el.closest('[aria-hidden="true"],[inert]')};
   const dialogs=[...document.querySelectorAll('[role="dialog"],[aria-modal="true"]')].filter(visible);
   const root=dialogs.at(-1)||document.querySelector('[role="main"]')||document.body;
-  const buttons=[...root.querySelectorAll('button,[role="button"],a,[role="link"]')].filter(visible).map(el=>({label:norm(el.getAttribute('aria-label')||el.innerText||el.textContent),enabled:!el.disabled&&!el.closest('[aria-disabled="true"],[aria-busy="true"]')}));
+  const buttons=[...root.querySelectorAll('button,[role="button"],a,[role="link"],[tabindex="0"]')].filter(visible).map(el=>({label:norm(el.getAttribute('aria-label')||el.innerText||el.textContent),enabled:!el.disabled&&!el.closest('[aria-disabled="true"],[aria-busy="true"]')}));
   const file=!!root.querySelector('input[type="file"]');
   const text=norm(root.innerText).slice(0,6000);
   const cnh=[...root.querySelectorAll('label,[role=radio],span,div')].some(el=>visible(el)&&/^(carteira de habilitacao|driver.?s? licen[cs]e)$/.test(norm(el.innerText)));

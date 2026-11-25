@@ -14,7 +14,7 @@ async function fixture(steps,{mode='div',delay=50}={}){
    const headings={confirm:'Confirme sua identidade',intro:'Confirme sua identidade com um documento usando reconhecimento facial',continue:'Verificação de identidade: ajude-nos a verificar seu documento',load:'Escolha como enviar sua identidade',intro2:'Confirme sua identidade com um documento. Antes de começar',cnh:'Escolha um tipo de documento'};
    const label={confirm:'Confirmar identidade',intro:'Avançar',continue:'Continuar',load:'Carregar documento de identidade',intro2:'Avançar',cnh:'Avançar'}[state];
    root.innerHTML='<h1>'+headings[state]+'</h1><div aria-hidden=true><button onclick="window.bad++">'+label+'</button></div><button disabled>'+label+'</button>'+(state==='cnh'?'<div role="radio" aria-checked="false" tabindex="0" onclick="this.setAttribute(\'aria-checked\',\'true\');document.querySelector(\'#next\').removeAttribute(\'aria-disabled\');document.querySelector(\'#next\').style.background=\'rgb(8,102,255)\'"><span>Carteira de habilitação</span></div>':'')+
-    (mode==='native'?'<button id="next">'+label+'</button>':'<div id="next" class="random'+Math.random()+'" role="button" tabindex="0" aria-label="'+label+'"><div><span>'+label+'</span><div data-visualcompletion="ignore"></div></div></div>');
+    (mode==='native'?'<button id="next">'+label+'</button>':'<div id="next" class="random'+Math.random()+'" role="'+(mode==='focusable'?'none':'button')+'" tabindex="0" aria-label="'+label+'"><div><span>'+label+'</span><div data-visualcompletion="ignore"></div></div></div>');
    const button=document.querySelector('#next');button.style.cssText='display:block;width:330px;height:48px;background:rgb(8,102,255);color:white';
    if(state==='cnh'){button.setAttribute('aria-disabled','true');button.style.background='rgb(200,200,200)'}
    button.onclick=()=>{if(button.getAttribute('aria-disabled')==='true'){window.bad++;return}window.clicks.push(state);setTimeout(()=>{window.stage++;window.render()},delay)};
@@ -47,4 +47,18 @@ test('slow transition is awaited instead of clicking again',{timeout:15000},asyn
 test('lost chair prevents even the first navigation click',async()=>{
  const page=await fixture(['continue']);browser.__ctIsolatedFlow={kind:'id',proxyRequired:true,rail:{isProxyArmed:true,operationSnapshot:()=>({healthy:false})}};
  try{await assert.rejects(navigate(page),/interaction_without_healthy_proxy_turn/);assert.deepEqual(await page.evaluate(()=>window.clicks),[])}finally{delete browser.__ctIsolatedFlow;await page.close()}
+});
+
+test('selling banner is not an open wizard; opening today listing exposes the real Confirmar identidade button',async()=>{
+ const page=await browser.newPage();try{
+  const hints=id.dateHintsSP();
+  await page.setContent('<main role="main"><div style="width:650px"><span>Confirme sua identidade para publicar este e futuros classificados</span><a href="/marketplace/item/123456789012345">Mudança, Frete, super promoção hoje Carreto</a><div>Em estoque · Anunciado em '+hints.todayDay+'/'+hints.todayMonth+'</div><button aria-label="Mais opções">...</button></div></main>');
+  await page.evaluate(()=>{document.querySelector('a').onclick=event=>{event.preventDefault();document.body.innerHTML='<main role="main"><div role="button" tabindex="0" aria-label="Confirmar identidade">Confirmar identidade</div></main>';}});
+  assert.equal(await id.detectIdWizardScreen(page),'listing_identity_required');
+  const opened=await id.openActionNeededListing(page,{mode:'today'});assert.equal(opened.listedToday,true);assert.equal(opened.clicked,true,JSON.stringify(opened));
+  assert.equal(await id.detectIdWizardScreen(page),'confirm');
+ }finally{await page.close()}
+});
+test('focusable wrapper with nested role-none spans advances without requiring a button role',async()=>{
+ const page=await fixture(['intro','continue'],{mode:'focusable'});try{assert.equal((await navigate(page)).ok,true);assert.deepEqual(await page.evaluate(()=>window.clicks),['intro','continue'])}finally{await page.close()}
 });

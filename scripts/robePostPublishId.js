@@ -674,26 +674,14 @@ async function detectIdWizardScreen(page) {
       ) {
         if (!hasAria(/carregar documento/)) return 'continuar';
       }
-      const identityVerb = /\b(confirme|confirmar|confirma|confirm|verifique|verificar|verifica|verify)\b/;
-      const buttonSaysIdentity = Array.from(document.querySelectorAll('[role="button"],button')).some((el) => {
-        const label = normLocal(`${el.getAttribute('aria-label') || ''} ${el.innerText || el.textContent || ''}`).slice(0, 80);
-        if (!label || (!label.includes('identidade') && !label.includes('identity'))) return false;
-        return identityVerb.test(label);
+      const confirmLabels=/^(?:confirme|confirmar|verificar|verifique)(?: sua)? identidade$|^(?:confirm|verify)(?: your)? identity$/;
+      const buttonSaysIdentity=Array.from(document.querySelectorAll('[role="button"],button,a,[role="link"]')).some(el=>{
+        const label=normLocal(el.getAttribute('aria-label')||el.innerText||el.textContent);
+        const rect=el.getBoundingClientRect();
+        return confirmLabels.test(label)&&rect.width>2&&rect.height>2&&!el.closest('[aria-hidden="true"],[inert]');
       });
-      if (
-        buttonSaysIdentity ||
-        hasAria(/confirme sua identidade/) ||
-        hasAria(/confirmar identidade/) ||
-        hasAria(/^verificar identidade$/) ||
-        body.includes('confirme sua identidade') ||
-        body.includes('confirmar identidade') ||
-        body.includes('verifique sua identidade') ||
-        body.includes('verificar identidade') ||
-        body.includes('verify your identity') ||
-        body.includes('confirm your identity')
-      ) {
-        return 'confirm';
-      }
+      if(buttonSaysIdentity)return 'confirm';
+      if(/confirme sua identidade|confirmar identidade|verifique sua identidade|verificar identidade|verify your identity|confirm your identity/.test(body))return 'listing_identity_required';
       return 'unknown';
     });
     if (screen.startsWith('network_error:')) {
@@ -2361,16 +2349,18 @@ async function waitListingIdentityPrompt(page, { maxMs = 45000, deadlineAt } = {
         const exactBtn = Array.from(document.querySelectorAll('[role="button"],button')).some((el) => {
           const aria = normLocal(el.getAttribute('aria-label') || '');
           const own = normLocal(el.innerText || el.textContent || '');
+          const rect=el.getBoundingClientRect();if(rect.width<2||rect.height<2||el.closest('[aria-hidden="true"],[inert]'))return false;
           return aria === 'confirmar identidade' || aria === 'confirm identity' || own === 'confirmar identidade' || own === 'confirm identity';
         });
         const onCheckpoint = /\/checkpoint\/1501092823525282\/\d+/.test(String(location.pathname || ''));
         return {
-          hasBtn: exactBtn || onCheckpoint,
+          hasBtn: exactBtn, onCheckpoint,
           hasText: verb.test(body) && (body.includes('identidade') || body.includes('identity')),
           onItem: /\/marketplace\/item\//.test(location.pathname || '')
         };
       });
-      if (st && st.hasBtn) return st;
+      if(st?.hasBtn)return st;
+      if(st?.onCheckpoint){const screen=await detectIdWizardScreen(page);if(['confirm','identity_retry','identity_doc_intro','continuar','carregar_doc','doc_type','upload_photo','success','pending_review','marketplace_phone_confirm','marketplace_phone_entry'].includes(screen))return {...st,screen};}
     } catch {}
     await sleep(2000);
   }
@@ -3553,6 +3543,7 @@ async function openIdentityFromVisibleListings(page, { nome, source, deadlineAt 
 }
 
 async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
+  if(await isDoneToday(nome))return {ok:true,skipped:true,marked:false,reason:'already_done_today'};
   if (!require('./isolatedAccountFlow').context(page, 'id')) {
     try {
       const isolatedDeadline = Number(deadlineAt) || Date.now() + BUDGET_TOTAL_MS;
@@ -3596,22 +3587,13 @@ async function runHumanVerifyId({ page, nome, deadlineAt } = {}) {
       const opened = await tryOpenActionNeededAtTop(page, {
         nome,
         source,
-        mode: 'firstAny',
+        mode: 'today',
         preferTitle: '',
         attempts: TOP_SCAN_ATTEMPTS_HUMAN,
         deadlineAt: workDeadline
       });
       openedOk = opened.openedOk;
       scan = opened.scan;
-      if (!openedOk) {
-        await require('./isolatedAccountFlow').armIdentity(page);
-        const probed = await openIdentityFromVisibleListings(page, { nome, source, deadlineAt: workDeadline });
-        if (probed) {
-          openedOk = true;
-          scan = { found: true, method: 'listing_probe' };
-          logEvt(nome, source, 'wizard_listing_probe', { screen: probed });
-        }
-      }
     }
 
     if (!openedOk) {
