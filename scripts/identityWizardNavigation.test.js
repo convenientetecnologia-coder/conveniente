@@ -76,6 +76,14 @@ test('upload identity button rendered outside the first main is still found',{ti
   const result=await navigate(page,{stepTimeoutMs:5000});assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.screen,'upload_photo');
  }finally{await page.close()}
 });
+test('nested role-main upload button with its internal overlay is recognized and clicked once',{timeout:15000},async()=>{
+ const page=await browser.newPage();try{
+  await page.setContent('<div><div><div role="main"><div><div><div><div><h1>Carregar seu documento de identidade</h1><p>Para continuar a vender e enviar mensagens no Marketplace, precisamos de uma foto do seu documento de identidade oficial. Pode ser uma carteira de habilitação, passaporte ou outro tipo de documento de identidade.</p><p>Não aceitamos fotos de telas de computador, telas de celular ou fotocópias. Se houver algum problema, enviaremos um email.</p><div><div aria-label="Carregar documento de identidade" role="button" tabindex="0" style="position:relative;width:360px;height:60px"><div role="none"><div><div role="none"><span dir="auto"><span>Carregar documento de identidade</span></span></div></div><div role="none" data-visualcompletion="ignore" style="position:absolute;inset:0"></div></div></div></div></div></div></div></div></div></div></div>');
+  await page.evaluate(()=>{window.clicked=0;document.querySelector('[role=button]').onclick=()=>{window.clicked++;document.querySelector('[role=main]').innerHTML='<h1>Carregue uma foto do seu documento</h1><input type=file><button>Carregar</button>'}});
+  const inspected=await navigation.inspect(page);assert.ok(inspected.buttons.some(b=>b.label==='carregar documento de identidade'&&b.enabled));
+  const result=await navigate(page,{stepTimeoutMs:5000});assert.equal(result.ok,true,JSON.stringify(result));assert.equal(await page.evaluate(()=>window.clicked),1);
+ }finally{await page.close()}
+});
 test('unrelated visible dialog does not hide the actual identity action',{timeout:15000},async()=>{
  const page=await fixture(['load']);try{
   await page.evaluate(()=>{const d=document.createElement('div');d.setAttribute('role','dialog');d.innerHTML='<p>Ajuda</p>';document.body.append(d)});
