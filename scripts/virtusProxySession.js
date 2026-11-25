@@ -91,6 +91,7 @@ async function create({nome,onState=()=>{},dependencies={}}){
    enterHuman(){return humanControl.enter()},
    leaveHuman(){return humanControl.leave()},
    renewHuman(){return humanControl.renew()},
+   runHumanAction(action){return humanControl.runAction(action)},
    resumeHuman(validate){return humanControl.resume(validate)},
    humanStatus(){return humanControl.status()},
    async run(intent,action,turnOptions){

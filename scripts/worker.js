@@ -450,7 +450,7 @@ async function runRenewListingsForProfile(nome, { mode = 'manual', closeAfter = 
         return desired;
       });
     } catch {}
-    try { await stopVirtus(n); } catch {}
+    if(!ctrl.browser?.__ctIsolatedFlow?.humanBorrowed)try { await stopVirtus(n); } catch {}
 
     renewFlowStarted = true;
     const r = await marketplaceRenewListings.runMarketplaceRenewListings({
@@ -4471,7 +4471,7 @@ async function _installOverlayOnPage(nome, page) {
           };
 
           let proxyPollBusy=false;
-          const proxyTick=async()=>{if(proxyPollBusy||!document.getElementById(HOST_ID)||typeof window.__ctHumanOverlayProxyStatus!=='function')return;proxyPollBusy=true;try{const s=await window.__ctHumanOverlayProxyStatus();const root=document.getElementById(HOST_ID)?.shadowRoot,row=root?.getElementById('proxyLeaseRow'),out=root?.getElementById('proxyLeaseStatus'),button=root?.getElementById('renewProxyLease');if(!row||!out||!button)return;row.style.display=s.supported?'':'none';button.style.display=s.supported?'':'none';if(s.supported){button.disabled=s.state==='resuming'||window.__ctHumanProxyRenewBusy===true;const seconds=Math.max(0,Math.ceil(Number(s.remainingMs||0)/1000)),timer=Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0');out.textContent=s.state==='online'?'Online — '+timer+' restantes':s.state==='resuming'?'Validando retomada — aguardando cadeira/conversas':s.state==='waiting'?'Aguardando cadeira prioritária':s.state==='expired'?'Tempo encerrado — renovar para reconectar':'Offline — renovar para conectar';}}catch{}finally{proxyPollBusy=false}};
+          const proxyTick=async()=>{if(proxyPollBusy||!document.getElementById(HOST_ID)||typeof window.__ctHumanOverlayProxyStatus!=='function')return;proxyPollBusy=true;try{const s=await window.__ctHumanOverlayProxyStatus();const root=document.getElementById(HOST_ID)?.shadowRoot,row=root?.getElementById('proxyLeaseRow'),out=root?.getElementById('proxyLeaseStatus'),button=root?.getElementById('renewProxyLease');if(!row||!out||!button)return;row.style.display=s.supported?'':'none';button.style.display=s.supported?'':'none';if(s.supported){button.disabled=s.state==='resuming'||window.__ctHumanProxyRenewBusy===true;const seconds=Math.max(0,Math.ceil(Number(s.remainingMs||0)/1000)),timer=Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0');out.textContent=s.state==='online'?(s.actionActive?'Ação manual — tempo humano pausado em '+timer:'Online — '+timer+' restantes'):s.state==='resuming'?'Validando retomada — aguardando cadeira/conversas':s.state==='waiting'?'Aguardando cadeira prioritária':s.state==='expired'?'Tempo encerrado — renovar para reconectar':'Offline — renovar para conectar';}}catch{}finally{proxyPollBusy=false}};
           if(window.__ctHumanProxyStatusTimer)clearInterval(window.__ctHumanProxyStatusTimer);window.__ctHumanProxyStatusTimer=setInterval(()=>proxyTick(),1000);proxyTick();
           window.addEventListener('DOMContentLoaded', () => { try { render(); } catch {} }, { once: true });
           // Resiliência: se SPA mexer no DOM e remover, recria.
@@ -15832,7 +15832,13 @@ const handlers = {
     return { ok: true, accepted: true };
   },
 
-  async ['human-verify-id']({ nome }) {
+  async ['human-verify-id']({ nome, humanLeaseOwned = false }) {
+    const humanCtrl=controllers.get(String(nome||'').trim());
+    if(!humanLeaseOwned&&humanCtrl?.humanControl&&humanCtrl.browser?.__ctVirtusProxy){
+      if(humanCtrl._proxyHumanResuming)return {ok:false,error:'human_resume_in_progress'};
+      try{return await require('./humanAccountFlow').run({browser:humanCtrl.browser,nome,kind:'id',proxy:humanCtrl.browser.__ctVirtusProxy},()=>handlers['human-verify-id']({nome,humanLeaseOwned:true}));}
+      catch(error){return {ok:false,marked:false,error:String(error.message||error)}}
+    }
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] human-verify-id chamada', { nome });
       const n = String(nome || '').trim();
@@ -15862,7 +15868,7 @@ const handlers = {
         const r = await robePostPublishId.runHumanVerifyId({
           page,
           nome: n,
-          deadlineAt: Date.now() + (robePostPublishId.BUDGET_TOTAL_MS || 420000)
+          deadlineAt: Math.min(Date.now() + (robePostPublishId.BUDGET_TOTAL_MS || 420000), ctrl.browser.__ctIsolatedFlow?.deadlineAt || Infinity)
         });
         try {
           if (r && r.marketplacePhoneConfirm === true) {
@@ -16090,7 +16096,13 @@ const handlers = {
   },
 
   /** Renovar classificados (1 conta). Manual = overlay; auto = legado (não usado pelo diário). */
-  async ['renew-listings']({ nome, mode, closeAfter }) {
+  async ['renew-listings']({ nome, mode, closeAfter, humanLeaseOwned = false }) {
+    const humanCtrl=controllers.get(String(nome||'').trim());
+    if(!humanLeaseOwned&&String(mode||'manual').toLowerCase()!=='auto'&&humanCtrl?.humanControl&&humanCtrl.browser?.__ctVirtusProxy){
+      if(humanCtrl._proxyHumanResuming)return {ok:false,error:'human_resume_in_progress'};
+      try{return await require('./humanAccountFlow').run({browser:humanCtrl.browser,nome,kind:'renew',proxy:humanCtrl.browser.__ctVirtusProxy},()=>handlers['renew-listings']({nome,mode,closeAfter:false,humanLeaseOwned:true}));}
+      catch(error){return {ok:false,renewedCount:0,error:String(error.message||error)}}
+    }
     const n = String(nome || '').trim();
     if (!n) return { ok: false, error: 'nome_ausente', renewedCount: 0 };
     // Rejeita ANTES do lock: lockProfileAction serializa e rodaria um 2º renew
