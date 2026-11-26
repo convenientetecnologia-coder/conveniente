@@ -2682,7 +2682,7 @@ async function nurseEnsureTerminalHumanOnce(nome, ctrl, want, reason) {
 
 // Contrato ops: captcha/checkpoint → NÃO fecha browser, marca flag, INVOCA humano.
 // Usuário verifica no dia; exclusão diária fecha+exclui no horário configurado.
-async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = '', title = '' } = {}) {
+async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = '', title = '', confirmedPostPassword = false } = {}) {
   if (refuseOutsideCadastroMark(nome)) return;
   if (browserHelper.isMarketplaceDocCheckpointUrl(url)) {
     try {
@@ -2691,7 +2691,7 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
     } catch {}
     return;
   }
-  if (await ownProfileProofIsFresh(nome, controllers.get(nome))) return;
+  if (!confirmedPostPassword && await ownProfileProofIsFresh(nome, controllers.get(nome))) return;
   let already = false;
   try {
     const prev = await readAccountFlags(nome).catch(() => null);
@@ -2722,6 +2722,8 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
       man.accountFlags.captchaCheckpointUrl = String(url || '').slice(0, 300);
       man.accountFlags.captchaCheckpointTitle = String(title || '').slice(0, 200);
       // Blindagem: captcha/checkpoint NÃO pode ficar mascarado por "login/cookies falhou".
+      delete man.accountFlags.loginRequired;
+      delete man.accountFlags.loginFlow;
       delete man.accountFlags.loginRemediateFailed;
       delete man.accountFlags.loginRemediateFailedAt;
       delete man.accountFlags.loginRemediateFailedReason;
@@ -14006,12 +14008,17 @@ const handlers = {
             }).catch(() => false);
             if (checkpointSignature) {
               await setCaptchaCheckpointFlag(nome, {
+                confirmedPostPassword: true,
                 reason: 'captcha_after_cookie_continue_password',
                 source: 'configure_login_fallback',
                 url: workPage.url()
               });
               throw Error('captcha_checkpoint');
             }
+          }
+          if (driven?.error === 'captcha_after_cookie_continue_password' && driven?.submitted === true) {
+            await setCaptchaCheckpointFlag(nome, {reason:driven.error,source:'configure_login_fallback',confirmedPostPassword:true});
+            throw Error('captcha_checkpoint');
           }
           if(driven?.ok!==true&&require('./stockProvisionRetry').isTransient(driven?.error))throw Error(driven.error);
           if(['password_rejected','credentials_rejected'].includes(driven?.error))return {ok:false,error:driven.error};
