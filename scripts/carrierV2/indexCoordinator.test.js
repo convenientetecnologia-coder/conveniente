@@ -4,6 +4,11 @@ const job=(nome,purpose='virtus',intent='observe')=>({id:crypto.randomUUID(),nom
 const wait=()=>new Promise(setImmediate);
 async function settled(b,count){for(let i=0;i<500;i++){if([...b.jobs.values()].filter(j=>['granted','failed','canceled','closed'].includes(j.state)).length>=count)return;await wait()}throw Error('broker did not settle')}
 function handle(){let phase='active',confirmed=false,closed=false;return {operationId:crypto.randomUUID(),hop:{host:'127.0.0.1',port:41000},snapshot:()=>({healthy:!closed,phase,result:confirmed?'confirmed':'not_started'}),possibleSideEffect:async()=>{},confirm:async()=>{confirmed=true},close:async()=>{phase='release_requested';closed=true},reconcileClosed:async()=>phase==='closed',proof(){phase='closed'}}}
+test('human resume intent is prioritized before opening, provision and ordinary visits',async()=>{
+ const order=[],b=new Coordinator({acquire:async options=>{order.push(options.intent);return handle()}});
+ b.enqueue(job('cold','virtus','observe'),'w');b.enqueue(job('opening','virtus','warm'),'w');b.enqueue(job('signup','provision','observe'),'w');b.enqueue(job('resume','virtus','human'),'w');
+ await settled(b,4);assert.equal(order[0],'human');
+});
 test('Index serializes CT acquisition for all workers while allowing multiple active chairs',async()=>{
  let pending=0,peak=0;const b=new Coordinator({acquire:async options=>{peak=Math.max(peak,++pending);assert.equal(await options.isReady(),true);await wait();pending--;return handle()}});
  const rows=Array.from({length:105},(_,i)=>job('account-'+i));for(let i=0;i<rows.length;i++)b.enqueue(rows[i],'worker-'+i%8);

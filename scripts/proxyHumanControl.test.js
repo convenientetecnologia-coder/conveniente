@@ -1,5 +1,10 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),{invoke,resume}=require('./proxyHumanControl');
+test('a finished human timer cannot be accepted as verified resume without running inbox validation',async()=>{
+ const ctrl={humanControl:true,browser:{__ctVirtusProxy:{resumeHuman:async()=>({ok:true,humanFinished:true})}}};let want={humanHold:true,virtus:'off'};
+ const result=await resume({ctrl,read:()=>want,update:async f=>want=f(want),guard:async()=>{},overlay:async()=>{},snapshot:async()=>{},validate:async()=>{throw Error('must not run')}});
+ assert.equal(result.ok,false);assert.equal(result.error,'human_resume_inbox_unconfirmed');assert.equal(want.humanHold,true);assert.equal(want.virtus,'off');
+});
 
 test('manual entry waits for an actual human lease and is canceled when control has resumed',async()=>{
  let grant,entries=0;const waiting=new Promise(r=>grant=r);

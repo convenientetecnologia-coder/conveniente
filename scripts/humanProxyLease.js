@@ -37,7 +37,9 @@ class HumanProxyLease {
  leave(){this.cancelWaitingAction();this.resumeCancel?.abort(Error('virtus_human_canceled'));return this.serialize(()=>this.stop());}
  resume(validate){this.cancelWaitingAction();return this.serialize(async()=>{
   if(typeof validate!=='function')throw Error('human_resume_validation_required');const c=this.current,s=this.lease()?.snapshot();
-  if(c?.startedAt&&this.state()==='online'&&s?.healthy===true){this.clearTimer(c.timer);c.resumeAction=validate;c.resuming=true;c.resolveGate();return await c.task;}
+  // An expired gate may already be finishing even while the last snapshot is online.
+  // Never attach validation to a task whose human countdown has already ended.
+  if(c?.startedAt&&!c.expired&&!c.cancel.signal.aborted&&c.expiresAt>this.clock()&&this.state()==='online'&&s?.healthy===true){this.clearTimer(c.timer);c.resumeAction=validate;c.resuming=true;c.resolveGate();return await c.task;}
   await this.stop();this.holding(true);this.last={state:'resuming'};this.resumeCancel=new AbortController();this.changed();try{return await this.run(validate,{signal:this.resumeCancel.signal})}finally{this.resumeCancel=null;this.holding(false);this.last={state:'idle'};this.changed();}
  });}
 }

@@ -14,8 +14,10 @@ async function resume({ctrl,read,update,guard,overlay,snapshot,validate}){
  if(typeof validate!=='function')return {ok:false,state:'resume_unconfirmed',error:'human_resume_validation_required'};
  ctrl._proxyHumanResuming=true;
  try{
- const checked=await proxy.resumeHuman(async lease=>{await guard(false);return validate(lease)});
- if(checked?.ok!==true)throw Error(checked?.error||'human_resume_inbox_unconfirmed');
+ await snapshot();
+ let verified=false;
+ const checked=await proxy.resumeHuman(async lease=>{await guard(false);const result=await validate(lease);verified=result?.ok===true;return result});
+ if(!verified||checked?.ok!==true)throw Error(checked?.error||'human_resume_inbox_unconfirmed');
  const previous=ctrl._proxyHumanPrevious||read()||{};
  ctrl.humanControl=false;ctrl.trabalhando=false;
  await update(want=>({...want,active:previous.active===undefined?want.active:previous.active,virtus:previous.virtus||'on',humanHold:false}));
