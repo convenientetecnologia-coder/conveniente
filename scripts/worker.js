@@ -2163,7 +2163,7 @@ function refuseOutsideCadastroMark(nome) {
 }
 
 async function recordLoginFlow(nome,event){
- await manifestStore.update(nome,m=>({...m,loginFlow:require('./loginFlowState').evolve(m?.loginFlow,event)}));
+ await manifestStore.update(nome,m=>m?.accountFlags?.captchaCheckpoint===true?m:({...m,loginFlow:require('./loginFlowState').evolve(m?.loginFlow,event)}));
 }
 
 async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
@@ -2723,6 +2723,7 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
       man.accountFlags.captchaCheckpointTitle = String(title || '').slice(0, 200);
       // Blindagem: captcha/checkpoint NÃO pode ficar mascarado por "login/cookies falhou".
       delete man.accountFlags.loginRequired;
+      delete man.loginFlow;
       delete man.accountFlags.loginFlow;
       delete man.accountFlags.loginRemediateFailed;
       delete man.accountFlags.loginRemediateFailedAt;
@@ -15090,6 +15091,10 @@ const handlers = {
             error: driven && driven.error ? String(driven.error).slice(0, 160) : null,
             terminal: driven && driven.terminal ? String(driven.terminal).slice(0, 80) : null
           });
+          if (driven?.error === 'captcha_after_cookie_continue_password' && driven?.submitted === true) {
+            await setCaptchaCheckpointFlag(nome, {reason:driven.error,source:'manual_cookie_login',confirmedPostPassword:true});
+            return {ok:false,error:'captcha_checkpoint',steps,closedForRam,pausedVirtus};
+          }
           if (driven && driven.error === 'whatsapp_confirm') {
             try { await enterHumanMode(nome, controllers.get(nome), { reason: 'whatsapp_confirm' }); } catch {}
             try { await ensureHumanOverlay(nome, controllers.get(nome), { reason: 'whatsapp_confirm' }); } catch {}
