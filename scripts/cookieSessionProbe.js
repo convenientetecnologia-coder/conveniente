@@ -8,6 +8,7 @@ async function run({inject,navigate,inspect,assertHealthy=()=>{},onProgress=asyn
    assertHealthy();const state=await inspect();assertHealthy();
    if(state?.terminal)throw Error(state.terminal);
    if(state?.ready&&state.authenticated){await onProgress({cookiesRestored:true});return {ok:true,in:true,attempts:attempt};}
+   if(state?.ready&&state.continueRequired){await onProgress({stage:'continue',cookiesRestored:false});return {ok:false,in:false,loggedOut:true,reason:'aymh_continue',attempts:attempt};}
    if(state?.ready&&state.loginGate){
     if(gateSince===null)gateSince=now();
     if(now()-gateSince>=2500&&now()-began>=loginGraceMs)break;

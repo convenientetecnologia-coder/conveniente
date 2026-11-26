@@ -437,7 +437,7 @@ async function tryExistingPcSession(page, nome, opts) {
       if(!ready)return {ready:false};
       const authenticated=await feedOpened(page);
       const gate=authenticated?null:await require('./browser').detectLoginRequired(page);
-      return {ready:true,authenticated,loginGate:gate?.loginRequired===true&&/^(login_form|login_wall|aymh_continue|aymh|password_only)$/.test(gate.reason||'')};
+      return {ready:true,authenticated,continueRequired:gate?.loginRequired===true&&/^(aymh_continue|aymh)$/.test(gate.reason||''),loginGate:gate?.loginRequired===true&&/^(login_form|login_wall|aymh_continue|aymh|password_only)$/.test(gate.reason||'')};
     }
   });
 }
