@@ -43,3 +43,27 @@ test('renew full page clicks the nested enabled footer and ignores disabled Canc
   assert.equal(await page.evaluate(()=>!!window.bad),false);
  } finally { await browser.close(); }
 });
+
+test('manage mode requires a rendered Select all control instead of a hidden template', {timeout:15000}, async () => {
+ const browser=await require('puppeteer').launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',args:['--no-sandbox']});
+ try {
+  const page=await browser.newPage();
+  await page.setContent('<div aria-hidden="true"><button>Select all</button></div><button style="display:none">Selecionar tudo</button><button>Gerenciar classificados</button>');
+  const present=extract('labelPresent','async function waitForLabel(',{
+    normalizeTxt:s=>String(s).toLowerCase(),safeEvaluate:(p,fn,args)=>p.evaluate(fn,args)
+  });
+  assert.equal(await present(page,['Selecionar tudo','Select all'],{exactOnly:true}),false);
+  await page.evaluate(()=>{const button=document.createElement('button');button.textContent='Selecionar tudo';document.body.append(button)});
+  assert.equal(await present(page,['Selecionar tudo','Select all'],{exactOnly:true}),true);
+ } finally { await browser.close(); }
+});
+test('scroll stops before touching the page when manage mode is lost', async () => {
+ let touched=false;
+ const scroll=extract('scrollToAgeThreshold','async function scrollToTop(',{
+  SCROLL_STOP_AGE_DAYS:30,SCROLL_STUCK_TICKS_LIMIT:3,now:Date.now,progress:async()=>{},
+  labelPresent:async()=>false,waitForLabel:async()=>false,safeEvaluate:async()=>{touched=true}
+ });
+ const result=await scroll({}, {requireManageMode:true});
+ assert.equal(result.reason,'renew_manage_mode_lost');
+ assert.equal(touched,false);
+});

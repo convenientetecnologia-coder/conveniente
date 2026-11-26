@@ -39,7 +39,7 @@ const POST_RENEW_CLOSE_GRACE_MS_MAX = 20000;
 const RENEW_READY_MIN_ELAPSED_MS = 12000;
 // Count+botão enabled precisa ficar estável este tempo (não sobe mais).
 const RENEW_READY_STABLE_MS = 6000;
-const MANAGE_MODE_WAIT_MS = 60000;
+const MANAGE_MODE_WAIT_MS = 180000;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, Math.max(0, Number(ms) || 0)));
@@ -190,6 +190,11 @@ async function labelPresent(page, labels, { requireEnabled = false, exactOnly = 
         try { aria = String(el.getAttribute('aria-label') || ''); } catch {}
         try { txt = String(el.innerText || el.textContent || '').slice(0, 200); } catch {}
         if (!matches(aria) && !matches(txt)) continue;
+        const rect = el.getBoundingClientRect(), style = getComputedStyle(el);
+        if (rect.width < 2 || rect.height < 2 || style.display === 'none' ||
+            style.visibility === 'hidden' || Number(style.opacity) === 0 ||
+            el.closest('[aria-hidden="true"],[inert]')) continue;
+
         if (requireEnabled) {
           const disabled =
             el.disabled === true || String(el.getAttribute('aria-disabled') || '').toLowerCase() === 'true';
@@ -241,7 +246,7 @@ async function ensureSelling(page, { onProgress } = {}) {
   return true;
 }
 
-async function scrollToAgeThreshold(page, { onProgress, scrollStopAgeDays = SCROLL_STOP_AGE_DAYS, deadlineAt=0, isAborted=null } = {}) {
+async function scrollToAgeThreshold(page, { onProgress, scrollStopAgeDays = SCROLL_STOP_AGE_DAYS, deadlineAt=0, isAborted=null, requireManageMode=false } = {}) {
   const ageDays = Math.max(1, Math.min(120, Math.floor(Number(scrollStopAgeDays) || SCROLL_STOP_AGE_DAYS) || SCROLL_STOP_AGE_DAYS));
   await progress(page, onProgress, 'scroll_down', `Rolando classificados até ${ageDays} dia(s)...`);
   const targetIso = (() => {
@@ -258,6 +263,12 @@ async function scrollToAgeThreshold(page, { onProgress, scrollStopAgeDays = SCRO
   let lastTop = -1;
   for (let tick = 0; tick < SCROLL_STUCK_TICKS_LIMIT + 40; tick++) {
     if((isAborted&&isAborted())||(deadlineAt&&now()>=require('./carrierV2/clock').effective(deadlineAt)))return {ok:false,reason:'scroll_budget_exhausted'};
+    if (requireManageMode && !await labelPresent(page, ['Selecionar tudo', 'Select all'], {exactOnly:true})) {
+      const restored = await waitForLabel(page, ['Selecionar tudo', 'Select all'], {
+        exactOnly:true, timeoutMs:require('./interactionBudget').timeout(page,30000)
+      });
+      if (!restored) return {ok:false,reason:'renew_manage_mode_lost'};
+    }
     const snap = await safeEvaluate(
       page,
       ({ step, targetIso, SCROLL_STOP_AGE_DAYS }) => {
@@ -939,13 +950,13 @@ async function runMarketplaceRenewListings({
     await require('./accountSecurityGate').assertAllowed(page,nome);
     if (aborted()) return abortResult();
 
-    const alreadyManage = await labelPresent(page, ['Selecionar tudo', 'Select all'], { requireEnabled: false });
+    const alreadyManage = await labelPresent(page, ['Selecionar tudo', 'Select all'], { requireEnabled: false, exactOnly:true });
     if (!alreadyManage) {
       await progress(page, onProgress, 'manage', 'Clicando em Gerenciar classificados...');
       const manage = await clickByLabels(
         page,
         ['Gerenciar classificados', 'Manage listings', 'Manage your listings'],
-        { roleHints: ['button'], timeoutMs: 45000, requireEnabled: true }
+        { roleHints: ['button'], timeoutMs: 45000, requireEnabled: true, exactOnly:true }
       );
       if (!manage || !manage.ok) {
         audit('renew_listings_fail', { stage: 'manage', reason: 'manage_not_found' });
@@ -957,18 +968,19 @@ async function runMarketplaceRenewListings({
     // Ready real do modo gerenciar (não sleep cego): espera Selecionar tudo.
     await progress(page, onProgress, 'manage_settle', 'Aguardando modo Gerenciar carregar...');
     const manageReady = await waitForLabel(page, ['Selecionar tudo', 'Select all'], {
-      timeoutMs: MANAGE_MODE_WAIT_MS,
+      timeoutMs: require('./interactionBudget').timeout(page, MANAGE_MODE_WAIT_MS),
+      exactOnly:true,
       requireEnabled: false,
       pollMs: 800
     });
     if (!manageReady) {
-      await sleep(SETTLE_MS);
-    } else {
-      await sleep(1500);
+      audit('renew_listings_fail', {stage:'manage_settle',reason:'renew_manage_mode_unconfirmed'});
+      return {ok:false,error:'renew_manage_mode_unconfirmed',renewedCount:0};
     }
+    audit('renew_manage_mode_ready');
     if (aborted()) return abortResult();
 
-    const scrolled = await scrollToAgeThreshold(page, { onProgress, scrollStopAgeDays: ageDays, deadlineAt, isAborted });
+    const scrolled = await scrollToAgeThreshold(page, { onProgress, scrollStopAgeDays: ageDays, deadlineAt, isAborted, requireManageMode:true });
     if(!scrolled?.ok)return {ok:false,error:scrolled?.reason||'listing_scroll_unconfirmed',renewedCount:0};
     audit('renew_listings_scrolled', { reason: scrolled && scrolled.reason, scrollStopAgeDays: ageDays });
     if (aborted()) return abortResult();
