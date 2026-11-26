@@ -30,3 +30,17 @@ test('unhealthy lease is returned even while its worker stays alive, unblocking 
  const human={id:require('crypto').randomUUID(),nome:'account',purpose:'virtus',intent:'human'};broker.enqueue(human,'worker');await new Promise(setImmediate);assert.equal(broker.jobs.get(human.id).state,'queued');
  healthy=false;await timer();assert.equal(closed,1);assert.equal(old.snapshot().healthy,false);assert.equal(broker.jobs.get(human.id).state,'queued');proof=true;healthy=true;await broker.sweep();for(let i=0;i<10&&broker.jobs.get(human.id).state!=='granted';i++)await new Promise(setImmediate);assert.equal(broker.jobs.get(human.id).state,'granted');
 });
+
+test('worker waits for the existing authority mutation longer than the short status deadline and never replays it',async()=>{
+ const calls=[];
+ const remote=await worker.begin({nome:'fixture',purpose:'publish'},{
+  request:async(message,timeoutMs)=>{calls.push({action:message.action,timeoutMs});return {ok:true,state:'granted',operationId:'same',snapshot:{healthy:true,absoluteDeadline:Math.floor(Date.now()/1000)+300}}},
+  setTimer:()=>({unref(){}}),clearTimer:()=>{}
+ });
+ await remote.possibleSideEffect();
+ await remote.confirm();
+ await remote.close();
+ assert.equal(calls.filter(x=>x.action==='effect').length,1);
+ for(const action of ['effect','confirm','close'])assert.equal(calls.find(x=>x.action===action).timeoutMs,120000);
+ assert.equal(calls.find(x=>x.action==='enqueue').timeoutMs,15000);
+});

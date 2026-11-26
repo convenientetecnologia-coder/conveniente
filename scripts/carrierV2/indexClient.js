@@ -5,7 +5,7 @@ const delay=(ms,signal)=>new Promise((resolve,reject)=>{const abort=()=>{clearTi
 async function ready(id){const entry=readiness.get(id);return !!entry&&!entry.signal?.aborted&&await entry.isReady()}
 async function begin(options,{request=ipc.request,pollMs=1000,setTimer=setInterval,clearTimer=clearInterval}={}){
  const id=crypto.randomUUID(),job={id,nome:options.nome,purpose:options.purpose,intent:options.intent||'observe',hotUntil:options.hotUntil||0,messageIsolation:options.messageIsolation===true,observationRecovery:options.observationRecovery===true,authenticationRecovery:options.authenticationRecovery===true};
- const rpc=async(action,extra={})=>{const response=await request({type:'proxy:job',action,ticket:id,job,...extra},15000);if(!response?.ok)throw Error(response?.error||'proxy_index_unavailable');return response};
+ const rpc=async(action,extra={})=>{const timeoutMs=['effect','confirm','close','cancel','reconcile'].includes(action)?120000:15000;const response=await request({type:'proxy:job',action,ticket:id,job,...extra},timeoutMs);if(!response?.ok)throw Error(response?.error||'proxy_index_unavailable');return response};
  readiness.set(id,{isReady:options.isReady||(()=>true),signal:options.signal});let granted=null;
  try{
   for(;;){
