@@ -3,9 +3,9 @@
 function inspect(){
  const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
  const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>2&&r.height>2&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&!e.closest('[aria-hidden="true"],[inert]')};
- if(!/(^|\.)(facebook|messenger)\.com$/.test(location.hostname))return {blocked:true};
+ if(!/(^|\.)(facebook|messenger)\.com$/.test(location.hostname)&&location.href!=='about:srcdoc')return {blocked:true};
  if(!document.body||document.readyState==='loading')return {loading:true};
- const buttons=[...document.querySelectorAll('button,[role="button"],a,[role="link"],input[type="submit"],input[type="button"],div[tabindex="0"]')].filter(e=>visible(e)&&!e.disabled&&e.getAttribute('aria-disabled')!=='true'&&!e.closest('[aria-disabled="true"]'));
+ const buttons=[...document.querySelectorAll('button,[role="button"],a,[role="link"],input[type="submit"],input[type="button"],div[tabindex="0"],span')].filter(e=>visible(e)&&!e.disabled&&e.getAttribute('aria-disabled')!=='true'&&!e.closest('[aria-disabled="true"]'));
  const wanted=['ignorar','skip','ignore'];
  const hasIgnore=buttons.some(e=>wanted.includes(norm(e.getAttribute('aria-label')))||wanted.includes(norm(e.innerText||e.textContent||e.value)));
  // The operator requested this button after password submission. Background controls
@@ -14,12 +14,31 @@ function inspect(){
  const otherStep=buttons.length>0||inputs.some(e=>e.type==='password'||/pin|code|codigo|otp|approvals/i.test([e.name,e.id,e.autocomplete,e.getAttribute('aria-label')].join(' ')));
  return {hasIgnore,otherStep,signature:location.href+'|'+buttons.map(e=>norm(e.getAttribute('aria-label')||e.innerText||e.value)).join('|')};
 }
+async function ignoreTarget(frame){
+ return frame.evaluateHandle(()=>{
+  const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
+  const labels=['ignorar','skip','ignore'];
+  for(const el of document.querySelectorAll('button,[role="button"],a,[role="link"],input[type="submit"],input[type="button"],div[tabindex="0"],span')){
+   if(!labels.includes(norm(el.getAttribute('aria-label')))&&!labels.includes(norm(el.innerText||el.textContent||el.value)))continue;
+   const target=el.closest('button,[role="button"],a,[role="link"],[tabindex="0"]')||el;
+   const r=target.getBoundingClientRect(),s=getComputedStyle(target);
+   if(r.width>2&&r.height>2&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&!target.disabled&&!target.closest('[aria-hidden="true"],[aria-disabled="true"],[inert]'))return target;
+  }return null;
+ });
+}
 async function advance(page,{authenticated=async()=>false,onProgress=async()=>{},timeoutMs=180000}={}){
  const until=Date.now()+require('./interactionBudget').timeout(page,timeoutMs);let clicked=false,stableAt=0,signature=null;
  while(Date.now()<until){
   await require('./interactionLease').wait(page);
-  let state;
-  try{state=await page.evaluate(inspect)}catch(error){
+  let state,scope=page;
+  try{
+   state=await page.evaluate(inspect);
+   for(const frame of page.frames?.()||[]){
+    if(frame===page.mainFrame?.())continue;
+    let child;try{child=await frame.evaluate(inspect)}catch{continue}
+    if(child.hasIgnore){state=child;scope=frame;break}
+   }
+  }catch(error){
    if(!/execution context was destroyed|cannot find.*context|context.*destroyed|inspected target navigated/i.test(String(error.message||error)))throw error;
    await new Promise(r=>setTimeout(r,250));continue;
   }
@@ -27,8 +46,14 @@ async function advance(page,{authenticated=async()=>false,onProgress=async()=>{}
   if(state.hasIgnore){
    stableAt=0;
    if(!clicked){
-    const hit=await require('./interactionReadiness').clickControl(page,['Ignorar','Skip','Ignore'],{exact:true,timeoutMs:Math.min(30000,Math.max(0,until-Date.now()))});
-    if(!hit.ok)return {ok:false,error:'login_welcome_click_unconfirmed'};
+    const handle=await ignoreTarget(scope);
+    try{
+     const target=handle.asElement();
+     const context={browser:()=>page.browser(),isClosed:()=>page.isClosed(),evaluate:scope.evaluate.bind(scope)};
+     const ready=target&&await require('./interactionReadiness').waitElement(context,target,{timeoutMs:Math.min(30000,Math.max(0,until-Date.now()))});
+     if(!ready?.ok)return {ok:false,error:'login_welcome_click_unconfirmed'};
+     await require('./interactionLease').wait(page);await target.click();
+    }finally{await handle.dispose()}
     clicked=true;await onProgress({stage:'welcome_loading',welcomeDismissClicked:true});
    }
   }else if(!state.loading){

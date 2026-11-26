@@ -4,6 +4,17 @@ async function fixture(html,action){
  const browser=await require('puppeteer').launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',args:['--no-sandbox']});
  try{const page=await browser.newPage();await page.setRequestInterception(true);page.on('request',r=>r.respond({status:200,contentType:'text/html',body:html}));await page.goto('https://www.facebook.com/login/after/');return await action(page,browser)}finally{await browser.close()}
 }
+test('Ignore text without a button role and Ignore inside a frame both advance',{timeout:25000},async()=>{
+ await fixture('<main></main>',async page=>{
+  for(const framed of [false,true]){
+   await page.setContent(framed?'<iframe style="width:500px;height:300px"></iframe>':'<div role="none"><span onclick="window.clicked=true;this.remove()">Ignorar</span></div>');
+   if(framed)await page.$eval('iframe',e=>e.srcdoc='<div role="none"><span onclick="parent.postMessage(\'done\',\'*\');this.remove()">Ignorar</span></div>');
+   await page.evaluate(()=>{window.clicked=false;window.addEventListener('message',()=>window.clicked=true)});
+   const result=await advance(page,{timeoutMs:7000,authenticated:()=>page.evaluate(()=>window.clicked===true)});
+   assert.equal(result.ok,true,JSON.stringify({framed,result}));assert.equal(result.dismissed,true);
+  }
+ });
+});
 test('nested sole Ignore waits for delayed prompt, clicks once, waits for authenticated next screen',{timeout:20000},async()=>{
  await fixture('<p>Carregando</p><script>window.clicks=0;setTimeout(()=>document.body.innerHTML=`<h1>Uma nova etapa</h1><div aria-hidden="true"><button>Ignorar</button></div><div role="button" aria-label="Ignorar" onclick="window.clicks++;document.body.innerHTML=\'Carregando\';setTimeout(()=>document.body.innerHTML=\'<main role=feed>Pronto</main>\',600)"><div role="none"><span>Ignorar</span></div></div>`,600)</script>',async page=>{
   const result=await advance(page,{timeoutMs:8000,authenticated:()=>page.evaluate(()=>!!document.querySelector('[role=feed]'))});
