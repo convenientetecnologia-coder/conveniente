@@ -1,6 +1,7 @@
 'use strict';
 function isTransient(error) {
  const value=String(error||'');
+ if(/^login_welcome_|^login_post_submit_surface_unconfirmed$/.test(value))return true;
  if(/^(?:cookie_session_unconfirmed|still_login_required:messenger_page_not_available)$/.test(value))return true;
  if(/^(?:kill_guard_until|login_surface_not_ready|login_transport_not_ready|login_continue_not_ready|login_input_not_ready|login_input_fill_unconfirmed|login_submit_not_ready|login_ui_error|login_result_unconfirmed)$/.test(value))return true;
  if(/^interaction_without_healthy_proxy_turn(?::|$)|^(?:mobile_transport_not_healthy|virtus_transport_unhealthy|virtus_transport_lost_during_turn)$/.test(value))return true;

@@ -1,0 +1,47 @@
+'use strict';
+// Only invoked after this credential driver's submission. Not a global dismiss rule.
+function inspect(){
+ const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
+ const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>2&&r.height>2&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&!e.closest('[aria-hidden="true"],[inert]')};
+ if(!/(^|\.)(facebook|messenger)\.com$/.test(location.hostname))return {blocked:true};
+ if(!document.body||document.readyState==='loading')return {loading:true};
+ const text=norm(document.body.innerText);
+ const inputs=[...document.querySelectorAll('input')].filter(visible);
+ const blocked=/captcha|suspendemos|suspended|conta.*bloqueada|conta.*restrita|account.*locked|confirme.*identidade|confirm.*identity|codigo.*(telefone|whatsapp|autenticacao)|authentication code|two.factor|suspeitamos|we suspect|comportamento automatizado|automated behavior/.test(text)
+  ||inputs.some(e=>e.type==='password'||/pin|code|codigo|otp|approvals/i.test([e.name,e.id,e.autocomplete,e.getAttribute('aria-label')].join(' ')));
+ if(blocked)return {blocked:true};
+ const nodes=[...document.querySelectorAll('button,[role="button"],input[type="submit"],input[type="button"]')].filter(e=>visible(e)&&!e.disabled&&e.getAttribute('aria-disabled')!=='true'&&!e.closest('[aria-disabled="true"]'));
+ const buttons=nodes.filter(e=>!nodes.some(parent=>parent!==e&&parent.contains(e)));
+ const labels=buttons.map(e=>norm(e.getAttribute('aria-label')||e.innerText||e.value));
+ return {soleIgnore:buttons.length===1&&['ignorar','skip','ignore'].includes(labels[0]),otherStep:buttons.length>0&&!labels.some(s=>['ignorar','skip','ignore'].includes(s)),signature:location.href+'|'+labels.join('|')};
+}
+async function advance(page,{authenticated=async()=>false,onProgress=async()=>{},timeoutMs=180000}={}){
+ const until=Date.now()+require('./interactionBudget').timeout(page,timeoutMs);let clicked=false,stableAt=0,signature=null;
+ while(Date.now()<until){
+  await require('./interactionLease').wait(page);
+  let state;
+  try{state=await page.evaluate(inspect)}catch(error){
+   if(!/execution context was destroyed|cannot find.*context|context.*destroyed|inspected target navigated/i.test(String(error.message||error)))throw error;
+   await new Promise(r=>setTimeout(r,250));continue;
+  }
+  if(state.blocked)return clicked?{ok:false,error:'login_welcome_next_step_unconfirmed'}:{ok:true,skipped:true};
+  if(state.soleIgnore){
+   stableAt=0;
+   if(!clicked){
+    const hit=await require('./interactionReadiness').clickControl(page,['Ignorar','Skip','Ignore'],{exact:true,timeoutMs:Math.min(30000,Math.max(0,until-Date.now()))});
+    if(!hit.ok)return {ok:false,error:'login_welcome_click_unconfirmed'};
+    clicked=true;await onProgress({stage:'welcome_loading',welcomeDismissClicked:true});
+   }
+  }else if(!state.loading){
+   // A click is not success: wait for the prompt to disappear and authentication to be observed.
+   if(await authenticated()){
+    if(signature!==state.signature||!stableAt){signature=state.signature;stableAt=Date.now()}
+    if(Date.now()-stableAt>=2000)return {ok:true,dismissed:clicked};
+   }else if(state.otherStep)return clicked?{ok:false,error:'login_welcome_next_step_unconfirmed'}:{ok:true,skipped:true};
+   else stableAt=0;
+  }
+  await new Promise(r=>setTimeout(r,250));
+ }
+ return {ok:false,error:clicked?'login_welcome_result_unconfirmed':'login_post_submit_surface_unconfirmed'};
+}
+module.exports={inspect,advance};

@@ -1157,6 +1157,8 @@ async function attemptCredentialRelogin(page, nome, { login, password, onProgres
   const form=await require('./credentialForm').submit(page,{login:user,password:pass,openFresh:()=>openFreshLoginPage(page,nome),onProgress});
   if(!form.ok)return form;
   await sleep(800);
+  const welcome=await require('./postLoginWelcome').advance(page,{authenticated:()=>feedOpened(page),onProgress});
+  if(!welcome.ok)return {...welcome,submitted:true,entry:form.entry};
   const rejected=await credentialRejection(page);
   if(rejected)return {ok:false,error:rejected,submitted:true,entry:form.entry};
   if (await badLoginText(page)) return { ok: false, error: 'login_ui_error',submitted:true };
@@ -1191,6 +1193,9 @@ async function attemptCredentialRelogin(page, nome, { login, password, onProgres
   if (auth && auth.asked && !auth.ok && !(trust && trust.clicked)) {
     return { ok: false, error: auth.error || 'auth_app_code_failed' };
   }
+
+  const finalWelcome=await require('./postLoginWelcome').advance(page,{authenticated:()=>feedOpened(page),onProgress});
+  if(!finalWelcome.ok)return {...finalWelcome,submitted:true,entry:form.entry};
 
   if (await whatsappScreen(page)) {
     await markWhatsappConfirm(nome);
