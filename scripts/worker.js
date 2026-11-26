@@ -2683,7 +2683,7 @@ async function nurseEnsureTerminalHumanOnce(nome, ctrl, want, reason) {
 // Contrato ops: captcha/checkpoint → NÃO fecha browser, marca flag, INVOCA humano.
 // Usuário verifica no dia; exclusão diária fecha+exclui no horário configurado.
 async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = '', title = '', confirmedPostPassword = false } = {}) {
-  if (refuseOutsideCadastroMark(nome)) return;
+  if (!confirmedPostPassword && refuseOutsideCadastroMark(nome)) return;
   if (browserHelper.isMarketplaceDocCheckpointUrl(url)) {
     try {
       const prevDoc = await readAccountFlags(nome).catch(() => null);
