@@ -2818,6 +2818,8 @@ async function startRobe(browser, nome, robePauseMs = 0, workingNames = []) {
     }
 
     stepLog.appendJSONL(nome, 'robe', { attempt: attId, step: 'publish_ok' });
+    try { await require('./manifestStore').update(nome, m => require('./loginFlowState').authenticated(m)); } catch {}
+
     try { await flowAlertFlags.clearRobePostError(nome); } catch {}
     try { await flowAlertFlags.clearProxyPublishError(nome); } catch {}
 

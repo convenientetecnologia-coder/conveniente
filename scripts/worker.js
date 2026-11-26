@@ -2617,6 +2617,8 @@ async function confirmOwnProfile(nome, ctrl) {
     await page.goto(OWN_PROFILE_HOME_URL, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
     if (loggedIn) {
       robeMeta[nome].ownProfileProofAt = Date.now();
+      await manifestStore.update(nome, m => require('./loginFlowState').authenticated(m, robeMeta[nome].ownProfileProofAt));
+
       robeMeta[nome].ownProfileBlockAt = 0;
       try { await rememberFacebookProfileUrl(nome, cUser); } catch {}
       try { provisionAudit.append({ ts: Date.now(), event: 'own_profile_confirmed', nome: String(nome || ''), profileId: cUser }); } catch {}
@@ -5231,6 +5233,8 @@ async function probeHumanStateOnOpen(nome, ctrl, { source = 'open_human' } = {})
       } catch {}
 
       // 3) Se Messenger OK (+ Robe OK quando aplicável) => agora sim “clear”.
+      await manifestStore.update(nome, m => require('./loginFlowState').authenticated(m));
+
       try { provisionAudit.append({ ts: Date.now(), event: 'open_human_probe_clear', nome: String(nome||''), source: String(source||'') }); } catch {}
       // Se abriu "human-only" por flag velha e já está OK, liberar automação.
       try { await clearAppealSubmittedFlag(nome); } catch {}
@@ -17996,7 +18000,7 @@ perfis.push({
   loginRemediateFailedAt,
   loginRemediateFailedReason,
   loginFlow:man?.loginFlow||null,
-  loginStatus:require('./loginFlowState').summarize({...man?.accountFlags,loginRequired,loginReason,loginRemediateFailed,loginRemediateFailedReason,loginFlow:man?.loginFlow}),
+  loginStatus:require('./loginFlowState').summarize({...man?.accountFlags,loginRequired,loginReason,loginRemediateFailed,loginRemediateFailedReason,loginFlow:man?.loginFlow,authenticatedAt:man?.lastRobeSubmission?.confirmedAt}),
   banned,
   bannedAt,
   bannedText,

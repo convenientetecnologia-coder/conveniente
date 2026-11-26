@@ -30,6 +30,10 @@ function summarize(profile) {
   const p = profile || {}, reason = String(p.loginReason || '').toLowerCase();
   if (p.accountCodeEmail || p.accountCodePhone || p.accountCodeWhatsapp || p.whatsappConfirm || p.banned || p.captchaCheckpoint || p.marketplaceDisabled || p.twoFactor || p.idVirtus || p.identityRequired || p.identitySubmitted || /captcha|checkpoint|identity|two_factor|2fa|consent/.test(reason)) return null;
   const flow = p.loginFlow || {};
+  const confirmedAt = Number(p.authenticatedAt || 0);
+  const lastGateAt = Math.max(Number(flow.at || 0), Number(p.lastLoginRequiredAt || 0), Number(p.loginRemediateFailedAt || 0));
+  if (!p.loginRequired && !p.loginRemediateFailed && confirmedAt > lastGateAt) return null;
+
   if (flow.stage === 'verified' && !p.loginRequired && !p.loginRemediateFailed) return null;
   let key = flow.stage;
   if (!labels[key]) {
@@ -46,4 +50,8 @@ function summarize(profile) {
     cls: ['technical_wait', 'incomplete', 'missing_credentials', 'password_rejected', 'credentials_rejected'].includes(key) ? 'bad' : 'warn',
     cookiesAttempted: flow.cookiesAttempted === true, cookiesRejected:flow.cookiesRejected===true, cookieAttempts:flow.cookieAttempts||0, credentialRejections:flow.credentialRejections||0, cookiesRefreshedAt:flow.cookiesRefreshedAt||null, credentialsSubmitted: flow.credentialsSubmitted === true, at: flow.at || null };
 }
-module.exports = { evolve, summarize, labels };
+function authenticated(man, at = Date.now()) {
+  if (!man?.loginFlow || Number(man.loginFlow.at || 0) > at) return man;
+  return {...man, loginFlow:evolve(man.loginFlow,{verified:true},at)};
+}
+module.exports = { evolve, summarize, labels, authenticated };
