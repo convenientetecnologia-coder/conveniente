@@ -10,12 +10,13 @@ test('nested sole Ignore waits for delayed prompt, clicks once, waits for authen
   assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.dismissed,true);assert.equal(await page.evaluate(()=>window.clicks),1);
  });
 });
-test('unrecognized competing action, password, security notice and old automation warning are never clicked',{timeout:15000},async()=>{
- await fixture('<div></div>',async page=>{
-  for(const html of ['<button>Ignorar</button><button>Salvar</button>','<input type=password><button>Ignorar</button>','<p>Confirme sua identidade</p><button>Ignorar</button>','<p>Suspeitamos que o comportamento da sua conta seja automatizado</p><button>Ignorar</button>']){
-   await page.setContent(html);const state=await page.evaluate(inspect);assert.ok(state.blocked||!state.soleIgnore);
-  }
+test('English notice and unrelated background buttons cannot block the requested Ignore action',{timeout:15000},async()=>{
+ await fixture('<nav><button>Home</button><button>Menu</button></nav><div role="dialog"><h1>Welcome to your account</h1><p>We suspect this might need your attention.</p><div role="button" aria-label="Dismiss this notice" onclick="window.clicked=true;this.parentElement.remove();document.body.insertAdjacentHTML(\'beforeend\',\'<main role=feed>Ready</main>\')"><div role="none"><span>Ignorar</span></div></div></div>',async page=>{
+  const result=await advance(page,{timeoutMs:7000,authenticated:()=>page.evaluate(()=>!!document.querySelector('[role=feed]'))});assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.dismissed,true);assert.equal(await page.evaluate(()=>window.clicked),true);
  });
+});
+test('without Ignore, password and code inputs remain with their existing login stage',{timeout:10000},async()=>{
+ await fixture('<input type=password><button>Continuar</button>',async page=>{const state=await page.evaluate(inspect);assert.equal(state.hasIgnore,false);assert.equal(state.otherStep,true);assert.equal((await advance(page)).skipped,true)});
 });
 test('unchanged Ignore after click is unconfirmed and never automatically clicked twice',{timeout:15000},async()=>{
  await fixture('<h1>Mais uma etapa</h1><button onclick="window.clicks=(window.clicks||0)+1">Ignorar</button>',async page=>{

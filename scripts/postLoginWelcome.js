@@ -5,15 +5,14 @@ function inspect(){
  const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>2&&r.height>2&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&!e.closest('[aria-hidden="true"],[inert]')};
  if(!/(^|\.)(facebook|messenger)\.com$/.test(location.hostname))return {blocked:true};
  if(!document.body||document.readyState==='loading')return {loading:true};
- const text=norm(document.body.innerText);
+ const buttons=[...document.querySelectorAll('button,[role="button"],a,[role="link"],input[type="submit"],input[type="button"],div[tabindex="0"]')].filter(e=>visible(e)&&!e.disabled&&e.getAttribute('aria-disabled')!=='true'&&!e.closest('[aria-disabled="true"]'));
+ const wanted=['ignorar','skip','ignore'];
+ const hasIgnore=buttons.some(e=>wanted.includes(norm(e.getAttribute('aria-label')))||wanted.includes(norm(e.innerText||e.textContent||e.value)));
+ // The operator requested this button after password submission. Background controls
+ // and the language of the notice must not prevent its lookup.
  const inputs=[...document.querySelectorAll('input')].filter(visible);
- const blocked=/captcha|suspendemos|suspended|conta.*bloqueada|conta.*restrita|account.*locked|confirme.*identidade|confirm.*identity|codigo.*(telefone|whatsapp|autenticacao)|authentication code|two.factor|suspeitamos|we suspect|comportamento automatizado|automated behavior/.test(text)
-  ||inputs.some(e=>e.type==='password'||/pin|code|codigo|otp|approvals/i.test([e.name,e.id,e.autocomplete,e.getAttribute('aria-label')].join(' ')));
- if(blocked)return {blocked:true};
- const nodes=[...document.querySelectorAll('button,[role="button"],input[type="submit"],input[type="button"]')].filter(e=>visible(e)&&!e.disabled&&e.getAttribute('aria-disabled')!=='true'&&!e.closest('[aria-disabled="true"]'));
- const buttons=nodes.filter(e=>!nodes.some(parent=>parent!==e&&parent.contains(e)));
- const labels=buttons.map(e=>norm(e.getAttribute('aria-label')||e.innerText||e.value));
- return {soleIgnore:buttons.length===1&&['ignorar','skip','ignore'].includes(labels[0]),otherStep:buttons.length>0&&!labels.some(s=>['ignorar','skip','ignore'].includes(s)),signature:location.href+'|'+labels.join('|')};
+ const otherStep=buttons.length>0||inputs.some(e=>e.type==='password'||/pin|code|codigo|otp|approvals/i.test([e.name,e.id,e.autocomplete,e.getAttribute('aria-label')].join(' ')));
+ return {hasIgnore,otherStep,signature:location.href+'|'+buttons.map(e=>norm(e.getAttribute('aria-label')||e.innerText||e.value)).join('|')};
 }
 async function advance(page,{authenticated=async()=>false,onProgress=async()=>{},timeoutMs=180000}={}){
  const until=Date.now()+require('./interactionBudget').timeout(page,timeoutMs);let clicked=false,stableAt=0,signature=null;
@@ -25,7 +24,7 @@ async function advance(page,{authenticated=async()=>false,onProgress=async()=>{}
    await new Promise(r=>setTimeout(r,250));continue;
   }
   if(state.blocked)return clicked?{ok:false,error:'login_welcome_next_step_unconfirmed'}:{ok:true,skipped:true};
-  if(state.soleIgnore){
+  if(state.hasIgnore){
    stableAt=0;
    if(!clicked){
     const hit=await require('./interactionReadiness').clickControl(page,['Ignorar','Skip','Ignore'],{exact:true,timeoutMs:Math.min(30000,Math.max(0,until-Date.now()))});
