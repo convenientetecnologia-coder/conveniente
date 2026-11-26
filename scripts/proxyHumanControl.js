@@ -1,10 +1,10 @@
 'use strict';
-async function invoke({ctrl,read,update,guard,overlay,snapshot,onError=()=>{}}){
+async function invoke({ctrl,read,update,guard,overlay,snapshot,onReady=async()=>{},onError=()=>{}}){
  const proxy=ctrl.browser.__ctVirtusProxy;
  if(!ctrl._proxyHumanPrevious){const want=read()||{};ctrl._proxyHumanPrevious={active:want.active,virtus:want.virtus,trabalhando:ctrl.trabalhando};}
  ctrl.humanControl=true;ctrl.trabalhando=false;
  // The connection request runs independently of the local administrative panel.
- proxy.enterHuman().catch(error=>{if(error.message!=='virtus_human_canceled')onError(error)});
+ proxy.enterHuman().then(()=>{if(ctrl.humanControl)return onReady()}).catch(error=>{if(error.message!=='virtus_human_canceled')onError(error)});
  await update(want=>({...want,humanHold:true,virtus:'off'}));
  await guard(true);const panel=await overlay();await snapshot();
  return {ok:panel?.panelReady===true,state:proxy.snapshot().state==='online'?'human_online':'human_waiting_proxy',panelReady:panel?.panelReady===true,...(panel?.panelReady===true?{}:{error:'human_panel_unconfirmed'})};

@@ -2275,7 +2275,7 @@ async function setLoginRemediateFailedFlag(nome, { reason = '', source = '', sta
   } catch {}
 }
 
-const LOGIN_ATTEMPT_MAX = 2;
+const LOGIN_ATTEMPT_MAX = 3;
 
 function loginFailureCanRetry(reason) {
   const r = String(reason || '').toLowerCase();
@@ -4806,12 +4806,14 @@ async function ensureHumanNonBlankEntryPage(nome, ctrl, { prefer = 'facebook', r
     } catch {}
     try {
       if (/messenger\.com\/marketplace/i.test(String(targetUrl || ''))) {
+        require('./interactionLease').assert(p0);
         await __gotoMarketplaceTracked(p0, { nome, source: 'ensure_human_non_blank_entry', timeoutMs: 45000, swallow: false });
       } else {
         let lastNavErr = null;
         const attempts = 3;
         for (let i = 1; i <= attempts; i++) {
           try {
+            require('./interactionLease').assert(p0);
             await p0.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
             let dead = false;
             try {
@@ -8678,7 +8680,7 @@ function releaseDetachedOpenSlot(token, { nome = '', result = 'ok' } = {}) {
 }
 
 async function activateOnce(nome, source = '', operator = '', {networkPurpose='auto'} = {}) {
-  if(isAccountProvisioningPending(nome)&&networkPurpose!=='cadastro'&&!/^stock_provision(?::|$)/i.test(String(operator||'')))return {ok:false,error:'account_configure_pending'};
+  if(isAccountProvisioningPending(nome)&&!['cadastro','human'].includes(networkPurpose)&&!/^stock_provision(?::|$)/i.test(String(operator||'')))return {ok:false,error:'account_configure_pending'};
   const boot = await __deltaAwaitHostBootReady();
   if (!boot.ready) {
     try {
@@ -13237,6 +13239,8 @@ const handlers = {
   async activate({ nome, operator }) {
     const boot = await __deltaAwaitHostBootReady();
     if (!boot.ready) return { ok: false, error: 'host_boot_not_ready' };
+    const manual = !String(operator||'').trim() || /^(?:unknown|admin|ui|manual|user|humano|human)/i.test(String(operator));
+    if (manual && isAccountProvisioningPending(nome)) return handlers.invoke_human({ nome });
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] activate chamada', { nome });
       const r = await activateOnce(nome, 'message', operator);
@@ -13645,6 +13649,7 @@ const handlers = {
     try {
     return await lockProfileAction(nome, async () => {
       await recordLoginFlow(nome,{stage:'queued'});await recordLoginFlow(nome,{stage:'waiting_proxy'});
+      if(/^admin_configure:|^(?:ui|manual|user)$/i.test(String(operator||''))||!operator||operator==='unknown')await fileStore.withDesiredFileLockUpdate(d=>{if(d.perfis?.[nome])d.perfis[nome]=require('./accountProvisioningState').manualRetry(d.perfis[nome]);return d});
       const prepared=await prepareCadastroBrowser(nome,operator);cadastroBrowser=prepared.browser;
       logger.info('[HANDLER] configure chamada', { nome });
       const ctrl = controllers.get(nome);
@@ -13970,7 +13975,7 @@ const handlers = {
             });
           } catch {}
 
-          const driven = await require('./configureLoginFallback').run({page:workPage,nome,login:login2,password:password2,
+          const driven = await require('./configureLoginFallback').run({page:workPage,nome,login:login2,password:password2,maxAttempts:3,
             onProgress:event=>recordLoginFlow(nome,event),refund:()=>refundLoginAttemptCount(nome),
             assertHealthy:()=>ctrl.browser.__ctCadastroProxy?.assertHealthy(),
             resume:async()=>{if(rr!=='trust_device'&&(await browserHelper.detectLoginRequired(workPage))?.reason!=='trust_device')return null;const pc=require('./pcSessionLogin');const trust=await pc.clickTrustThisDevice(workPage,nome);if(trust?.left===true){const saved=await pc.persistFreshSessionCookies(workPage,nome);if(saved?.ok)return {ok:true,via:'trust_device_resume'};}return {ok:false,terminal:'trust_device',error:'trust_device_unconfirmed'};},
@@ -13981,6 +13986,7 @@ const handlers = {
               ctrl.browser.__ctCadastroProxy?.noteStage('credential_login');return true;
             }});
           if(driven?.ok!==true&&require('./stockProvisionRetry').isTransient(driven?.error))throw Error(driven.error);
+          if(['password_rejected','credentials_rejected'].includes(driven?.error))return {ok:false,error:driven.error};
           if (driven && driven.terminal) {
             after = { loginRequired: true, reason: String(driven.terminal) };
           } else if (driven && driven.ok) {
@@ -15931,6 +15937,12 @@ const handlers = {
   },
 
   async invoke_human({ nome }) {
+    let manualBrowserOpened=false;
+    if (!isLiveBrowserCtrl(controllers.get(nome))) {
+      const opened = await lockProfileAction(nome, () => activateOnce(nome, 'manual_inspection', 'ui', { networkPurpose:'human' }));
+      if (opened?.ok !== true) return opened;
+      manualBrowserOpened=true;
+    }
     return lockProfileAction(nome, async () => {
       logger.info('[HANDLER] invoke_human chamada', { nome });
 
@@ -15956,6 +15968,7 @@ const handlers = {
           guard:on=>syncDeltaHumanHoldBrowserGuard(nome,on,{reason:'proxy_manual_human'}),
           overlay:()=>ensureHumanOverlay(nome,ctrl,{reason:'invoke_human',localOnly:true}),
           snapshot:()=>snapshotStatusAndWrite({force:true}),
+          onReady:manualBrowserOpened?async()=>{const r=await ensureNonBlankEntryPage(nome,ctrl,{prefer:'facebook',reasonBase:'manual_inspection'});if(!r?.ok)throw Error(r?.error||'manual_entry_unconfirmed')}:async()=>{},
           onError:error=>{try{provisionAudit.append({ts:Date.now(),event:'human_proxy_connection_failed',nome,error:String(error.message||error)});}catch{}}
         });
       }

@@ -1216,7 +1216,7 @@ module.exports = (app, workerClient, fileStore) => {
     let r = null;
     for (let attempt = 0; attempt < activateRetries.length; attempt++) {
       if (attempt > 0) await sleepMs(activateRetries[attempt]);
-      r = await workerClient.sendWorkerCommand('activate', { nome, operator: op }, { timeoutMs: /^stock_provision/i.test(String(op||'')) ? 25*60*1000 : 60000 }).catch(e => {
+      r = await workerClient.sendWorkerCommand('activate', { nome, operator: op }, { timeoutMs: /^stock_provision/i.test(String(op||'')) || require('./serverConfig').readServerConfigEffective().virtus?.proxyEnabled===true ? 25*60*1000 : 60000 }).catch(e => {
         logger.error('Erro ao enviar comando activate para worker', { nome, rota: '/api/perfis/:nome/activate', attempt: attempt + 1, error: e && e.message }, e);
         return { ok: false, error: (e && e.message) ? String(e.message) : 'activate_failed' };
       });
@@ -1305,6 +1305,7 @@ module.exports = (app, workerClient, fileStore) => {
       return res.json({ ok:false, error:e.message }); 
     }
     await issues.append(nome, 'admin_configure_request', `by=${op}`);
+    try { await resumeCellsForHuman(workerClient, 'configure:' + String(nome).slice(0,40)); } catch {}
     try {
       // Enterprise hardening (sem achismo):
       // Quando o configure é manual (UI/admin), isole o servidor para evitar:
@@ -1686,9 +1687,10 @@ module.exports = (app, workerClient, fileStore) => {
       return res.json({ ok:false, error:e.message });
     }
     await issues.append(nome, 'admin_invoke_human_request', `by=${op}`);
+    try { await resumeCellsForHuman(workerClient, 'invoke-human:' + String(nome).slice(0,40)); } catch {}
     try {
       // Handler limita nav/overlay; margem para wait de Robe (cap 45s) + IPC.
-      const resp = await workerClient.sendWorkerCommand('invoke_human', { nome }, { timeoutMs: 120000 });
+      const resp = await workerClient.sendWorkerCommand('invoke_human', { nome }, { timeoutMs: require('./serverConfig').readServerConfigEffective().virtus?.proxyEnabled===true ? 25*60*1000 : 120000 });
       logger.info('Comando invoke_human disparado', { nome });
       return res.json(resp);
     } catch (e) {

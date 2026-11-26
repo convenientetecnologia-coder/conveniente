@@ -1,5 +1,12 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),{invoke,resume}=require('./proxyHumanControl');
+
+test('manual entry waits for an actual human lease and is canceled when control has resumed',async()=>{
+ let grant,entries=0;const waiting=new Promise(r=>grant=r);
+ const ctrl={browser:{__ctVirtusProxy:{enterHuman:()=>waiting,snapshot:()=>({state:'waiting'})}}};
+ await invoke({ctrl,read:()=>({}),update:async()=>{},guard:async()=>{},overlay:async()=>({panelReady:true}),snapshot:async()=>{},onReady:async()=>entries++});
+ assert.equal(entries,0);ctrl.humanControl=false;grant();await new Promise(r=>setImmediate(r));assert.equal(entries,0);
+});
 test('panel appears while the chair is still queued; resume cancels without another chair or clearing flags',async()=>{
  let release,waiting=true,panels=0;const wait=new Promise(r=>release=r),flags={banned:true};let want={active:true,virtus:'on',humanHold:false,flags};
  const proxy={enterHuman:()=>wait,leaveHuman:async()=>{waiting=false;release()},snapshot:()=>({state:'waiting'}),resumeHuman:async fn=>{await proxy.leaveHuman();return fn()}};

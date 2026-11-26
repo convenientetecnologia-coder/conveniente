@@ -3,9 +3,19 @@ require('node:test')('old form-not-found verdict is recoverable without clearing
  const assert=require('node:assert/strict'),{eligible}=require('./cadastroRecovery');
  const want={provisioningResult:{state:'blocked',error:'login_form_not_found'}};
  const manifest={stockAccountId:42,login:'fixture',password:'fixture',accountFlags:{loginAttemptCount:1}};
- assert.equal(eligible(want,manifest),true);assert.equal(eligible(want,{...manifest,accountFlags:{loginAttemptCount:2}}),false);
+ assert.equal(eligible(want,manifest),true);assert.equal(eligible(want,{...manifest,accountFlags:{loginAttemptCount:3}}),false);
 });
 const test=require('node:test'),assert=require('node:assert/strict'),{eligible,recover}=require('./cadastroRecovery');
+
+test('new technical failure after version four can requeue once without clearing the actual submission count',async()=>{
+ const m={stockAccountId:42,login:'fixture',password:'fixture',loginFlow:{at:200,error:'carrier_unavailable'},accountFlags:{loginAttemptCount:2}};
+ let d={perfis:{a:{credentialRecoveryVersion:4,provisioningResult:{state:'blocked',error:'still_login_required:aymh_continue',at:100}}}};
+ assert.deepEqual(await recover({snapshot:structuredClone(d),read:async()=>m,update:async f=>{d=f(d)},now:()=>300}),['a']);
+ assert.equal(d.perfis.a.credentialRecoveryFlowAt,200);assert.equal(m.accountFlags.loginAttemptCount,2);
+ d.perfis.a.provisioningPending=false;d.perfis.a.provisioningResult={state:'blocked',error:'still_login_required:aymh_continue',at:100};
+ assert.equal(eligible(d.perfis.a,m),false);
+ assert.equal(eligible({...d.perfis.a,credentialRecoveryFlowAt:0},{...m,accountFlags:{loginAttemptCount:3}}),false);
+});
 const manifest={login:'fixture',password:'fixture',cookies:[{name:'c_user',value:'123'},{name:'xs',value:'fixture'}],accountFlags:{loginAttemptCount:0}};
 const want={active:false,provisioningResult:{state:'blocked',error:'still_login_required:login_form',at:1}};
 test('old unattempted cookie-only block is queued once, preserving evidence and requiring verification',async()=>{
@@ -15,7 +25,7 @@ test('old unattempted cookie-only block is queued once, preserving evidence and 
  assert.deepEqual(await recover({...opts,snapshot:structuredClone(desired)}),[]);
 });
 test('real attempted login, restrictions, missing credentials, human hold and foreign shards are preserved',async()=>{
- assert.equal(eligible(want,{...manifest,accountFlags:{loginAttemptCount:2}}),false);
+ assert.equal(eligible(want,{...manifest,accountFlags:{loginAttemptCount:3}}),false);
  for(const flag of ['captchaCheckpoint','idVirtus','banned','twoFactor','whatsappConfirm'])assert.equal(eligible(want,{...manifest,accountFlags:{[flag]:true}}),false);
  assert.equal(eligible({...want,humanHold:true},manifest),false);assert.equal(eligible(want,{...manifest,cookies:[]}),false);
  assert.equal(eligible({...want,provisioningResult:{state:'blocked',error:'configure_blocked_checkpoint_captcha'}},manifest),false);
@@ -38,7 +48,7 @@ test('rejected cookie jar requires a known identity or assigned-stock reference'
 test('version three permits the remaining budget once, without resetting real password attempts',()=>{
  const old={...want,credentialRecoveryVersion:1,provisioningResult:{state:'failed',error:'fetch failed'}};
  assert.equal(eligible(old,manifest),true);assert.equal(eligible({...old,credentialRecoveryVersion:3},manifest),true);assert.equal(eligible({...old,credentialRecoveryVersion:4},manifest),false);
- assert.equal(eligible(old,{...manifest,accountFlags:{loginAttemptCount:2}}),false);
+ assert.equal(eligible(old,{...manifest,accountFlags:{loginAttemptCount:3}}),false);
  assert.equal(eligible({...want,credentialRecoveryVersion:2},manifest),true);
 });
 
@@ -47,5 +57,5 @@ test('technical anti-loop failures without a provisioning result get one bounded
  let d={perfis:{a:{active:false,credentialRecoveryVersion:3}}};const opts={read:async()=>m,update:async f=>{d=f(d)}};
  assert.deepEqual(await recover({...opts,snapshot:structuredClone(d)}),['a']);assert.equal(d.perfis.a.credentialRecoveryVersion,4);assert.equal(d.perfis.a.provisioningPending,true);assert.equal(d.perfis.a.credentialRecoveryPreviousResult.error,'kill_guard_until');
  assert.equal(eligible({active:false},{...m,accountFlags:{...m.accountFlags,loginReason:'checkpoint_captcha',captchaCheckpoint:true}}),false);
- assert.equal(eligible({active:false},{...m,accountFlags:{...m.accountFlags,loginAttemptCount:2}}),false);
+ assert.equal(eligible({active:false},{...m,accountFlags:{...m.accountFlags,loginAttemptCount:3}}),false);
 });

@@ -7,6 +7,14 @@ require('node:test')('missing form is a technical retry, never a credentials ver
  assert.equal(state.restriction('still_login_required:login_form'),'login_required');
 });
 const test=require('node:test'),assert=require('node:assert/strict'),{unready,settle}=require('./accountProvisioningState');
+
+test('explicit manual configure reopens a login block for technical retries while preserving prior evidence',async()=>{
+ const old={state:'blocked',reason:'login_required',error:'still_login_required:login_form'};
+ const original={active:false,provisioningResult:old};const p=require('./accountProvisioningState').manualRetry(original);
+ assert.equal(p.provisioningPending,true);assert.equal(p.provisioningResult,undefined);assert.deepEqual(p.provisioningPreviousResult,old);assert.equal(original.provisioningResult,old);
+ const d={perfis:{a:p}};await settle([{profileName:'a',ok:false,error:'carrier_unavailable'}],{update:async f=>f(d)});assert.equal(d.perfis.a.provisioningPending,true);assert.equal(d.perfis.a.provisioningResult,undefined);
+ const restricted={provisioningResult:{state:'blocked',reason:'captcha_checkpoint'}};assert.equal(require('./accountProvisioningState').manualRetry(restricted),restricted);
+});
 test('resultado real encerra pendência com motivo sem liberar conta restrita para trabalhar',async()=>{
  const desired={perfis:{account:{provisioningPending:true,active:true,virtus:'on'}}};
  await settle([{profileName:'account',ok:false,error:'configure_blocked_two_factor'}],{update:async fn=>fn(desired),now:()=>100});

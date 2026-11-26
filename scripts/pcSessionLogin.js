@@ -420,18 +420,26 @@ async function placeCookies(page, cookies) {
 
 async function tryExistingPcSession(page, nome, opts) {
   const man = await manifestStore.read(String(nome || '')).catch(() => null);
-  if (man && man.sessionRejected === true) return { ok: false, loggedOut: true, reason: 'rejected' };
   const cookies = man && Array.isArray(man.cookies) ? man.cookies : [];
   if (!cookiesHaveSession(cookies)) return { ok: false, loggedOut: true, reason: 'no_session' };
   const startUrl = (opts && opts.url) ? String(opts.url) : HOME_URL;
-  await placeCookies(page, cookies);
-  await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(error => { throw Error('pc_login_navigation_failed:'+String(error.message||error)); });
-  await sleep(1200);
-  if (await feedOpened(page)) {
-    logger.info('[LOGIN][pc] o feed abriu com o jar salvo. Não digito senha.', { nome });
-    return { ok: true, in: true };
-  }
-  return { ok: false, loggedOut: true, reason: 'feed_closed' };
+  return require('./cookieSessionProbe').run({
+    inject:()=>placeCookies(page,cookies),
+    navigate:async()=>{const response=await page.goto(startUrl,{waitUntil:'domcontentloaded',timeout:180000}).catch(error=>{throw Error('pc_login_navigation_failed:'+String(error.message||error))});if(!response||response.status()<200||response.status()>=400)throw Error('cookie_session_unconfirmed')},
+    assertHealthy:()=>require('./interactionLease').assert(page),
+    onProgress:async event=>{
+      await manifestStore.update(String(nome||''),m=>({...m,loginFlow:require('./loginFlowState').evolve(m.loginFlow,event)}));
+      if(opts?.onProgress)await opts.onProgress(event);
+    },
+    inspect:async()=>{
+      await require('./accountSecurityGate').assertAllowed(page,nome);
+      const ready=await page.evaluate(()=>document.readyState!=='loading'&&!!document.body&&![...document.querySelectorAll('[aria-busy="true"],[role="progressbar"]')].some(e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>2&&r.height>2&&s.visibility!=='hidden'&&s.display!=='none'&&!e.closest('[aria-hidden="true"]')}));
+      if(!ready)return {ready:false};
+      const authenticated=await feedOpened(page);
+      const gate=authenticated?null:await require('./browser').detectLoginRequired(page);
+      return {ready:true,authenticated,loginGate:gate?.loginRequired===true&&/^(login_form|login_wall|aymh_continue|aymh|password_only)$/.test(gate.reason||'')};
+    }
+  });
 }
 
 async function collectFreshCookies(page) {
@@ -476,6 +484,7 @@ async function persistFreshSessionCookies(page, nome) {
     m.cookies = fresh.cookies;
     m.sessionRejected = false;
     m.cookiesUpdatedAt = Date.now();
+    m.loginFlow = require('./loginFlowState').evolve(m.loginFlow,{cookiesRefreshed:true});
     if (m.accountFlags) {
       delete m.accountFlags.whatsappConfirm;
       delete m.accountFlags.whatsappConfirmAt;

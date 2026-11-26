@@ -12,6 +12,11 @@ function evolve(previous, event, now = Date.now()) {
   if (event.entry && ['continue', 'password', 'credentials', 'cookies'].includes(event.entry)) state.entry = state.entry || event.entry;
   if (event.stage) state.stage = event.stage;
   if (event.cookiesAttempted) state.cookiesAttempted = true;
+  if (event.cookiesInjected) state.cookiesInjected = true;
+  if (event.cookieAttempts) state.cookieAttempts = event.cookieAttempts;
+  if (event.cookiesRejected && state.cookieAttempts>=3) state.cookiesRejected = true;
+  if (event.credentialRejected) state.credentialRejections=(Number(state.credentialRejections)||0)+1;
+  if (event.cookiesRefreshed) {state.cookiesRejected=false;state.cookiesRestored=true;state.cookiesRefreshedAt=now;}
   if (typeof event.cookiesRestored === 'boolean') state.cookiesRestored = event.cookiesRestored;
   if (event.submitted) state.credentialsSubmitted = true;
   if (event.error) {
@@ -36,8 +41,9 @@ function summarize(profile) {
     else return null;
   }
   // Never infer a rejected password from an old generic failure flag.
-  return { key, label: labels[key], entry: flow.entry || null, error: flow.error || p.loginRemediateFailedReason || null,
+  const label=flow.cookiesRejected&&flow.credentialRejections>=3&&['password_rejected','credentials_rejected'].includes(key)?'Login: cookies e dados de login rejeitados':labels[key];
+  return { key, label, entry: flow.entry || null, error: flow.error || p.loginRemediateFailedReason || null,
     cls: ['technical_wait', 'incomplete', 'missing_credentials', 'password_rejected', 'credentials_rejected'].includes(key) ? 'bad' : 'warn',
-    cookiesAttempted: flow.cookiesAttempted === true, credentialsSubmitted: flow.credentialsSubmitted === true, at: flow.at || null };
+    cookiesAttempted: flow.cookiesAttempted === true, cookiesRejected:flow.cookiesRejected===true, cookieAttempts:flow.cookieAttempts||0, credentialRejections:flow.credentialRejections||0, cookiesRefreshedAt:flow.cookiesRefreshedAt||null, credentialsSubmitted: flow.credentialsSubmitted === true, at: flow.at || null };
 }
 module.exports = { evolve, summarize, labels };

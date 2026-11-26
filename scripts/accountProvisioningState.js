@@ -2,6 +2,12 @@
 const {AsyncLocalStorage}=require('async_hooks');
 const cadastroMarks=new AsyncLocalStorage();
 function unready(want){return want?.provisioningPending===true||['blocked','failed'].includes(want?.provisioningResult?.state)}
+function manualRetry(want){
+ const p=want||{},result=p.provisioningResult;
+ if(p.provisioningPending||!result||!(result.reason==='login_required'||result.state==='failed'&&!restriction(result.error)))return p;
+ const {provisioningResult,...keep}=p;
+ return {...keep,provisioningPending:true,provisioningAttempts:0,provisioningNextAt:0,provisioningPreviousResult:result};
+}
 function restriction(error){
  if(require('./stockProvisionRetry').isTransient(error))return null;
  const e=String(error||'').toLowerCase();
@@ -14,7 +20,7 @@ function restriction(error){
  if(/marketplace_disabled/.test(e))return 'marketplace_disabled';
  if(/banned|disabled|suspended/.test(e))return 'banned';
  if(/whatsapp_confirm/.test(e))return 'whatsapp_confirm';
- if(/still_login_required|login_form|login_wall|login_not_accepted|login_attempt_budget|missing_credentials/.test(e))return 'login_required';
+ if(/still_login_required|login_form|login_wall|login_not_accepted|login_attempt_budget|missing_credentials|password_rejected|credentials_rejected/.test(e))return 'login_required';
  if(/appeal/.test(e))return 'appeal_submitted';
  if(/messenger_pin/.test(e))return 'messenger_pin';
  return null;
@@ -71,4 +77,4 @@ async function settle(results,{update,audit=()=>{},now=Date.now}={}){
  }return d});
  for(const row of events)audit(row);
 }
-module.exports={unready,restriction,settle,nextCadastro,mayWriteCadastroMark,cadastroIsWriting,runAsCadastro};
+module.exports={unready,manualRetry,restriction,settle,nextCadastro,mayWriteCadastroMark,cadastroIsWriting,runAsCadastro};

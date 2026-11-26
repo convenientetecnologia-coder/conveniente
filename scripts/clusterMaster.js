@@ -1824,7 +1824,7 @@ async function createCluster() {
       const i = findChildByPerfil(nome);
       const nomeKey = String(nome);
       const live = liveChromeNode.get(nomeKey);
-      const operatorBrowser = type === 'invoke_human' || type === 'human-resume' || type === 'deactivate' || type === 'activate' || type === 'start_work' || type === 'anuncio-coleta-task';
+      const operatorBrowser = type === 'invoke_human' || type === 'human-resume' || type === 'deactivate' || type === 'activate' || type === 'configure' || type === 'login_remediate' || type === 'start_work' || type === 'anuncio-coleta-task';
       if (operatorBrowser && typeof live === 'number' && live !== i && children[live]) {
         if (type === 'deactivate') {
           const both = await Promise.all([

@@ -1,6 +1,19 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('fs'),vm=require('vm'),path=require('path');
 const fallback=require('./configureLoginFallback');
+
+test('up to three explicit rejections; technical uncertainty never causes repeated credential submissions',async()=>{
+ for(const error of ['password_rejected','credentials_rejected','login_result_unconfirmed']){
+  let submissions=0;
+  const result=await fallback.run({page:{},maxAttempts:3,begin:async()=>true,attempt:async()=>{submissions++;return {ok:false,error,submitted:true}}});
+  assert.equal(result.error,error);assert.equal(submissions,error==='login_result_unconfirmed'?1:3);
+ }
+});
+test('remaining persistent budget is respected without replacing rejection with a generic budget result',async()=>{
+ let used=2,calls=0;
+ const result=await fallback.run({page:{},maxAttempts:3,begin:async()=>used<3?(used++,true):false,attempt:async()=>{calls++;return {ok:false,error:'password_rejected',submitted:true}}});
+ assert.equal(calls,1);assert.equal(used,3);assert.equal(result.error,'password_rejected');
+});
 test('rejected cookies reach one actual credential attempt in the configure handler',async()=>{
  const source=fs.readFileSync(path.join(__dirname,'worker.js'),'utf8'),start=source.indexOf("          const driven = await require('./configureLoginFallback')"),end=source.indexOf('          if (driven && driven.terminal)',start);
  assert.ok(start>0&&end>start);const calls=[];
