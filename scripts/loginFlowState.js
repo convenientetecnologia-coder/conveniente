@@ -2,7 +2,7 @@
 const retry = require('./stockProvisionRetry');
 const labels = {
   queued: 'Login: na fila', waiting_proxy: 'Login: aguardando proxy', cookies: 'Login: cookies',
-  continue: 'Login: continuar', password: 'Login: senha', credentials: 'Login: e-mail e senha',
+  continue: 'Login: continuar', continue_loading: 'Login: carregando após continuar', password: 'Login: senha', credentials: 'Login: e-mail e senha',
   verifying: 'Login: verificando', technical_wait: 'Login: falha técnica',
   password_rejected: 'Login: senha rejeitada', credentials_rejected: 'Login: dados rejeitados',
   missing_credentials: 'Login: dados ausentes', incomplete: 'Login: tentativa não concluída'

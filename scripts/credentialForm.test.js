@@ -1,4 +1,21 @@
 'use strict';const test=require('node:test'),assert=require('node:assert/strict'),{submit}=require('./credentialForm');
+test('Continue waits through destroyed navigation contexts and delayed password mounting without replay',{timeout:25000},async()=>{
+ const browser=await require('puppeteer').launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',args:['--no-sandbox']});
+ try{
+  const page=await browser.newPage();await page.setContent('<p>Usar outro perfil</p><button onclick="window.clicked++;document.body.innerHTML=\'<p>Carregando</p>\';setTimeout(()=>document.body.innerHTML=window.form,1800)">Continuar</button>');
+  await page.evaluate(()=>{window.clicked=0;window.sent=0;window.form='<form onsubmit="event.preventDefault();window.sent++;this.remove()"><input name="pass" type="password"><button type="submit">Entrar</button></form>'});
+  const realEvaluate=page.evaluate.bind(page);let transitions=0;
+  page.evaluate=async(fn,...args)=>{if(fn.name==='inspect'&&await realEvaluate(()=>window.clicked>0)&&transitions<3){transitions++;throw Error('Execution context was destroyed, most likely because of a navigation.')}return realEvaluate(fn,...args)};
+  const events=[];const result=await submit(page,{password:'fixture',timeoutMs:8000,settleMs:500,onProgress:e=>events.push(e)});
+  assert.equal(result.ok,true,JSON.stringify(result));assert.equal(transitions,3);assert.deepEqual(await realEvaluate(()=>({clicked:window.clicked,sent:window.sent})),{clicked:1,sent:1});assert.ok(events.some(e=>e.stage==='continue_loading'));
+ }finally{await browser.close()}
+});
+test('missing password after Continue times out technically without submitting credentials',{timeout:15000},async()=>{
+ const browser=await require('puppeteer').launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',args:['--no-sandbox']});
+ try{const page=await browser.newPage();await page.setContent('<p>Usar outro perfil</p><button onclick="document.body.innerHTML=\'<p>Carregando</p>\'">Continuar</button>');const events=[];
+ const result=await submit(page,{password:'fixture',timeoutMs:2000,onProgress:e=>events.push(e)});assert.equal(result.ok,false);assert.equal(result.error,'login_form_not_found');assert.equal(events.some(e=>e.submitted),false);
+ }finally{await browser.close()}
+});
 test('actual credential driver handles Continue, password-only, full form and no-chair without fresh navigation',{timeout:60000},async()=>{
  const browser=await require('puppeteer').launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',args:['--no-sandbox']});
  try{const page=await browser.newPage();let healthy=true;browser.__ctCadastroProxy={snapshot:()=>({healthy})};

@@ -18,18 +18,29 @@ function inspect() {
   return { kind: 'unknown' };
 }
 
-async function submit(page, { login, password, openFresh, onProgress = async () => {}, timeoutMs = 120000, settleMs = 60000 } = {}) {
+async function submit(page, { login, password, openFresh, onProgress = async () => {}, timeoutMs = 180000, settleMs = 60000 } = {}) {
   const guard = () => require('./interactionLease').assert(page);
   const readiness = require('./interactionReadiness');
-  const start = Date.now();
+  let stageStarted = Date.now();
+  let stageTimeoutMs=require('./interactionBudget').timeout(page,timeoutMs);
   const report = async value => { try { await onProgress(value); } catch {} };
-  const probe = async () => { guard(); return page.evaluate(inspect); };
+  const probe = async () => {
+    while(Date.now()-stageStarted<stageTimeoutMs){
+      await require('./interactionLease').wait(page);
+      try { return await page.evaluate(inspect); }
+      catch(error){
+        if(!/execution context was destroyed|cannot find context|cannot find execution context|inspected target navigated|context.*destroyed/i.test(String(error.message||error)))throw error;
+        await new Promise(r=>setTimeout(r,250));
+      }
+    }
+    return {kind:'loading'};
+  };
   let state = await probe(), entry = state.kind;
   if (state.kind === 'network_error') return { ok: false, error: 'login_transport_not_ready' };
   if (state.kind === 'pin') return { ok: false, error: 'messenger_pin_pending' };
   if (!['continue', 'password', 'credentials'].includes(state.kind)) {
     // Give an existing navigation time to mount before considering a fresh login.
-    const until = Date.now() + Math.min(30000, timeoutMs);
+    const until = stageStarted + stageTimeoutMs;
     while (!['continue', 'password', 'credentials', 'pin', 'network_error'].includes(state.kind) && Date.now() < until) {
       await new Promise(r => setTimeout(r, 250)); state = await probe();
     }
@@ -45,8 +56,11 @@ async function submit(page, { login, password, openFresh, onProgress = async () 
     await report({ entry: 'continue', stage: 'continue' });
     const clicked = await readiness.clickControl(page, ['Continuar', 'Continue'], { exact: true, timeoutMs: Math.min(30000, timeoutMs) });
     if (!clicked.ok) return { ok: false, error: 'login_continue_not_ready', entry };
+    stageStarted=Date.now();
+    stageTimeoutMs=require('./interactionBudget').timeout(page,timeoutMs);
+    await report({entry,stage:'continue_loading'});
   }
-  while (!['password', 'credentials'].includes(state.kind) && Date.now() - start < timeoutMs) {
+  while (!['password', 'credentials'].includes(state.kind) && Date.now() - stageStarted < stageTimeoutMs) {
     await new Promise(r => setTimeout(r, 250)); state = await probe();
     if (state.kind === 'pin') return { ok: false, error: 'messenger_pin_pending', entry };
     if (state.kind === 'network_error') return { ok: false, error: 'login_transport_not_ready', entry };
