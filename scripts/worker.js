@@ -13638,16 +13638,28 @@ const handlers = {
   });
 },
 
-  async configure({ nome, operator } = {}) {
+  async configure({ nome, operator, manualAuthRecovery = /^admin_configure:/.test(String(operator||'')) } = {}) {
     if (!require('./accountProvisioningState').cadastroIsWriting()) {
       const bound = this && typeof this.configure === 'function' ? this.configure.bind(this) : null;
-      if (bound) return require('./accountProvisioningState').runAsCadastro(() => bound({ nome, operator }));
+      if (bound) return require('./accountProvisioningState').runAsCadastro(() => bound({ nome, operator, manualAuthRecovery }));
     }
     const boot = await __deltaAwaitHostBootReady();
     if (!boot.ready) return { ok: false, error: 'host_boot_not_ready' };
-    let cadastroBrowser=null;
+    let cadastroBrowser=null,configureResult=null;
     try {
     return await lockProfileAction(nome, async () => {
+      if(manualAuthRecovery===true){
+        if(!/^admin_configure:/.test(String(operator||'')))return {ok:false,error:'manual_auth_recovery_operator_required'};
+        const desired=readJsonFile(desiredPath,{perfis:{}}),manifest=await manifestStore.read(nome);
+        const recovery=require('./manualAuthRecovery').prepare(desired.perfis?.[nome],manifest);
+        const current=controllers.get(nome);
+        await current?.browser?.__ctVirtusProxy?.leaveHuman();
+        if(current){current.humanControl=false;current.trabalhando=false;delete current._proxyHumanPrevious;}
+        await manifestStore.update(nome,m=>({...m,accountFlags:{...(m.accountFlags||{}),loginAttemptCount:0},manualAuthRecovery:recovery.manifest.manualAuthRecovery}));
+        robeMeta[nome]=robeMeta[nome]||{};robeMeta[nome].loginAttemptCount=0;
+        await fileStore.withDesiredFileLockUpdate(d=>{d.perfis=d.perfis||{};d.perfis[nome]=require('./manualAuthRecovery').prepare(d.perfis[nome],manifest).desired;return d});
+        provisionAudit.append({ts:Date.now(),event:'manual_auth_recovery_begin',nome,previousAttempts:recovery.previousAttempts});
+      }
       await recordLoginFlow(nome,{stage:'queued'});await recordLoginFlow(nome,{stage:'waiting_proxy'});
       if(/^admin_configure:|^(?:ui|manual|user)$/i.test(String(operator||''))||!operator||operator==='unknown')await fileStore.withDesiredFileLockUpdate(d=>{if(d.perfis?.[nome])d.perfis[nome]=require('./accountProvisioningState').manualRetry(d.perfis[nome]);return d});
       const prepared=await prepareCadastroBrowser(nome,operator);cadastroBrowser=prepared.browser;
@@ -14518,9 +14530,14 @@ const handlers = {
         } catch {}
         await snapshotStatusAndWrite();
       }
-    }).then(result=>finishAccountProvisioningResult(nome,result));
+    }).then(async result=>{configureResult=await finishAccountProvisioningResult(nome,result);return configureResult});
     } catch(error){return await finishAccountProvisioningResult(nome,{ok:false,error:String(error.message||error)})}
-    finally{await closeCadastroBrowser(nome,cadastroBrowser)}
+    finally{await require('./manualAuthRecovery').finish(configureResult,{
+      enabled:manualAuthRecovery,
+      close:()=>closeCadastroBrowser(nome,cadastroBrowser),
+      release:()=>fileStore.withDesiredFileLockUpdate(d=>{if(!d.perfis?.[nome])throw Error('perfil_inexistente');d.perfis[nome]=require('./manualAuthRecovery').release(d.perfis[nome]);return d}),
+      audit:()=>provisionAudit.append({ts:Date.now(),event:'manual_auth_recovery_work_queued',nome})
+    })}
   },
 
   // ===== NOVO: login_remediate (cookies -> login/senha -> humano) =====

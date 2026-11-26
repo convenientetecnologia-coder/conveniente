@@ -3565,19 +3565,19 @@
         // ===================== ALTERAÇÃO SOLICITADA — INÍCIO ======================
         const btnCookies = document.createElement('button');
         btnCookies.className='btn';
-        btnCookies.textContent='Injetar Cookies';
-        btnCookies.title='Injetar cookies salvos neste perfil';
+        btnCookies.textContent='Cookies e Login';
+        btnCookies.title='Abrir com cadeira, tentar cookies e login/senha, validar e liberar para trabalho';
         btnCookies.onclick = async (ev) => {
-          setBtnLoading(btnCookies, true, 'Injetando...');
+          setBtnLoading(btnCookies, true, 'Autenticando...');
           try {
             const res = await window.electronAPI.configure(p.nome);
             if (!res || !res.ok) {
-              alert('Falha ao injetar cookies: ' + (res && res.error ? res.error : 'erro desconhecido'));
+              alert('Autenticação não concluída: ' + (res && res.error ? res.error : 'erro desconhecido'));
             } else {
-              alert('Cookies injetados com sucesso.');
+              alert(res.workQueued ? 'Autenticação validada. Conta liberada para abrir e trabalhar pela fila.' : 'Autenticação concluída.');
             }
           } catch (e) {
-            alert('Falha ao injetar cookies: ' + (e && e.message || e));
+            alert('Autenticação não concluída: ' + (e && e.message || e));
           } finally {
             setBtnLoading(btnCookies, false);
             reloadPerfis();
