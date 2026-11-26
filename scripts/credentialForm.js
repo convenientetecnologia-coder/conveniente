@@ -18,7 +18,7 @@ function inspect() {
   return { kind: 'unknown' };
 }
 
-async function submit(page, { login, password, openFresh, onProgress = async () => {}, timeoutMs = 180000, settleMs = 60000 } = {}) {
+async function submit(page, { login, password, openFresh, onProgress = async () => {}, timeoutMs = 180000, settleMs = 180000 } = {}) {
   const guard = () => require('./interactionLease').assert(page);
   const readiness = require('./interactionReadiness');
   let stageStarted = Date.now();
@@ -102,11 +102,34 @@ async function submit(page, { login, password, openFresh, onProgress = async () 
     }, pass);
     handles.push(buttonHandle); const button = buttonHandle.asElement();
     if (!button || !(await readiness.waitElement(page, button, { timeoutMs: 30000 })).ok) return { ok: false, error: 'login_submit_not_ready', entry };
-    const from = page.url(); guard(); await button.click();
+    guard();
+    await button.click();
+    const deadline = Date.now() + require('./interactionBudget').timeout(page, settleMs);
     await report({ entry, stage: 'verifying', submitted: true });
-    try {
-      await page.waitForFunction(from => location.href !== from || !document.querySelector('input[name="pass"],input#pass,input[type="password"]') || /senha incorreta|incorrect password|informacoes de login incorretas|incorrect login|ocorreu um erro|an error occurred/i.test(String(document.body?.innerText || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')), { timeout: settleMs }, from);
-    } catch {}
+    let readySince = 0;
+    let settled = false;
+    while (Date.now() < deadline) {
+      guard();
+      let ready = false;
+      try {
+        ready = await page.evaluate(() => {
+          if (!document.body || document.readyState === 'loading') return false;
+          const text = document.body.innerText.trim();
+          if (/senha incorreta|incorrect password|incorrect login|informações de login incorretas|ocorreu um erro|an error occurred/i.test(text)) return true;
+          const visible = el => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+          if ([...document.querySelectorAll('input[type="password"],input[name="pass"]')].some(visible)) return false;
+          return !!text && !/^(carregando|loading)[. …]*$/i.test(text);
+        });
+      } catch (error) {
+        if (!/context.*destroyed|cannot find context|inspected target navigated/i.test(String(error.message))) throw error;
+      }
+      if (ready) {
+        if (!readySince) readySince = Date.now();
+        if (Date.now() - readySince >= 250) { settled = true; break; }
+      } else readySince = 0;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    if (!settled) return { ok: false, submitted: true, entry, error: 'login_post_submit_timeout' };
     guard(); return { ok: true, submitted: true, entry };
   } catch (error) { return { ok: false, error: String(error.message || error), entry }; }
   finally { for (const handle of handles) await handle.dispose().catch(() => {}); }
