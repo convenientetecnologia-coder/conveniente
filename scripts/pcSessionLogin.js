@@ -1143,7 +1143,7 @@ async function attemptCredentialRelogin(page, nome, { login, password, onProgres
   const user = String(login || '').trim();
   const pass = String(password || '').trim();
   if (!user || !pass) return { ok: false, error: 'missing_credentials' };
-  const welcomeProgress=async event=>{await onProgress(event);try{require('./provisionAudit').append({ts:Date.now(),event:'login_ignore_progress',nome,stage:event.stage,clicked:event.welcomeDismissClicked===true})}catch{}};
+  const welcomeProgress=async event=>{await onProgress(event);try{require('./provisionAudit').append({ts:Date.now(),event:'login_ignore_progress',nome,stage:event.stage,probe:event.ignoreProbe||null,clicked:event.welcomeDismissClicked===true})}catch{}};
   const alreadyWelcome=await require('./postLoginWelcome').advance(page,{presentOnly:true,authenticated:()=>feedOpened(page),onProgress:welcomeProgress});
   if(!alreadyWelcome.ok)return alreadyWelcome;
   if (await hackedScreen(page)) return { ok: false, error: 'hacked_review', terminal: 'hacked_review' };

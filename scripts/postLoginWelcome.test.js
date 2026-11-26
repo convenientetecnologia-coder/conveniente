@@ -4,6 +4,11 @@ async function fixture(html,action){
  const browser=await require('puppeteer').launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',args:['--no-sandbox']});
  try{const page=await browser.newPage();await page.setRequestInterception(true);page.on('request',r=>r.respond({status:200,contentType:'text/html',body:html}));await page.goto('https://www.facebook.com/login/after/');return await action(page,browser)}finally{await browser.close()}
 }
+test('painted checkpoint scrollview with stale aria-hidden still permits hit-tested Ignore',{timeout:15000},async()=>{
+ await fixture('<div id="scrollview" aria-hidden="true"><main role="main"><a href="https://m.facebook.com/terms.php">Terms of Use</a><div aria-label="Ignorar" role="button" tabindex="0" onclick="window.clicked=true;this.remove()"><div role="none"><span><span>Ignorar</span></span></div></div></main></div>',async page=>{
+  const result=await advance(page,{timeoutMs:6000,authenticated:()=>page.evaluate(()=>window.clicked===true)});assert.equal(result.ok,true,JSON.stringify(result));assert.equal(result.dismissed,true);
+ });
+});
 test('exact aria-label Ignore is clickable while document still reports loading, including a pre-existing prompt',{timeout:15000},async()=>{
  await fixture('<div><div aria-label="Ignorar" role="button" tabindex="0" onclick="window.clicked=true;this.remove()"><div role="none"><div><span><span>Ignorar</span></span></div><div role="none" data-visualcompletion="ignore" style="inset:0px"></div></div></div></div>',async page=>{
   await page.evaluate(()=>Object.defineProperty(document,'readyState',{configurable:true,get:()=>window.clicked?'complete':'loading'}));

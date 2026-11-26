@@ -2,7 +2,7 @@
 // Only invoked after this credential driver's submission. Not a global dismiss rule.
 function inspect(){
  const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
- const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>2&&r.height>2&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&!e.closest('[aria-hidden="true"],[inert]')};
+ const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e),hidden=e.closest('[aria-hidden="true"]');return r.width>2&&r.height>2&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&!e.closest('[inert]')&&(!hidden||hidden.id==='scrollview')};
  if(!/(^|\.)(facebook|messenger)\.com$/.test(location.hostname)&&location.href!=='about:srcdoc')return {blocked:true};
  if(!document.body)return {loading:true};
  const buttons=[...document.querySelectorAll('button,[role="button"],a,[role="link"],input[type="submit"],input[type="button"],div[tabindex="0"],span')].filter(e=>visible(e)&&!e.disabled&&e.getAttribute('aria-disabled')!=='true'&&!e.closest('[aria-disabled="true"]'));
@@ -22,12 +22,13 @@ async function ignoreTarget(frame){
    if(!labels.includes(norm(el.getAttribute('aria-label')))&&!labels.includes(norm(el.innerText||el.textContent||el.value)))continue;
    const target=el.closest('button,[role="button"],a,[role="link"],[tabindex="0"]')||el;
    const r=target.getBoundingClientRect(),s=getComputedStyle(target);
-   if(r.width>2&&r.height>2&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&!target.disabled&&!target.closest('[aria-hidden="true"],[aria-disabled="true"],[inert]'))return target;
+   const hidden=target.closest('[aria-hidden="true"]');
+   if(r.width>2&&r.height>2&&s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&!target.disabled&&!target.closest('[aria-disabled="true"],[inert]')&&(!hidden||hidden.id==='scrollview'))return target;
   }return null;
  });
 }
 async function advance(page,{authenticated=async()=>false,onProgress=async()=>{},timeoutMs=180000,presentOnly=false}={}){
- const until=Date.now()+require('./interactionBudget').timeout(page,timeoutMs);let clicked=false,stableAt=0,signature=null;
+ const until=Date.now()+require('./interactionBudget').timeout(page,timeoutMs);let clicked=false,stableAt=0,signature=null,probeState=null;
  while(Date.now()<until){
   await require('./interactionLease').wait(page);
   let state,scope=page;
@@ -42,6 +43,8 @@ async function advance(page,{authenticated=async()=>false,onProgress=async()=>{}
    if(!/execution context was destroyed|cannot find.*context|context.*destroyed|inspected target navigated/i.test(String(error.message||error)))throw error;
    await new Promise(r=>setTimeout(r,250));continue;
   }
+  const observed=state.blocked?'outside_supported_document':state.hasIgnore?'ignore_found':state.loading?'document_loading':state.otherStep?'other_controls':'no_controls';
+  if(observed!==probeState){probeState=observed;await onProgress({stage:'welcome_probe',ignoreProbe:observed});}
   if(state.blocked)return clicked?{ok:false,error:'login_welcome_next_step_unconfirmed'}:{ok:true,skipped:true};
   if(presentOnly&&!clicked&&!state.hasIgnore)return {ok:true,skipped:true};
   if(state.hasIgnore){
@@ -51,7 +54,7 @@ async function advance(page,{authenticated=async()=>false,onProgress=async()=>{}
     try{
      const target=handle.asElement();
      const context={browser:()=>page.browser(),isClosed:()=>page.isClosed(),evaluate:scope.evaluate.bind(scope)};
-     const ready=target&&await require('./interactionReadiness').waitElement(context,target,{timeoutMs:Math.min(30000,Math.max(0,until-Date.now())),allowLoading:true});
+     const ready=target&&await require('./interactionReadiness').waitElement(context,target,{timeoutMs:Math.min(30000,Math.max(0,until-Date.now())),allowLoading:true,allowAriaHidden:true});
      if(!ready?.ok)return {ok:false,error:'login_welcome_click_unconfirmed'};
      await require('./interactionLease').wait(page);await target.click();
     }finally{await handle.dispose()}
