@@ -1055,7 +1055,7 @@ async function runMarketplaceRenewListings({
     const stable = await waitRenewScreenStable(page, { onProgress, timeoutMs: RENEW_SCREEN_WAIT_MS });
     if (!stable || stable.ok !== true) {
       const error = (stable && stable.reason) || 'renew_screen_unconfirmed';
-      audit('renew_listings_fail', { stage: 'renew_screen', reason: error, snapshot: stable && stable.snapshot, durationMs: now() - startedAt });
+      audit('renew_listings_fail', { stage: 'renew_screen', reason: error, snapshot: stable && stable.snapshot, diagnostic:await renewalControlDiagnostic(page), durationMs: now() - startedAt });
       return { ok: false, renewedCount: 0, error, reason: error };
     }
     // Botão final disponível: segue sem exigir quantidade.
