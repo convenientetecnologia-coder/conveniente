@@ -9,6 +9,7 @@ function inspect(){
  const dialog=[...document.querySelectorAll('[role="dialog"],[aria-modal="true"]')].filter(visible).find(e=>prompt.test(norm(e.innerText)));
  const security=headings.some(t=>prompt.test(t))||(!social&&prompt.test(text)&&/restringimos sua conta|pode ter sido (?:invadida|hackeada)|provar que esta conta|belongs to you/.test(text));
  const gateText=dialog?norm(dialog.innerText):!social?text:headings.join(' ');
+ if(!social&&/verifique seu email|verifique seu e-mail|check your email|confirm your email/.test(text)&&/codigo|code/.test(text)&&[...document.querySelectorAll('input')].some(visible))return {state:'code',email:true,reason:'account_code_email'};
  const verification=security||!social&&/\/checkpoint|\/two_step_verification|\/auth_platform/.test(location.pathname);
  if(verification&&/selfie.{0,50}video|video.{0,50}selfie|grave (?:um|uma).{0,25}video/.test(gateText))return {state:'selfie',reason:'identity_confirm_selfie'};
  if(security&&/codigo|code/.test(gateText)){
@@ -46,14 +47,15 @@ async function check({page,nome,advance=true,clock=Date.now,sleep=ms=>new Promis
 }
 async function save(nome,state){
  await require('./manifestStore').update(nome,man=>{man=man||{};const f=man.accountFlags=man.accountFlags||{};
-  if(state.state==='code'){f.accountCodePhone=state.phone===true;f.accountCodeWhatsapp=state.whatsapp===true;f.accountCodeAt=Date.now();f.accountCodeReason=state.reason;f.identityRequired=false;f.identitySubmitted=false;}
+  if(state.state==='code'){f.accountCodeEmail=state.email===true;f.accountCodePhone=state.phone===true;f.accountCodeWhatsapp=state.whatsapp===true;f.accountCodeAt=Date.now();f.accountCodeReason=state.reason;f.identityRequired=false;f.identitySubmitted=false;}
   else{f.identityRequired=true;f.identityRequiredAt=Date.now();f.identityRequiredSource='account_security_gate';}
+  if(state.state==='code'){delete man.loginFlow;delete f.loginRequired;delete f.loginRemediateFailed;delete f.loginRemediateFailedReason;}
   man.accountSecurity={state:state.state,reason:state.reason,at:Date.now()};return man;
  });
 }
 function fromFlags(flags={}){
  if(flags.banned)return 'banned';
- if(flags.accountCodePhone||flags.accountCodeWhatsapp)return 'account_code';
+ if(flags.accountCodeEmail||flags.accountCodePhone||flags.accountCodeWhatsapp)return 'account_code';
  if(flags.identityRequired||flags.identitySubmitted)return 'identity_required';
  if(flags.captchaCheckpoint)return 'captcha_checkpoint';
  if(flags.twoFactor)return 'two_factor';

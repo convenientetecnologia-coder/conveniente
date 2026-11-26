@@ -1162,6 +1162,7 @@ async function attemptCredentialRelogin(page, nome, { login, password, onProgres
   await sleep(800);
   const welcome=await require('./postLoginWelcome').advance(page,{authenticated:()=>feedOpened(page),onProgress:welcomeProgress});
   if(!welcome.ok)return {...welcome,submitted:true,entry:form.entry};
+  await require('./accountSecurityGate').assertAllowed(page,nome);
   const rejected=await credentialRejection(page);
   if(rejected)return {ok:false,error:rejected,submitted:true,entry:form.entry};
   if (await badLoginText(page)) return { ok: false, error: 'login_ui_error',submitted:true };

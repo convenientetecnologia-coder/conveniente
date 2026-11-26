@@ -422,7 +422,7 @@
         }
 
         // 1.4) ID Virtus (Messenger: confirme identidade para enviar mensagens)
-        if(p.accountCodePhone||p.accountCodeWhatsapp)return {kind:'account_code',label:p.accountCodePhone&&p.accountCodeWhatsapp?'Codigo Zap + Tel':p.accountCodeWhatsapp?'Codigo WhatsApp':'Codigo telefone',cls:'bad',title:'Confirmacao da conta pendente - atendimento humano'};
+        if(p.accountCodeEmail||p.accountCodePhone||p.accountCodeWhatsapp)return {kind:'account_code',label:p.accountCodeEmail?'Codigo e-mail':p.accountCodePhone&&p.accountCodeWhatsapp?'Codigo Zap + Tel':p.accountCodeWhatsapp?'Codigo WhatsApp':'Codigo telefone',cls:'bad',title:'Confirmacao da conta pendente - atendimento humano'};
         if (p.idVirtus === true) {
           // ID Virtus is separate from account recovery by phone/WhatsApp.
           return {
@@ -1926,7 +1926,7 @@
           setKind('#srvTcKindIdVirtus', { key: 'id_virtus', fallback: true });
           setKind('#srvTcKindSelfie', { key: 'selfie_video', fallback: false });
           const selfieInput=box.querySelector('#srvTcKindSelfie');
-          if(selfieInput&&!box.querySelector('#srvTcKindAccountCode')){const label=document.createElement('label');label.className='muted';label.style.cssText='display:flex;align-items:center;gap:8px';label.innerHTML='<input type="checkbox" id="srvTcKindAccountCode" /> Excluir codigo Zap/Tel';selfieInput.closest('label').after(label);}
+          if(selfieInput&&!box.querySelector('#srvTcKindAccountCode')){const label=document.createElement('label');label.className='muted';label.style.cssText='display:flex;align-items:center;gap:8px';label.innerHTML='<input type="checkbox" id="srvTcKindAccountCode" /> Excluir codigo Zap/Tel/Email';selfieInput.closest('label').after(label);}
           setKind('#srvTcKindAccountCode', { key: 'account_code', fallback: false });
         }
         const wm = String(robe.workMode || 'v3_pmg');
@@ -3325,7 +3325,7 @@
 
         // Pills (mantenha como já está, apenas reaproveite o código existente a partir daqui)
         titleRow.append(buildPill('Navegador '+(p.active?'Ativo':'Inativo'), p.active?'good':'bad'));
-        if (!p.captchaCheckpoint) titleRow.append(buildPill(p.provisioningResult?.reason==='cadastro_attempts_exhausted' ? 'Cadastro: não conseguiu 5 vezes' : p.provisioningResult?.state==='failed' ? 'Cadastro: falha técnica' : p.provisioningResult?.state==='blocked' ? 'Cadastro: '+({login_required:'login necessário',identity_required:'identidade necessária',two_factor:'duas etapas',captcha_checkpoint:'verificação necessária',banned:'conta restrita',whatsapp_confirm:'confirmar WhatsApp',appeal_submitted:'recurso em análise',marketplace_disabled:'marketplace',messenger_pin:'PIN do Messenger'}[p.provisioningResult.reason]||'requer verificação') : p.provisioningPending ? 'Cadastro pendente' : 'Virtus '+(p.virtusOnline?'Online':'Offline'), p.virtusOnline && !p.provisioningPending && !['blocked','failed'].includes(p.provisioningResult?.state)?'good':'bad'));
+        if (!p.captchaCheckpoint && !p.accountCodeEmail) titleRow.append(buildPill(p.provisioningResult?.reason==='cadastro_attempts_exhausted' ? 'Cadastro: não conseguiu 5 vezes' : p.provisioningResult?.state==='failed' ? 'Cadastro: falha técnica' : p.provisioningResult?.state==='blocked' ? 'Cadastro: '+({login_required:'login necessário',identity_required:'identidade necessária',two_factor:'duas etapas',captcha_checkpoint:'verificação necessária',banned:'conta restrita',whatsapp_confirm:'confirmar WhatsApp',appeal_submitted:'recurso em análise',marketplace_disabled:'marketplace',messenger_pin:'PIN do Messenger'}[p.provisioningResult.reason]||'requer verificação') : p.provisioningPending ? 'Cadastro pendente' : 'Virtus '+(p.virtusOnline?'Online':'Offline'), p.virtusOnline && !p.provisioningPending && !['blocked','failed'].includes(p.provisioningResult?.state)?'good':'bad'));
         if (p.robeMode === 'veiculos') titleRow.append(buildPill('Modo: Veículos', 'info'));
         else titleRow.append(buildPill('Modo: Itens', 'info'));
         const gatewayPills = buildGatewayProxyPills(p);
@@ -3384,7 +3384,7 @@
           }
 
           // Pill — Por que não abriu (whyNotOpen)
-          if (!p.captchaCheckpoint && typeof p.whyNotOpen === "string" && p.whyNotOpen.length > 0) {
+          if (!p.captchaCheckpoint && !p.accountCodeEmail && typeof p.whyNotOpen === "string" && p.whyNotOpen.length > 0) {
             const whyPill = buildPill(`Por que não abriu: ${p.whyNotOpen}`, 'bad');
             whyPill.title = `Motivo registrado pelo sistema para não abrir o navegador.`;
             titleRow.append(whyPill);

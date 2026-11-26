@@ -2163,7 +2163,7 @@ function refuseOutsideCadastroMark(nome) {
 }
 
 async function recordLoginFlow(nome,event){
- await manifestStore.update(nome,m=>m?.accountFlags?.captchaCheckpoint===true?m:({...m,loginFlow:require('./loginFlowState').evolve(m?.loginFlow,event)}));
+ await manifestStore.update(nome,m=>(m?.accountFlags?.captchaCheckpoint===true||m?.accountFlags?.accountCodeEmail===true)?m:({...m,loginFlow:require('./loginFlowState').evolve(m?.loginFlow,event)}));
 }
 
 async function setLoginRequiredFlag(nome, { reason = '', source = '' } = {}) {
@@ -2347,7 +2347,7 @@ const HUMAN_OVERLAY_CFG = {
 function _overlayReasonFromFlags(flags) {
   try {
     flags = (flags && typeof flags === 'object') ? flags : {};
-    if (flags.accountCodePhone || flags.accountCodeWhatsapp) return flags.accountCodePhone && flags.accountCodeWhatsapp ? 'account_code_phone_whatsapp' : flags.accountCodePhone ? 'account_code_phone' : 'account_code_whatsapp';
+    if (flags.accountCodeEmail || flags.accountCodePhone || flags.accountCodeWhatsapp) return flags.accountCodeEmail ? 'account_code_email' : flags.accountCodePhone && flags.accountCodeWhatsapp ? 'account_code_phone_whatsapp' : flags.accountCodePhone ? 'account_code_phone' : 'account_code_whatsapp';
     if (flags.banned === true) return `banned:${flags.bannedReason || ''}`.trim();
     if (flags.marketplacePhoneConfirm === true) return `marketplace_phone_confirm:${flags.marketplacePhoneConfirmReason || ''}`.trim();
     if (flags.marketplaceDisabled === true) return `marketplace_disabled:${flags.marketplaceDisabledReason || ''}`.trim();
@@ -2369,7 +2369,7 @@ function _terminalFlagFromFlags(flags) {
     const category=require('./terminalAccountPolicy').reason(flags);if(category)return category;
     flags = (flags && typeof flags === 'object') ? flags : {};
     if (flags.banned === true) return 'banned';
-    if (flags.accountCodePhone === true || flags.accountCodeWhatsapp === true) return 'account_code';
+    if (flags.accountCodeEmail === true || flags.accountCodePhone === true || flags.accountCodeWhatsapp === true) return 'account_code';
     if (flags.marketplacePhoneConfirm === true) return 'marketplace_phone_confirm';
     if (flags.twoFactor === true) return 'two_factor';
     if (flags.marketplaceDisabled === true) return 'marketplace_disabled';
@@ -18043,6 +18043,7 @@ perfis.push({
   captchaCheckpointReason,
   idVirtus,
   idVirtusReason,
+  accountCodeEmail:man?.accountFlags?.accountCodeEmail===true,
   accountCodePhone:man?.accountFlags?.accountCodePhone===true,
   accountCodeWhatsapp:man?.accountFlags?.accountCodeWhatsapp===true,
   twoFactor,
