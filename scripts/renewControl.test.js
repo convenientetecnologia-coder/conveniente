@@ -67,3 +67,19 @@ test('scroll stops before touching the page when manage mode is lost', async () 
  assert.equal(result.reason,'renew_manage_mode_lost');
  assert.equal(touched,false);
 });
+
+test('enabled renewal control can be replaced by React while its label, geometry and hit target stay stable', {timeout:20000}, async () => {
+ const browser=await require('puppeteer').launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',args:['--no-sandbox']});
+ try {
+  const page=await browser.newPage();
+  await page.setContent('<div role="dialog" aria-label="Renovar classificados"><h2>Renovar classificados</h2><p>7 classificados serão renovados</p><div aria-hidden="true"><div aria-disabled="true" role="button" aria-label="Renovar" tabindex="-1">Renovar</div></div><div id="footer"></div></div>');
+  await page.evaluate(()=>{
+   window.good=0;
+   const render=()=>{const button=document.createElement('div');button.setAttribute('role','button');button.setAttribute('aria-label','Renovar');button.tabIndex=0;button.style.cssText='width:200px;height:40px;position:relative';button.innerHTML='<span>Renovar</span><div style="position:absolute;inset:0"></div>';button.onclick=()=>window.good++;document.querySelector('#footer').replaceChildren(button)};
+   render();window.churn=setInterval(render,250);
+  });
+  const click=extract('clickRenewConfirmInDialog','async function clickRenewConfirm(');
+  assert.equal((await click(page)).ok,true);
+  assert.equal(await page.evaluate(()=>window.good),1);
+ } finally { await browser.close(); }
+});

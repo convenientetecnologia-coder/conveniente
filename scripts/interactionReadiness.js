@@ -13,21 +13,21 @@ async function waitStable(probe,{timeoutMs=60000,stableMs=1500,pollMs=250,clock=
   }else{signature=null;since=0}
   await sleep(Math.min(pollMs,Math.max(0,timeoutMs-(clock()-started))));
  }
- return {ok:false,reason:'control_not_stable',waitedMs:clock()-started};
+ return {ok:false,reason:'control_not_stable',detail:last?.ready?'target_keeps_changing':last?.reason||'control_absent',waitedMs:clock()-started};
 }
 function inspectElement(el,allowLoading=false,allowAriaHidden=false){
- if(!allowLoading&&document.readyState==='loading'||!document.body||!el||!el.isConnected)return {ready:false};
+ if(!allowLoading&&document.readyState==='loading'||!document.body||!el||!el.isConnected)return {ready:false,reason:'document_or_target_loading'};
  const hidden=el.closest('[aria-hidden="true"]');
  const staleIdentityRoot=hidden?.id==='scrollview'&&/^\/checkpoint\/1501092823525282\//.test(location.pathname)&&!hidden.parentElement?.closest('[aria-hidden="true"]');
- if(el.disabled||el.getAttribute('aria-disabled')==='true'||el.closest('[aria-busy="true"],[aria-disabled="true"],[inert]')||(hidden&&!staleIdentityRoot&&!allowAriaHidden))return {ready:false};
- const style=getComputedStyle(el);if(style.display==='none'||style.visibility==='hidden'||Number(style.opacity)===0)return {ready:false};
- const r=el.getBoundingClientRect();if(r.width<2||r.height<2)return {ready:false};
- if(r.bottom<0||r.top>=innerHeight||r.right<0||r.left>=innerWidth){el.scrollIntoView({block:'center',inline:'nearest'});return {ready:false}}
+ if(el.disabled||el.getAttribute('aria-disabled')==='true'||el.closest('[aria-busy="true"],[aria-disabled="true"],[inert]')||(hidden&&!staleIdentityRoot&&!allowAriaHidden))return {ready:false,reason:'disabled_or_hidden'};
+ const style=getComputedStyle(el);if(style.display==='none'||style.visibility==='hidden'||Number(style.opacity)===0)return {ready:false,reason:'target_not_painted'};
+ const r=el.getBoundingClientRect();if(r.width<2||r.height<2)return {ready:false,reason:'empty_target_bounds'};
+ if(r.bottom<0||r.top>=innerHeight||r.right<0||r.left>=innerWidth){el.scrollIntoView({block:'center',inline:'nearest'});return {ready:false,reason:'target_outside_viewport'}}
  let left=Math.max(0,r.left),top=Math.max(0,r.top),right=Math.min(innerWidth,r.right),bottom=Math.min(innerHeight,r.bottom);
  for(let parent=el.parentElement;parent;parent=parent.parentElement){const ps=getComputedStyle(parent),pr=parent.getBoundingClientRect();if(/hidden|auto|scroll|clip/.test(ps.overflowX)){left=Math.max(left,pr.left+parent.clientLeft);right=Math.min(right,pr.left+parent.clientLeft+parent.clientWidth)}if(/hidden|auto|scroll|clip/.test(ps.overflowY)){top=Math.max(top,pr.top+parent.clientTop);bottom=Math.min(bottom,pr.top+parent.clientTop+parent.clientHeight)}}
- if(right-left<2||bottom-top<2){el.scrollIntoView({block:'center',inline:'nearest'});return {ready:false}}
+ if(right-left<2||bottom-top<2){el.scrollIntoView({block:'center',inline:'nearest'});return {ready:false,reason:'target_clipped'}}
  const x=(left+right)/2,y=(top+bottom)/2;
- const hit=document.elementFromPoint(x,y);if(!hit||!(hit===el||el.contains(hit)))return {ready:false};
+ const hit=document.elementFromPoint(x,y);if(!hit||!(hit===el||el.contains(hit)))return {ready:false,reason:'target_covered'};
  const registry=window.__ctReadyTargets||(window.__ctReadyTargets={next:0,ids:new WeakMap()});if(!registry.ids.has(el))registry.ids.set(el,++registry.next);
  return {ready:true,x,y,signature:[registry.ids.get(el),location.href,el.tagName,el.getAttribute('aria-label')||el.textContent?.trim().slice(0,160)||'',Math.round(r.x),Math.round(r.y),Math.round(r.width),Math.round(r.height),Math.round(x),Math.round(y)].join('|')};
 }
@@ -58,21 +58,21 @@ async function controlHandle(page,labels,{exact=false,withinDialog=false,exclude
   if(offscreen){offscreen.scrollIntoView({block:'center',inline:'nearest'});return offscreen}return null;
  },{wanted,exact,withinDialog,excludeSubstrings,withinSelector});
 }
-async function waitControl(page,labels,{timeoutMs=15000,...options}={}){
+async function waitControl(page,labels,{timeoutMs=15000,equivalentReplacements=false,...options}={}){
  timeoutMs=require('./interactionBudget').timeout(page,timeoutMs);
  return waitStable(async()=>{
   const handle=await controlHandle(page,labels,options);
-  try{const el=handle.asElement();return el?await page.evaluate(inspectElement,el):null}finally{await handle.dispose()}
+  try{const el=handle.asElement();const proof=el?await page.evaluate(inspectElement,el):null;if(equivalentReplacements&&proof?.ready)proof.signature=proof.signature.split('|').slice(1).join('|');return proof}finally{await handle.dispose()}
  },{timeoutMs,...options,isClosed:()=>page.isClosed?.()===true});
 }
-async function clickControl(page,labels,{timeoutMs=15000,...options}={}){
+async function clickControl(page,labels,{timeoutMs=15000,equivalentReplacements=false,...options}={}){
  timeoutMs=require('./interactionBudget').timeout(page,timeoutMs);
  const started=Date.now();let handle=null;
  try{
   // Hold the exact element that became stable; do not re-select a hidden duplicate.
   const result=await waitStable(async()=>{
    if(handle)await handle.dispose();handle=await controlHandle(page,labels,options);
-   const el=handle.asElement();return el?await page.evaluate(inspectElement,el):null;
+   const el=handle.asElement();const proof=el?await page.evaluate(inspectElement,el):null;if(equivalentReplacements&&proof?.ready)proof.signature=proof.signature.split('|').slice(1).join('|');return proof;
   },{timeoutMs,...options,isClosed:()=>page.isClosed?.()===true});
   if(!result.ok)return result;
   const el=handle?.asElement(),proof=el?await page.evaluate(inspectElement,el):null;if(!proof?.ready)return {ok:false,reason:'control_changed_before_click'};

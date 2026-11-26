@@ -677,13 +677,13 @@ async function clickRenewConfirmInDialog(page, { beforeClick = null, onClick = n
     return null;
   });
   if (!withinSelector) return {ok:false,reason:'renew_screen_not_ready'};
-  const options={exact:true,withinSelector,timeoutMs:60000};
+  const options={exact:true,withinSelector,timeoutMs:60000,equivalentReplacements:true};
   const stable=await controls.waitControl(page,['Renovar','Renew'],options);
-  if(!stable.ok)return {ok:false,reason:stable.reason};
+  if(!stable.ok)return {ok:false,reason:stable.detail||stable.reason};
   if(beforeClick)await beforeClick();
   // Revalidate after transport/authentication checks; never reuse old coordinates.
   const rechecked=await controls.waitControl(page,['Renovar','Renew'],options);
-  if(!rechecked.ok)return {ok:false,reason:rechecked.reason};
+  if(!rechecked.ok)return {ok:false,reason:rechecked.detail||rechecked.reason};
   if(onClick)await onClick();
   const clicked=await controls.clickControl(page,['Renovar','Renew'],options);
   return clicked.ok?{ok:true,via:clicked.via,attempted:true}:{ok:false,reason:clicked.error||clicked.reason,attempted:true};
