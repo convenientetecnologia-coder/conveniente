@@ -334,29 +334,17 @@ async function scrollToAgeThreshold(page, { onProgress, scrollStopAgeDays = SCRO
           return out;
         };
         const resolveTarget = () => {
-          try {
-            const primary = [document.scrollingElement, document.documentElement, document.body].find(
-              (el) => el && Number(el.scrollHeight || 0) - Number(el.clientHeight || 0) > 20
-            );
-            if (primary) return primary;
-            let best = null;
-            let bestDelta = 0;
-            const nodes = document.querySelectorAll('main, div, section');
-            for (const el of nodes) {
-              if (!el || !el.getBoundingClientRect) continue;
-              const st = window.getComputedStyle(el);
-              const oy = String((st && st.overflowY) || '').toLowerCase();
-              if (oy !== 'auto' && oy !== 'scroll') continue;
-              const delta = Number(el.scrollHeight || 0) - Number(el.clientHeight || 0);
-              if (delta > bestDelta) {
-                bestDelta = delta;
-                best = el;
-              }
-            }
-            return best || document.scrollingElement || document.documentElement || document.body;
-          } catch {
-            return document.scrollingElement || document.documentElement || document.body;
+          let best = null, bestScore = -1;
+          for (const el of document.querySelectorAll('main,[role="main"],div,section')) {
+            const r=el.getBoundingClientRect(),st=getComputedStyle(el);
+            if(r.width<100||r.height<100||st.visibility==='hidden'||st.display==='none'||el.closest('[aria-hidden="true"],[inert]'))continue;
+            if(!/auto|scroll/.test(st.overflowY)||el.scrollHeight-el.clientHeight<20)continue;
+            const containsListings=/anunciado em|listed on|posted on/i.test(el.innerText||'');
+            if(!containsListings)continue;
+            const score=Math.min(r.width,innerWidth)*Math.min(r.height,innerHeight);
+            if(score>bestScore){best=el;bestScore=score;}
           }
+          return best||document.scrollingElement||document.documentElement||document.body;
         };
         const target = resolveTarget();
         if (!target) return { moved: false, top: 0, ageHit: false };
