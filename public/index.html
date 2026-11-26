@@ -3325,7 +3325,7 @@
 
         // Pills (mantenha como já está, apenas reaproveite o código existente a partir daqui)
         titleRow.append(buildPill('Navegador '+(p.active?'Ativo':'Inativo'), p.active?'good':'bad'));
-        titleRow.append(buildPill(p.provisioningResult?.reason==='cadastro_attempts_exhausted' ? 'Cadastro: não conseguiu 5 vezes' : p.provisioningResult?.state==='failed' ? 'Cadastro: falha técnica' : p.provisioningResult?.state==='blocked' ? 'Cadastro: '+({login_required:'login necessário',identity_required:'identidade necessária',two_factor:'duas etapas',captcha_checkpoint:'verificação necessária',banned:'conta restrita',whatsapp_confirm:'confirmar WhatsApp',appeal_submitted:'recurso em análise',marketplace_disabled:'marketplace',messenger_pin:'PIN do Messenger'}[p.provisioningResult.reason]||'requer verificação') : p.provisioningPending ? 'Cadastro pendente' : 'Virtus '+(p.virtusOnline?'Online':'Offline'), p.virtusOnline && !p.provisioningPending && !['blocked','failed'].includes(p.provisioningResult?.state)?'good':'bad'));
+        if (!p.captchaCheckpoint) titleRow.append(buildPill(p.provisioningResult?.reason==='cadastro_attempts_exhausted' ? 'Cadastro: não conseguiu 5 vezes' : p.provisioningResult?.state==='failed' ? 'Cadastro: falha técnica' : p.provisioningResult?.state==='blocked' ? 'Cadastro: '+({login_required:'login necessário',identity_required:'identidade necessária',two_factor:'duas etapas',captcha_checkpoint:'verificação necessária',banned:'conta restrita',whatsapp_confirm:'confirmar WhatsApp',appeal_submitted:'recurso em análise',marketplace_disabled:'marketplace',messenger_pin:'PIN do Messenger'}[p.provisioningResult.reason]||'requer verificação') : p.provisioningPending ? 'Cadastro pendente' : 'Virtus '+(p.virtusOnline?'Online':'Offline'), p.virtusOnline && !p.provisioningPending && !['blocked','failed'].includes(p.provisioningResult?.state)?'good':'bad'));
         if (p.robeMode === 'veiculos') titleRow.append(buildPill('Modo: Veículos', 'info'));
         else titleRow.append(buildPill('Modo: Itens', 'info'));
         const gatewayPills = buildGatewayProxyPills(p);
@@ -3384,7 +3384,7 @@
           }
 
           // Pill — Por que não abriu (whyNotOpen)
-          if (typeof p.whyNotOpen === "string" && p.whyNotOpen.length > 0) {
+          if (!p.captchaCheckpoint && typeof p.whyNotOpen === "string" && p.whyNotOpen.length > 0) {
             const whyPill = buildPill(`Por que não abriu: ${p.whyNotOpen}`, 'bad');
             whyPill.title = `Motivo registrado pelo sistema para não abrir o navegador.`;
             titleRow.append(whyPill);
