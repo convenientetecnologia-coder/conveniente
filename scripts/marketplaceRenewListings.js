@@ -840,21 +840,8 @@ async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, ex
       return { ok: true, reason: 'clicked_and_closed', clicked: true, heldMs: holdMs, processMs: elapsed };
     }
 
-    // Ainda não achou Renovar real — scroll leve e tenta de novo.
-    try {
-      await page.evaluate(() => {
-        try {
-          const roots = document.querySelectorAll('[role="dialog"],[aria-modal="true"]');
-          for (const root of roots) {
-            try {
-              root.scrollTop = (root.scrollTop || 0) + 320;
-            } catch {}
-          }
-          const el = document.scrollingElement || document.documentElement;
-          if (el) el.scrollBy(0, 280);
-        } catch {}
-      });
-    } catch {}
+    // Control readiness scrolls only the selected target into view.
+    // A rejected confirmation must not scroll the Selling page behind the dialog.
     await humanPause(800, 1400);
   }
 

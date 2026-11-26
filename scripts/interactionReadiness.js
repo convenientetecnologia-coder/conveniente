@@ -24,7 +24,9 @@ function inspectElement(el,allowLoading=false,allowAriaHidden=false){
  const r=el.getBoundingClientRect();if(r.width<2||r.height<2)return {ready:false,reason:'empty_target_bounds'};
  if(r.bottom<0||r.top>=innerHeight||r.right<0||r.left>=innerWidth){el.scrollIntoView({block:'center',inline:'nearest'});return {ready:false,reason:'target_outside_viewport'}}
  let left=Math.max(0,r.left),top=Math.max(0,r.top),right=Math.min(innerWidth,r.right),bottom=Math.min(innerHeight,r.bottom);
- for(let parent=el.parentElement;parent;parent=parent.parentElement){const ps=getComputedStyle(parent),pr=parent.getBoundingClientRect();if(/hidden|auto|scroll|clip/.test(ps.overflowX)){left=Math.max(left,pr.left+parent.clientLeft);right=Math.min(right,pr.left+parent.clientLeft+parent.clientWidth)}if(/hidden|auto|scroll|clip/.test(ps.overflowY)){top=Math.max(top,pr.top+parent.clientTop);bottom=Math.min(bottom,pr.top+parent.clientTop+parent.clientHeight)}}
+ const centerHit=document.elementFromPoint((left+right)/2,(top+bottom)/2);
+ const centerOwn=centerHit&&(centerHit===el||el.contains(centerHit));
+ if(!centerOwn)for(let parent=el.parentElement;parent;parent=parent.parentElement){const ps=getComputedStyle(parent),pr=parent.getBoundingClientRect();if(/hidden|auto|scroll|clip/.test(ps.overflowX)){left=Math.max(left,pr.left+parent.clientLeft);right=Math.min(right,pr.left+parent.clientLeft+parent.clientWidth)}if(/hidden|auto|scroll|clip/.test(ps.overflowY)){top=Math.max(top,pr.top+parent.clientTop);bottom=Math.min(bottom,pr.top+parent.clientTop+parent.clientHeight)}}
  if(right-left<2||bottom-top<2){el.scrollIntoView({block:'center',inline:'nearest'});return {ready:false,reason:'target_clipped'}}
  const x=(left+right)/2,y=(top+bottom)/2;
  const hit=document.elementFromPoint(x,y);if(!hit||!(hit===el||el.contains(hit)))return {ready:false,reason:'target_covered'};
@@ -50,7 +52,9 @@ async function controlHandle(page,labels,{exact=false,withinDialog=false,exclude
    if(r.width<2||r.height<2||style.visibility==='hidden'||style.display==='none'||Number(style.opacity)===0||el.disabled||el.getAttribute('aria-disabled')==='true'||el.closest('[aria-busy="true"],[aria-disabled="true"],[inert]')||(hidden&&!staleIdentityRoot))continue;
    if(r.bottom<=0||r.top>=innerHeight||r.right<=0||r.left>=innerWidth){offscreen=offscreen||el;continue}
    let left=Math.max(0,r.left),top=Math.max(0,r.top),right=Math.min(innerWidth,r.right),bottom=Math.min(innerHeight,r.bottom);
- for(let parent=el.parentElement;parent;parent=parent.parentElement){const ps=getComputedStyle(parent),pr=parent.getBoundingClientRect();if(/hidden|auto|scroll|clip/.test(ps.overflowX)){left=Math.max(left,pr.left+parent.clientLeft);right=Math.min(right,pr.left+parent.clientLeft+parent.clientWidth)}if(/hidden|auto|scroll|clip/.test(ps.overflowY)){top=Math.max(top,pr.top+parent.clientTop);bottom=Math.min(bottom,pr.top+parent.clientTop+parent.clientHeight)}}
+ const centerHit=document.elementFromPoint((left+right)/2,(top+bottom)/2);
+ const centerOwn=centerHit&&(centerHit===el||el.contains(centerHit));
+ if(!centerOwn)for(let parent=el.parentElement;parent;parent=parent.parentElement){const ps=getComputedStyle(parent),pr=parent.getBoundingClientRect();if(/hidden|auto|scroll|clip/.test(ps.overflowX)){left=Math.max(left,pr.left+parent.clientLeft);right=Math.min(right,pr.left+parent.clientLeft+parent.clientWidth)}if(/hidden|auto|scroll|clip/.test(ps.overflowY)){top=Math.max(top,pr.top+parent.clientTop);bottom=Math.min(bottom,pr.top+parent.clientTop+parent.clientHeight)}}
    if(right-left<2||bottom-top<2){offscreen=offscreen||el;continue}
    const hit=document.elementFromPoint((left+right)/2,(top+bottom)/2);
    if(hit&&(hit===el||el.contains(hit)))return el;

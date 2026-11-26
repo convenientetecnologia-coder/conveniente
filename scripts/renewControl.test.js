@@ -94,3 +94,15 @@ test('renew dialog can be identified by its accessible label when the visible he
   assert.equal(await page.evaluate(()=>window.good),true);
  } finally {await browser.close();}
 });
+
+test('painted button center remains clickable beneath inline overflow ancestors with zero client dimensions', {timeout:15000}, async () => {
+ const browser=await require('puppeteer').launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',args:['--no-sandbox']});
+ try {
+  const page=await browser.newPage();
+  await page.setContent('<div role="dialog" aria-label="Renovar classificados"><h2>Renovar classificados</h2><span style="overflow:hidden"><div role="button" aria-label="Renovar" tabindex="0" style="display:inline-flex;width:200px;height:40px" onclick="window.good=true"><span>Renovar</span></div></span></div>');
+  assert.equal(await page.evaluate(()=>document.querySelector('span').clientWidth),0);
+  const click=extract('clickRenewConfirmInDialog','async function clickRenewConfirm(');
+  assert.equal((await click(page)).ok,true);
+  assert.equal(await page.evaluate(()=>window.good),true);
+ } finally { await browser.close(); }
+});
