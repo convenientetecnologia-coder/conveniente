@@ -5,7 +5,8 @@ function eligible(want,manifest){
  const freshTechnical=require('./stockProvisionRetry').isTransient(flow.error)&&Number(flow.at)>Number(want.credentialRecoveryFlowAt||0)&&Number(flow.at)>Number(want.provisioningResult?.at||0);
  if(Number(want.credentialRecoveryVersion)>=5&&!freshTechnical)return false;
  const flags=manifest?.accountFlags||{},technicalFlag=require('./loginTechnicalRecovery').eligible(flags)||(flags.loginRequired===true&&require('./stockProvisionRetry').isTransient(manifest?.loginTechnicalRecovery?.previousReason)&&manifest?.loginFlow?.stage!=='verified');
- const result=want.provisioningResult||(technicalFlag?{state:'failed',error:flags.loginRemediateFailedReason}:null);
+ const budgetFlag=flags.loginRequired===true&&flags.loginRemediateFailedReason==='login_attempt_budget'&&!['password_rejected','credentials_rejected'].includes(flow.stage);
+ const result=want.provisioningResult||((technicalFlag||budgetFlag)?{state:'failed',error:flags.loginRemediateFailedReason}:null);
  if(!result||!['blocked','failed'].includes(result.state))return false;
  if(['banned','captchaCheckpoint','idVirtus','identityRequired','identitySubmitted','twoFactor','whatsappConfirm','accountCodePhone','accountCodeWhatsapp','marketplaceDisabled','appealSubmitted'].some(k=>flags[k]===true))return false;
  const attempts=Number(flags.loginAttemptCount||0);

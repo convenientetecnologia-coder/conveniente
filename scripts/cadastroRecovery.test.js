@@ -18,6 +18,13 @@ test('new technical failure after version four can requeue once without clearing
 });
 const manifest={login:'fixture',password:'fixture',cookies:[{name:'c_user',value:'123'},{name:'xs',value:'fixture'}],accountFlags:{loginAttemptCount:0}};
 
+test('legacy two-attempt budget flag without cadastro result can use the third allowed submission',()=>{
+ const m={...manifest,accountFlags:{loginRequired:true,loginRemediateFailed:true,loginRemediateFailedReason:'login_attempt_budget',loginAttemptCount:2}};
+ assert.equal(eligible({credentialRecoveryVersion:4},m),true);
+ assert.equal(eligible({credentialRecoveryVersion:5},m),false);
+ assert.equal(eligible({credentialRecoveryVersion:4},{...m,accountFlags:{...m.accountFlags,loginAttemptCount:3}}),false);
+});
+
 test('rollout revisits old continue and Messenger blocks once, preserving the three-submit boundary',()=>{
  for(const error of ['still_login_required:aymh_continue','still_login_required:messenger_page_not_available','login_attempt_budget']){
   const w={credentialRecoveryVersion:4,provisioningResult:{state:'blocked',error}};
