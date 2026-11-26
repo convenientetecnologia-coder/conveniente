@@ -115,6 +115,11 @@ async function submit(page, { login, password, openFresh, onProgress = async () 
         ready = await page.evaluate(() => {
           if (!document.body || document.readyState === 'loading') return false;
           const text = document.body.innerText.trim();
+          const dialog = [...document.querySelectorAll('[role="dialog"],[aria-modal="true"]')].find(el =>
+            el.getClientRects().length && /Pedido inv\u00e1lido/i.test(el.innerText) &&
+            /We could not validate your request, please try starting the flow from beginning/i.test(el.innerText));
+          if (dialog) return 'confirmed_checkpoint';
+
           if (/senha incorreta|incorrect password|incorrect login|informações de login incorretas|ocorreu um erro|an error occurred/i.test(text)) return true;
           const visible = el => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
           if ([...document.querySelectorAll('input[type="password"],input[name="pass"]')].some(visible)) return false;
@@ -122,6 +127,9 @@ async function submit(page, { login, password, openFresh, onProgress = async () 
         });
       } catch (error) {
         if (!/context.*destroyed|cannot find context|inspected target navigated/i.test(String(error.message))) throw error;
+      }
+      if (ready === 'confirmed_checkpoint') {
+        return {ok:false, submitted:true, entry, terminal:'captcha_checkpoint', error:'captcha_after_cookie_continue_password'};
       }
       if (ready) {
         if (!readySince) readySince = Date.now();
