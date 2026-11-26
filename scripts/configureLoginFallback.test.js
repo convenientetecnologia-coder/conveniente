@@ -19,7 +19,7 @@ test('rejected cookies reach one actual credential attempt in the configure hand
  assert.ok(start>0&&end>start);const calls=[];
  const result=await vm.runInNewContext('(async()=>{'+source.slice(start,end)+';return driven})()',{
   require:name=>name==='./configureLoginFallback'?{run:args=>fallback.run({...args,attempt:async()=>{calls.push('password');return {ok:true}}})}:require(name),
-  browserHelper:{detectLoginRequired:async()=>({loginRequired:true,reason:'login_form'})},rr:'login_form',workPage:{goto:async()=>calls.push('messages')},nome:'fixture',login2:'fixture',password2:'fixture',ctrl:{browser:{__ctCadastroProxy:{assertHealthy(){calls.push('healthy')},noteStage(){}}}},
+  continuedPasswordSubmitted:false,browserHelper:{detectLoginRequired:async()=>({loginRequired:true,reason:'login_form'})},rr:'login_form',workPage:{goto:async()=>calls.push('messages')},nome:'fixture',login2:'fixture',password2:'fixture',ctrl:{browser:{__ctCadastroProxy:{assertHealthy(){calls.push('healthy')},noteStage(){}}}},
   recordLoginFlow:async()=>{},refundLoginAttemptCount:async()=>{},readLoginAttemptCount:async()=>0,LOGIN_ATTEMPT_MAX:2,bumpLoginAttemptCount:async()=>{calls.push('budget');return 1},stopLoginAfterBudget:async()=>{throw Error('unexpected')},provisionAudit:{append(){}},Date,Error
  });
  assert.equal(result.ok,true);assert.deepEqual(calls.filter(c=>c!=='healthy'),['budget','password','messages']);

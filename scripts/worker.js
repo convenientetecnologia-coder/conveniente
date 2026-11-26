@@ -13987,8 +13987,9 @@ const handlers = {
             });
           } catch {}
 
+          let continuedPasswordSubmitted = false;
           const driven = await require('./configureLoginFallback').run({page:workPage,nome,login:login2,password:password2,maxAttempts:3,
-            onProgress:event=>recordLoginFlow(nome,event),refund:()=>refundLoginAttemptCount(nome),
+            onProgress:event=>{if(event.entry==='continue'&&event.submitted===true)continuedPasswordSubmitted=true;return recordLoginFlow(nome,event);},refund:()=>refundLoginAttemptCount(nome),
             assertHealthy:()=>ctrl.browser.__ctCadastroProxy?.assertHealthy(),
             resume:async()=>{if(rr!=='trust_device'&&(await browserHelper.detectLoginRequired(workPage))?.reason!=='trust_device')return null;const pc=require('./pcSessionLogin');const trust=await pc.clickTrustThisDevice(workPage,nome);if(trust?.left===true){const saved=await pc.persistFreshSessionCookies(workPage,nome);if(saved?.ok)return {ok:true,via:'trust_device_resume'};}return {ok:false,terminal:'trust_device',error:'trust_device_unconfirmed'};},
             begin:async()=>{
@@ -13997,6 +13998,21 @@ const handlers = {
               provisionAudit.append({ts:Date.now(),event:'login_attempt_begin',nome,source:'configure',n,max:LOGIN_ATTEMPT_MAX});
               ctrl.browser.__ctCadastroProxy?.noteStage('credential_login');return true;
             }});
+          if (continuedPasswordSubmitted) {
+            const checkpointSignature = await workPage.evaluate(() => {
+              const text = String(document.body?.innerText || '');
+              return /Pedido inválido/i.test(text) &&
+                /We could not validate your request, please try starting the flow from beginning/i.test(text);
+            }).catch(() => false);
+            if (checkpointSignature) {
+              await setCaptchaCheckpointFlag(nome, {
+                reason: 'captcha_after_cookie_continue_password',
+                source: 'configure_login_fallback',
+                url: workPage.url()
+              });
+              throw Error('captcha_checkpoint');
+            }
+          }
           if(driven?.ok!==true&&require('./stockProvisionRetry').isTransient(driven?.error))throw Error(driven.error);
           if(['password_rejected','credentials_rejected'].includes(driven?.error))return {ok:false,error:driven.error};
           if (driven && driven.terminal) {
