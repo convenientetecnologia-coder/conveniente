@@ -2700,18 +2700,6 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
       await clearAccountFlags(nome, ['captchaCheckpoint']);
       return;
     }
-    if (already) {
-      robeMeta[nome] = robeMeta[nome] || {};
-      robeMeta[nome].whyNotOpen = 'captcha_checkpoint';
-      try {
-        const ctrl = controllers.get(nome);
-        if (ctrl && isLiveBrowserCtrl(ctrl)) {
-          await ensureTerminalHumanHoldOnce(nome, { reason: `captcha_checkpoint:${String(reason || prev.captchaCheckpointReason || 'captcha').slice(0, 100)}` });
-        }
-      } catch {}
-      try { await snapshotStatusAndWrite(); } catch {}
-      return;
-    }
     await manifestStore.update(nome, (man) => {
       man = man || {};
       man.accountFlags = man.accountFlags || {};
@@ -2723,6 +2711,8 @@ async function setCaptchaCheckpointFlag(nome, { reason = '', source = '', url = 
       man.accountFlags.captchaCheckpointTitle = String(title || '').slice(0, 200);
       // Blindagem: captcha/checkpoint NÃO pode ficar mascarado por "login/cookies falhou".
       delete man.accountFlags.loginRequired;
+      delete man.accountFlags.loginReason;
+      delete man.accountFlags.loginRequiredAt;
       delete man.loginFlow;
       delete man.accountFlags.loginFlow;
       delete man.accountFlags.loginRemediateFailed;
@@ -12545,6 +12535,14 @@ async function completeAccountProvisioning(nome, source, {verifiedAuth=false}={}
 }
 
 async function finishAccountProvisioningResult(nome,result){
+  if (result?.ok !== true && ['captcha_checkpoint','captcha_after_cookie_continue_password'].includes(result?.error)) {
+    await setCaptchaCheckpointFlag(nome, {
+      reason: result.error,
+      source: 'cadastro_terminal_result',
+      confirmedPostPassword: true
+    });
+  }
+
   await recordLoginFlow(nome,result?.ok?{verified:true}:{error:result?.error||'login_not_completed'});
   await require('./accountProvisioningState').settle([{...result,profileName:nome}],{
     update:fn=>fileStore.withDesiredFileLockUpdate(fn),audit:row=>provisionAudit.append(row)
