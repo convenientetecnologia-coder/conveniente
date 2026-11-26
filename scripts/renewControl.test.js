@@ -3,7 +3,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),fs=require(
 const source=fs.readFileSync(require('node:path').join(__dirname,'marketplaceRenewListings.js'),'utf8');
 function extract(name,next,context={}){
  const start=source.indexOf('async function '+name+'('),end=source.indexOf(next,start);
- return vm.runInNewContext(source.slice(start,end)+'\n'+name,{require,Date,...context});
+ return vm.runInNewContext(source.slice(start,end)+'\n'+name,{require,Date,renewalControlDiagnostic:async()=>({fixture:true}),...context});
 }
 test('renew modal ignores background countdown and clicks visible nested control, never hidden duplicate',{timeout:20000},async()=>{
  const browser=await require('puppeteer').launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',args:['--no-sandbox']});
@@ -82,4 +82,15 @@ test('enabled renewal control can be replaced by React while its label, geometry
   assert.equal((await click(page)).ok,true);
   assert.equal(await page.evaluate(()=>window.good),1);
  } finally { await browser.close(); }
+});
+
+test('renew dialog can be identified by its accessible label when the visible heading changes', {timeout:15000}, async () => {
+ const browser=await require('puppeteer').launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',args:['--no-sandbox']});
+ try {
+  const page=await browser.newPage();
+  await page.setContent('<div role="dialog" aria-modal="true" aria-label="Renovar classificados"><p>7 disponíveis</p><div aria-hidden="true"><button disabled aria-label="Renovar">Renovar</button></div><div role="button" aria-label="Renovar" tabindex="0" style="width:160px;height:40px" onclick="window.good=true"><span>Renovar</span></div></div>');
+  const click=extract('clickRenewConfirmInDialog','async function clickRenewConfirm(');
+  assert.equal((await click(page)).ok,true);
+  assert.equal(await page.evaluate(()=>window.good),true);
+ } finally {await browser.close();}
 });

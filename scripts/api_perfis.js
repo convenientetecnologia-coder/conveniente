@@ -1676,6 +1676,20 @@ module.exports = (app, workerClient, fileStore) => {
     }
   });
 
+  // Same manual renewal handler used by the human overlay.
+  app.post('/api/perfis/:nome/renew-listings', async (req, res) => {
+    const nome = req.params.nome;
+    try {
+      assertPerfilExists(fileStore, nome);
+      const result = await workerClient.sendWorkerCommand('renew-listings', {
+        nome, mode:'manual', closeAfter:false
+      }, {timeoutMs:35*60*1000});
+      return res.json(result);
+    } catch (error) {
+      return res.json({ok:false,error:String(error.message||error)});
+    }
+  });
+
   // Invocar humano
   app.post('/api/perfis/:nome/invoke-human', async (req, res) => {
     const nome = req.params.nome;
