@@ -109,7 +109,7 @@ test('renovação conecta só após localizar botão real e relê posição ante
   const end = source.indexOf('async function clickRenewConfirm(', start);
   const calls = [];
   const fn = vm.runInNewContext(source.slice(start, end) + '\nclickRenewConfirmInDialog', {
-    require:()=>({waitControl:async()=>({ok:true})}),
+    require:id=>id==='./interactionLease'?{wait:async()=>{}}:{waitControl:async()=>{calls.push('find');return {ok:true}},clickControl:async()=>{calls.push('click');return {ok:true}}},
     safeEvaluate: async () => { calls.push('find'); return { ok: true, x: 12, y: 20 }; },
     humanPause: async () => {}, randInt: () => 1
   });

@@ -17,16 +17,16 @@ async function begin(options,{request=ipc.request,pollMs=1000,setTimer=setInterv
   }
  }catch(error){try{await rpc('cancel')}catch{}throw error}
  finally{readiness.delete(id)}
- let last=granted.snapshot,lastAt=Date.now(),closed=false,checking=false,operationStarted=false;
- const refresh=response=>{if(response.snapshot){last=response.snapshot;lastAt=Date.now()}return response};
- const timer=setTimer(async()=>{if(closed||checking)return;checking=true;try{refresh(await rpc('status'));if(last?.healthy===false||last?.absoluteDeadline&&Date.now()>=last.absoluteDeadline*1000)await api.close()}catch{last={...last,healthy:false}}finally{checking=false}},2000);timer.unref?.();
+ let last=granted.snapshot,lastAt=Date.now(),closed=false,checking=false,operationStarted=false,statusError=null;
+ const refresh=response=>{if(response.snapshot){last=response.snapshot;lastAt=Date.now();statusError=null}return response};
+ const timer=setTimer(async()=>{if(closed||checking)return;checking=true;try{refresh(await rpc('status'));if(last?.healthy===false||last?.absoluteDeadline&&Date.now()>=last.absoluteDeadline*1000)await api.close()}catch(error){statusError=String(error.message||error).slice(0,160);last={...last,healthy:false}}finally{checking=false}},2000);timer.unref?.();
  const assertHealthy=()=>{if(last?.healthy!==true||Date.now()-lastAt>30000||last.absoluteDeadline&&Date.now()>=last.absoluteDeadline*1000)throw Error('cp2_transport_not_healthy')};
  const api={operationId:granted.operationId,hop:granted.hop,
   async possibleSideEffect(stage){assertHealthy();refresh(await rpc('effect',{stage}));assertHealthy()},
   async confirm(stage){assertHealthy();refresh(await rpc('confirm',{stage}));},
   async close(){if(closed)return;closed=true;clearTimer(timer);await rpc('close',{operationId:granted.operationId})},
   async reconcileClosed(){return (await rpc('reconcile',{operationId:granted.operationId})).closed===true},
-  snapshot(){return {...last,healthy:!closed&&last?.healthy===true&&Date.now()-lastAt<=30000&&(!last.absoluteDeadline||Date.now()<last.absoluteDeadline*1000)}},
+  snapshot(){return {...last,closed,statusError,statusAgeMs:Date.now()-lastAt,healthy:!closed&&last?.healthy===true&&Date.now()-lastAt<=30000&&(!last.absoluteDeadline||Date.now()<last.absoluteDeadline*1000)}},
  };
  try{await rpc('start');operationStarted=true;return api}finally{if(!operationStarted)await api.close().catch(()=>{})}
 }

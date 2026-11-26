@@ -1,5 +1,14 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),{Coordinator}=require('./indexCoordinator'),worker=require('./indexClient');
+test('single IPC status failure is unhealthy until the same operation receives a fresh status',async()=>{
+ let timer,fail=false;const state={healthy:true,absoluteDeadline:Math.floor(Date.now()/1000)+60};
+ const remote=await worker.begin({nome:'fixture',purpose:'publish'},{request:async m=>{
+  if(m.action==='status'&&fail)throw Error('timeout');
+  return {ok:true,state:'granted',operationId:'same',snapshot:state};
+ },setTimer:fn=>{timer=fn;return {unref(){}}},clearTimer:()=>{}});
+ fail=true;await timer();assert.equal(remote.snapshot().healthy,false);assert.equal(remote.snapshot().statusError,'timeout');assert.equal(remote.snapshot().closed,false);
+ fail=false;await timer();assert.equal(remote.snapshot().healthy,true);assert.equal(remote.snapshot().statusError,null);assert.equal(remote.operationId,'same');await remote.close();
+});
 test('worker declares work; Index obtains, confirms and releases the actual chair',async()=>{
  const events=[];let phase='active',proved=false,readyCalls=0,cleared=0;
  const broker=new Coordinator({acquire:async options=>{events.push('index_acquire');assert.equal(await options.isReady(),true);return {operationId:'fixture-operation',hop:{host:'127.0.0.1',port:41004},snapshot:()=>({phase,healthy:true}),possibleSideEffect:async()=>events.push('index_effect'),confirm:async()=>events.push('index_confirm'),close:async()=>{events.push('index_release');phase='release_requested'},reconcileClosed:async()=>proved}}});

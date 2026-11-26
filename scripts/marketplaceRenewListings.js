@@ -91,7 +91,7 @@ function normalizeTxt(s) {
 }
 
 async function safeEvaluate(page, fn, ...args) {
-  require('./interactionLease').assert(page);
+  await require('./interactionLease').wait(page);
   try {
     return await page.evaluate(fn, ...args);
   } catch {
@@ -456,10 +456,13 @@ async function waitRenewScreenStable(page, { onProgress, timeoutMs = RENEW_SCREE
   while (now() - t0 < timeoutMs) {
     const snap = await safeEvaluate(page, () => {
       const norm = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/\s+/g, ' ').trim();
-      const text = norm(document.body && (document.body.innerText || document.body.textContent));
+      const visible=el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>2&&r.height>2&&s.display!=='none'&&s.visibility!=='hidden'&&!el.closest('[aria-hidden="true"]')};
+      const isRenew=text=>/renovar classificados|renew listings|renew your listings/.test(norm(text));
+      const root=[...document.querySelectorAll('[role="dialog"],[aria-modal="true"]')].find(el=>visible(el)&&isRenew(el.innerText))||document.querySelector('[role="main"]')||document.body;
+      const text = norm(root && (root.innerText || root.textContent));
       const hasHeader = text.includes('renovar classificados') || text.includes('renew listings') || text.includes('renew your listings');
       let renewBtn = null;
-      for (const el of document.querySelectorAll('[role="button"],button')) {
+      for (const el of root.querySelectorAll('[role="button"],button')) {
         const aria = norm(el.getAttribute('aria-label'));
         const label = norm(el.innerText || el.textContent);
         if (!['renovar', 'renew'].includes(aria) && !['renovar', 'renew'].includes(label)) continue;
@@ -470,8 +473,6 @@ async function waitRenewScreenStable(page, { onProgress, timeoutMs = RENEW_SCREE
         renewBtn = { enabled };
         if (enabled) break;
       }
-      const root=document.querySelector('[role="dialog"],[aria-modal="true"]')||document.querySelector('[role="main"]')||document.body;
-      const visible=el=>{const r=el.getBoundingClientRect(),s=getComputedStyle(el);return r.width>2&&r.height>2&&s.display!=='none'&&s.visibility!=='hidden'&&!el.closest('[aria-hidden="true"]')};
       const loading=document.readyState==='loading'||!!(root&&[...root.querySelectorAll('[aria-busy="true"],[role="progressbar"],[role="status"]')].some(el=>visible(el)&&(el.getAttribute('aria-busy')==='true'||el.getAttribute('role')==='progressbar'||/carregando|loading/i.test(el.innerText))));
       const signature=text.slice(0,16000);
       return { hasHeader, renewBtn, loading, signature };
@@ -642,341 +643,23 @@ async function waitRenewDialogClosed(page, {
 /**
  * Clique dedicado no botão Renovar REAL do rodapé (nunca Cancelar, nunca ghost).
  * DOM FB: ghost = aria-disabled + aria-hidden + tabindex=-1; real = tabindex=0.
- * Preferência: mais à direita / mais embaixo; clique via mouse (coords).
+ * Alvo visível, habilitado, estável e alcançável pelo mouse dentro do modal.
  */
 async function clickRenewConfirmInDialog(page, { beforeClick = null, onClick = null } = {}) {
-  const stable = await require('./interactionReadiness').waitControl(page,['Renovar','Renew'],{exact:true,withinDialog:true,timeoutMs:60000});
-  if (!stable.ok) return {ok:false,reason:stable.reason};
-  // 1) Rola o dialog/modal até o rodapé (botões Cancelar | Renovar).
-  try {
-    await page.evaluate(() => {
-      try {
-        const roots = Array.from(
-          document.querySelectorAll('[role="dialog"],[aria-modal="true"],div[role="alertdialog"]')
-        );
-        if (!roots.length) {
-          try {
-            window.scrollTo(0, document.body.scrollHeight || 0);
-          } catch {}
-          return;
-        }
-        for (const root of roots) {
-          try {
-            root.scrollTop = root.scrollHeight || 0;
-          } catch {}
-          try {
-            const all = root.querySelectorAll('div,section,main,[role="main"]');
-            for (const el of all) {
-              if (!el) continue;
-              try {
-                if ((el.scrollHeight || 0) > (el.clientHeight || 0) + 40) {
-                  el.scrollTop = el.scrollHeight || 0;
-                }
-              } catch {}
-            }
-          } catch {}
-        }
-        try {
-          window.scrollTo(0, document.body.scrollHeight || 0);
-        } catch {}
-      } catch {}
-    });
-  } catch {}
-  await humanPause(700, 1400);
-
-  // 2) Localiza só o Renovar real e devolve coordenadas de clique.
-  const found = await safeEvaluate(page, () => {
-    const norm = (s) => {
-      try {
-        return String(s || '')
-          .normalize('NFD')
-          .replace(/[\u0300-\u036f]/g, '')
-          .toLowerCase()
-          .replace(/\s+/g, ' ')
-          .trim();
-      } catch {
-        return String(s || '').toLowerCase().trim();
-      }
-    };
-    const isGhostOrDisabled = (el) => {
-      try {
-        if (!el) return true;
-        if (el.disabled === true) return true;
-        if (String(el.getAttribute('aria-disabled') || '').toLowerCase() === 'true') return true;
-        if (String(el.getAttribute('aria-hidden') || '').toLowerCase() === 'true') return true;
-        if (String(el.getAttribute('tabindex') || '') === '-1') return true;
-        if (/\bdisabled\b/i.test(String(el.className || ''))) return true;
-        return false;
-      } catch {
-        return true;
-      }
-    };
-    const isCancel = (n) => {
-      if (!n) return false;
-      return (
-        n === 'cancelar' ||
-        n === 'cancel' ||
-        n === 'fechar' ||
-        n === 'close' ||
-        n.startsWith('cancel') ||
-        n.includes('cancelar')
-      );
-    };
-    const isRenewExact = (n) => n === 'renovar' || n === 'renew';
-
-    let roots = Array.from(
-      document.querySelectorAll('[role="dialog"],[aria-modal="true"],div[role="alertdialog"]')
-    );
-    if (!roots.length) roots = [document.body];
-
-    const candidates = [];
-    const rejected = [];
-    for (const root of roots) {
-      if (!root) continue;
-      const nodes = root.querySelectorAll('[role="button"],button');
-      for (const el of nodes) {
-        if (!el) continue;
-        let aria = '';
-        let txt = '';
-        let tab = '';
-        try {
-          aria = String(el.getAttribute('aria-label') || '');
-        } catch {}
-        try {
-          // Só texto próprio (evita pai que concatena Cancelar+Renovar).
-          txt = String(el.innerText || '').slice(0, 80);
-        } catch {}
-        try {
-          tab = String(el.getAttribute('tabindex') || '');
-        } catch {}
-        const nAria = norm(aria);
-        const nTxt = norm(txt);
-        if (isCancel(nAria) || isCancel(nTxt)) {
-          rejected.push({ why: 'cancel', aria: aria.slice(0, 40), txt: txt.slice(0, 40), tab });
-          continue;
-        }
-        if (!isRenewExact(nAria) && !isRenewExact(nTxt)) continue;
-        if (isGhostOrDisabled(el)) {
-          rejected.push({ why: 'ghost_or_disabled', aria: aria.slice(0, 40), txt: txt.slice(0, 40), tab });
-          continue;
-        }
-        let rect = { bottom: 0, right: 0, width: 0, height: 0, top: 0, left: 0 };
-        try {
-          const r = el.getBoundingClientRect();
-          rect = {
-            bottom: Number(r.bottom || 0),
-            right: Number(r.right || 0),
-            width: Number(r.width || 0),
-            height: Number(r.height || 0),
-            top: Number(r.top || 0),
-            left: Number(r.left || 0)
-          };
-        } catch {}
-        if (!(rect.width > 2 && rect.height > 2)) {
-          rejected.push({ why: 'zero_size', aria: aria.slice(0, 40), txt: txt.slice(0, 40), tab });
-          continue;
-        }
-        candidates.push({
-          aria: aria.slice(0, 80),
-          txt: txt.slice(0, 80),
-          tab,
-          bottom: rect.bottom,
-          right: rect.right,
-          width: rect.width,
-          height: rect.height,
-          x: rect.left + rect.width / 2,
-          y: rect.top + rect.height / 2
-        });
-      }
-    }
-
-    if (!candidates.length) {
-      return {
-        ok: false,
-        reason: 'renew_btn_not_in_dialog',
-        rejected: rejected.slice(0, 12),
-        roots: roots.length
-      };
-    }
-
-    // Primário FB: mais à direita (Renovar), depois mais embaixo.
-    candidates.sort((a, b) => (b.right - a.right) || (b.bottom - a.bottom));
-    const best = candidates[0];
-    try {
-      // scrollIntoView do elemento real via hit-test no ponto.
-      const el = document.elementFromPoint(best.x, best.y);
-      if (el && typeof el.scrollIntoView === 'function') {
-        el.scrollIntoView({ block: 'center', inline: 'nearest' });
-      }
-    } catch {}
-    // Recalcula centro após scroll (mesmo critério: real, direita).
-    let x = best.x;
-    let y = best.y;
-    try {
-      const again = [];
-      const nodes = document.querySelectorAll('[role="button"],button');
-      for (const el of nodes) {
-        if (!el) continue;
-        if (isGhostOrDisabled(el)) continue;
-        let aria = '';
-        let txt = '';
-        try { aria = norm(el.getAttribute('aria-label') || ''); } catch {}
-        try { txt = norm(el.innerText || '').slice(0, 80); } catch {}
-        if (isCancel(aria) || isCancel(txt)) continue;
-        if (!isRenewExact(aria) && !isRenewExact(txt)) continue;
-        const r = el.getBoundingClientRect();
-        if (!(r.width > 2 && r.height > 2)) continue;
-        again.push({
-          x: r.left + r.width / 2,
-          y: r.top + r.height / 2,
-          bottom: r.bottom,
-          right: r.right,
-          aria: aria.slice(0, 80),
-          txt: txt.slice(0, 80)
-        });
-      }
-      if (again.length) {
-        again.sort((a, b) => (b.right - a.right) || (b.bottom - a.bottom));
-        const pick = again[0];
-        x = pick.x;
-        y = pick.y;
-        best.bottom = pick.bottom;
-        best.right = pick.right;
-        best.aria = pick.aria;
-        best.txt = pick.txt;
-      }
-    } catch {}
-
-    return {
-      ok: true,
-      x,
-      y,
-      aria: best.aria,
-      txt: best.txt,
-      tab: best.tab,
-      bottom: best.bottom,
-      right: best.right,
-      candidates: candidates.length,
-      rejectedCancel: rejected.filter((z) => z.why === 'cancel').length,
-      rejectedGhost: rejected.filter((z) => z.why === 'ghost_or_disabled').length
-    };
-  });
-
-  if (!found || !found.ok) {
-    return found && typeof found === 'object' ? found : { ok: false, reason: 'evaluate_null' };
-  }
-
-  const x = Number(found.x);
-  const y = Number(found.y);
-  if (!(Number.isFinite(x) && Number.isFinite(y))) {
-    return { ok: false, reason: 'bad_coords', found };
-  }
-
-  if (beforeClick) {
-    await beforeClick();
-    // A conexão pode levar alguns segundos: relê o botão antes de clicar.
-    return clickRenewConfirmInDialog(page, { onClick });
-  }
-
-  // 3) Clique humano no ponto do Renovar real (nunca .click() em ghost).
-  try {
-    await page.mouse.move(x, y, { steps: randInt(8, 16) });
-  } catch {}
-  await humanPause(280, 700);
-  if (onClick) await onClick();
-  try {
-    await page.mouse.click(x, y, { delay: randInt(55, 160) });
-  } catch {
-    // Fallback: click DOM no elementFromPoint (ainda com filtros).
-    const fb = await safeEvaluate(page, (px, py) => {
-      const norm = (s) => {
-        try {
-          return String(s || '')
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .toLowerCase()
-            .replace(/\s+/g, ' ')
-            .trim();
-        } catch {
-          return String(s || '').toLowerCase().trim();
-        }
-      };
-      let el = null;
-      try {
-        el = document.elementFromPoint(px, py);
-      } catch {}
-      let cur = el;
-      for (let i = 0; i < 8 && cur; i++) {
-        try {
-          const role = String(cur.getAttribute && cur.getAttribute('role') || '').toLowerCase();
-          const tag = String(cur.tagName || '').toLowerCase();
-          if (role === 'button' || tag === 'button') {
-            const aria = norm(cur.getAttribute('aria-label') || '');
-            const txt = norm(cur.innerText || '').slice(0, 40);
-            if (aria === 'cancelar' || txt === 'cancelar' || aria === 'cancel' || txt === 'cancel') {
-              return { ok: false, reason: 'hit_cancel' };
-            }
-            if (String(cur.getAttribute('aria-disabled') || '').toLowerCase() === 'true') {
-              return { ok: false, reason: 'hit_disabled' };
-            }
-            if (String(cur.getAttribute('tabindex') || '') === '-1') {
-              return { ok: false, reason: 'hit_ghost_tabindex' };
-            }
-            if (aria === 'renovar' || aria === 'renew' || txt === 'renovar' || txt === 'renew') {
-              cur.click();
-              return { ok: true, via: 'elementFromPoint' };
-            }
-          }
-        } catch {}
-        try {
-          cur = cur.parentElement;
-        } catch {
-          break;
-        }
-      }
-      return { ok: false, reason: 'elementFromPoint_miss' };
-    }, x, y);
-    if (!(fb && fb.ok)) {
-      return { ok: false, reason: (fb && fb.reason) || 'mouse_click_failed', x, y };
-    }
-    return {
-      ok: true,
-      via: 'elementFromPoint',
-      aria: found.aria,
-      txt: found.txt,
-      bottom: found.bottom,
-      right: found.right,
-      candidates: found.candidates,
-      rejectedCancel: found.rejectedCancel,
-      rejectedGhost: found.rejectedGhost,
-      x,
-      y
-    };
-  }
-
-  return {
-    ok: true,
-    via: 'mouse',
-    aria: found.aria,
-    txt: found.txt,
-    tab: found.tab || null,
-    bottom: found.bottom,
-    right: found.right,
-    candidates: found.candidates,
-    rejectedCancel: found.rejectedCancel,
-    rejectedGhost: found.rejectedGhost,
-    x,
-    y
-  };
+  await require('./interactionLease').wait(page);
+  const controls=require('./interactionReadiness');
+  const options={exact:true,withinSelector:'[role="dialog"],[aria-modal="true"]',timeoutMs:60000};
+  const stable=await controls.waitControl(page,['Renovar','Renew'],options);
+  if(!stable.ok)return {ok:false,reason:stable.reason};
+  if(beforeClick)await beforeClick();
+  // Revalidate after transport/authentication checks; never reuse old coordinates.
+  const rechecked=await controls.waitControl(page,['Renovar','Renew'],options);
+  if(!rechecked.ok)return {ok:false,reason:rechecked.reason};
+  if(onClick)await onClick();
+  const clicked=await controls.clickControl(page,['Renovar','Renew'],options);
+  return clicked.ok?{ok:true,via:clicked.via,attempted:true}:{ok:false,reason:clicked.error||clicked.reason,attempted:true};
 }
 
-/**
- * Clique one-shot em Renovar (dialog).
- * - Nunca Cancelar / nunca ghost (tabindex=-1 / aria-disabled).
- * - Piso mínimo de parede após o clique (UI pode fechar cedo; rede ainda processa).
- * - Tela Renovar precisa sumir de forma estável.
- * - Hold 25–45s SÓ DEPOIS disso (no Selling).
- */
 async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, expectedCount = 0, beforeClick = null, onClick = null, afterConfirm = null } = {}) {
   await progress(page, onProgress, 'click_renew', 'Clicando em Renovar (rodapé real, não Cancelar)...');
   let clicked = false;
@@ -1005,6 +688,7 @@ async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, ex
     }
 
     const hit = await clickRenewConfirmInDialog(page, { beforeClick, onClick });
+    if(hit?.attempted&&hit.ok!==true){audit('renew_confirm_fail',{reason:hit.reason,clicked:true});return {ok:false,reason:hit.reason,clicked:true};}
     if (hit && hit.ok) {
       clicked = true;
       const tClick = now();
@@ -1391,7 +1075,9 @@ async function runMarketplaceRenewListings({
     return { ok: true, renewed: true, renewedCount: null, reason: 'renewed' };
   } catch (e) {
     const msg = (e && e.message) ? String(e.message) : String(e);
-    audit('renew_listings_exception', { error: msg.slice(0, 220), durationMs: now() - startedAt });
+    const lease=isolated?.rail?.operationSnapshot?.();
+    audit('renew_listings_exception', { error: msg.slice(0, 220), durationMs: now() - startedAt,
+      lease:lease?{healthy:lease.healthy,closed:lease.closed,statusError:lease.statusError,statusAgeMs:lease.statusAgeMs,absoluteDeadline:lease.absoluteDeadline}:null });
     return { ok: false, error: msg.slice(0, 220), renewedCount: 0 };
   }
 }
