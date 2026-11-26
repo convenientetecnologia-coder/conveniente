@@ -28,7 +28,7 @@ function evolve(previous, event, now = Date.now()) {
 }
 function summarize(profile) {
   const p = profile || {}, reason = String(p.loginReason || '').toLowerCase();
-  if (p.banned || p.captchaCheckpoint || p.marketplaceDisabled || p.twoFactor || p.idVirtus || p.identityRequired || p.identitySubmitted || /captcha|checkpoint|identity|two_factor|2fa|consent/.test(reason)) return null;
+  if (p.accountCodeEmail || p.accountCodePhone || p.accountCodeWhatsapp || p.whatsappConfirm || p.banned || p.captchaCheckpoint || p.marketplaceDisabled || p.twoFactor || p.idVirtus || p.identityRequired || p.identitySubmitted || /captcha|checkpoint|identity|two_factor|2fa|consent/.test(reason)) return null;
   const flow = p.loginFlow || {};
   if (flow.stage === 'verified' && !p.loginRequired && !p.loginRemediateFailed) return null;
   let key = flow.stage;
