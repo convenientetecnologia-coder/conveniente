@@ -26,3 +26,20 @@ test('uncertain final click is not replayed',async()=>{
  });
  const result=await fn({});assert.equal(result.ok,false);assert.equal(result.clicked,true);assert.equal(calls,1);
 });
+
+test('renew full page clicks the nested enabled footer and ignores disabled Cancel and hidden Renew', {timeout:25000}, async () => {
+ const browser=await require('puppeteer').launch({headless:true,executablePath:'C:/Program Files/Google/Chrome/Application/chrome.exe',args:['--no-sandbox']});
+ try {
+  const page=await browser.newPage();
+  const click=extract('clickRenewConfirmInDialog','async function clickRenewConfirm(');
+  for (const role of ['role="main"','']) {
+   await page.setContent('<section '+role+'><h2>Renovar classificados</h2><p>4 classificados serão renovados</p><div aria-hidden="true"><div role="button" aria-label="Renovar" onclick="window.bad=true">Renovar</div></div><div role="button" aria-label="Renovar" tabindex="0" style="width:200px;height:40px;position:relative" onclick="window.good=(window.good||0)+1"><div role="none"><span>Renovar</span><div style="position:absolute;inset:0"></div></div></div><div aria-hidden="true"><div aria-disabled="true" role="button" aria-label="Cancelar" tabindex="-1" onclick="window.bad=true">Cancelar</div></div></section>');
+   await page.evaluate(()=>{window.good=0;window.bad=false});
+   assert.equal((await click(page)).ok,true);
+   assert.deepEqual(await page.evaluate(()=>({good:window.good,bad:window.bad})),{good:1,bad:false});
+  }
+  await page.setContent('<main><h2>Renovar classificados</h2><button onclick="window.bad=true">Renovar</button></main><div role="dialog">Outra ação</div>');
+  assert.equal((await click(page)).reason,'renew_screen_not_ready');
+  assert.equal(await page.evaluate(()=>!!window.bad),false);
+ } finally { await browser.close(); }
+});

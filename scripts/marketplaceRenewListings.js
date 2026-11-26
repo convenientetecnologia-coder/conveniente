@@ -648,7 +648,25 @@ async function waitRenewDialogClosed(page, {
 async function clickRenewConfirmInDialog(page, { beforeClick = null, onClick = null } = {}) {
   await require('./interactionLease').wait(page);
   const controls=require('./interactionReadiness');
-  const options={exact:true,withinSelector:'[role="dialog"],[aria-modal="true"]',timeoutMs:60000};
+  const withinSelector = await page.evaluate(() => {
+    const norm = text => String(text || '').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
+    const visible = el => {
+      const r = el.getBoundingClientRect(), style = getComputedStyle(el);
+      return r.width > 2 && r.height > 2 && style.display !== 'none' &&
+        style.visibility !== 'hidden' && !el.closest('[aria-hidden="true"],[inert]');
+    };
+    const markers = el => /renovar classificados|renew listings|renew your listings|classificados serao renovados|listings will be renewed/.test(norm(el.innerText));
+    const dialogs = [...document.querySelectorAll('[role="dialog"],[aria-modal="true"],[role="alertdialog"]')].filter(visible);
+    if (dialogs.some(markers)) return '[role="dialog"],[aria-modal="true"],[role="alertdialog"]';
+    // A foreign dialog owns the screen until it is dismissed.
+    if (dialogs.length) return null;
+    const main = [...document.querySelectorAll('[role="main"],main')].find(el => visible(el) && markers(el));
+    if (main) return '[role="main"],main';
+    if (document.body && markers(document.body)) return 'body';
+    return null;
+  });
+  if (!withinSelector) return {ok:false,reason:'renew_screen_not_ready'};
+  const options={exact:true,withinSelector,timeoutMs:60000};
   const stable=await controls.waitControl(page,['Renovar','Renew'],options);
   if(!stable.ok)return {ok:false,reason:stable.reason};
   if(beforeClick)await beforeClick();
@@ -663,6 +681,7 @@ async function clickRenewConfirmInDialog(page, { beforeClick = null, onClick = n
 async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, expectedCount = 0, beforeClick = null, onClick = null, afterConfirm = null } = {}) {
   await progress(page, onProgress, 'click_renew', 'Clicando em Renovar (rodapé real, não Cancelar)...');
   let clicked = false;
+  let lastControlReason = null;
   const audit = (event, data = {}) => {
     try {
       if (typeof onAudit === 'function') onAudit(event, data);
@@ -688,6 +707,7 @@ async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, ex
     }
 
     const hit = await clickRenewConfirmInDialog(page, { beforeClick, onClick });
+    lastControlReason = hit?.reason || null;
     if(hit?.attempted&&hit.ok!==true){audit('renew_confirm_fail',{reason:hit.reason,clicked:true});return {ok:false,reason:hit.reason,clicked:true};}
     if (hit && hit.ok) {
       clicked = true;
@@ -812,7 +832,7 @@ async function clickRenewConfirm(page, { onProgress, onAudit, isStale = null, ex
     audit('renew_confirm_fail', { reason: 'clicked_loop_end_unexpected', clicked: true });
     return { ok: false, reason: 'clicked_loop_end_unexpected', clicked: true };
   }
-  audit('renew_confirm_fail', { reason: 'renew_button_not_found', findMs: now() - tFind0 });
+  audit('renew_confirm_fail', { reason: 'renew_button_not_found', controlReason:lastControlReason, findMs: now() - tFind0 });
   return { ok: false, reason: 'renew_button_not_found' };
 }
 
