@@ -15,8 +15,8 @@ async function waitStable(probe,{timeoutMs=60000,stableMs=1500,pollMs=250,clock=
  }
  return {ok:false,reason:'control_not_stable',waitedMs:clock()-started};
 }
-function inspectElement(el){
- if(document.readyState==='loading'||!document.body||!el||!el.isConnected)return {ready:false};
+function inspectElement(el,allowLoading=false){
+ if(!allowLoading&&document.readyState==='loading'||!document.body||!el||!el.isConnected)return {ready:false};
  const hidden=el.closest('[aria-hidden="true"]');
  const staleIdentityRoot=hidden?.id==='scrollview'&&/^\/checkpoint\/1501092823525282\//.test(location.pathname)&&!hidden.parentElement?.closest('[aria-hidden="true"]');
  if(el.disabled||el.getAttribute('aria-disabled')==='true'||el.closest('[aria-busy="true"],[aria-disabled="true"],[inert]')||(hidden&&!staleIdentityRoot))return {ready:false};
@@ -33,7 +33,7 @@ function inspectElement(el){
 }
 async function waitElement(page,handle,options={}){
  options={...options,timeoutMs:require('./interactionBudget').timeout(page,options.timeoutMs??60000)};
- return waitStable(()=>{require('./interactionLease').assert(page);return page.evaluate(inspectElement,handle)},{...options,isClosed:()=>page.isClosed?.()===true});
+ return waitStable(()=>{require('./interactionLease').assert(page);return page.evaluate(inspectElement,handle,options.allowLoading===true)},{...options,isClosed:()=>page.isClosed?.()===true});
 }
 async function controlHandle(page,labels,{exact=false,withinDialog=false,excludeSubstrings=[],withinSelector=null}={}){
  require('./interactionLease').assert(page);

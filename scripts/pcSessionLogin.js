@@ -1143,6 +1143,9 @@ async function attemptCredentialRelogin(page, nome, { login, password, onProgres
   const user = String(login || '').trim();
   const pass = String(password || '').trim();
   if (!user || !pass) return { ok: false, error: 'missing_credentials' };
+  const welcomeProgress=async event=>{await onProgress(event);try{require('./provisionAudit').append({ts:Date.now(),event:'login_ignore_progress',nome,stage:event.stage,clicked:event.welcomeDismissClicked===true})}catch{}};
+  const alreadyWelcome=await require('./postLoginWelcome').advance(page,{presentOnly:true,authenticated:()=>feedOpened(page),onProgress:welcomeProgress});
+  if(!alreadyWelcome.ok)return alreadyWelcome;
   if (await hackedScreen(page)) return { ok: false, error: 'hacked_review', terminal: 'hacked_review' };
   if (await whatsappScreen(page)) {
     await markWhatsappConfirm(nome);
@@ -1157,7 +1160,7 @@ async function attemptCredentialRelogin(page, nome, { login, password, onProgres
   const form=await require('./credentialForm').submit(page,{login:user,password:pass,openFresh:()=>openFreshLoginPage(page,nome),onProgress});
   if(!form.ok)return form;
   await sleep(800);
-  const welcome=await require('./postLoginWelcome').advance(page,{authenticated:()=>feedOpened(page),onProgress});
+  const welcome=await require('./postLoginWelcome').advance(page,{authenticated:()=>feedOpened(page),onProgress:welcomeProgress});
   if(!welcome.ok)return {...welcome,submitted:true,entry:form.entry};
   const rejected=await credentialRejection(page);
   if(rejected)return {ok:false,error:rejected,submitted:true,entry:form.entry};
@@ -1194,7 +1197,7 @@ async function attemptCredentialRelogin(page, nome, { login, password, onProgres
     return { ok: false, error: auth.error || 'auth_app_code_failed' };
   }
 
-  const finalWelcome=await require('./postLoginWelcome').advance(page,{authenticated:()=>feedOpened(page),onProgress});
+  const finalWelcome=await require('./postLoginWelcome').advance(page,{authenticated:()=>feedOpened(page),onProgress:welcomeProgress});
   if(!finalWelcome.ok)return {...finalWelcome,submitted:true,entry:form.entry};
 
   if (await whatsappScreen(page)) {
